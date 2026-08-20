@@ -1,0 +1,1 @@
+{"id":"t19","files":{"s.txt":"s\n"},"patch":{"s.txt":"s\nss\n"},"test":["python","-c","assert open('s.txt').read()[-1]=='\\n'"],"oracle":{"s.txt":"s\nss\n"}}

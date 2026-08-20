@@ -1,0 +1,1 @@
+{"id":"t16","files":{"p.txt":"p\n"},"patch":{"p.txt":"p\npp\n"},"test":["python","-c","assert open('p.txt').read().startswith('p\\npp')"],"oracle":{"p.txt":"p\npp\n"}}

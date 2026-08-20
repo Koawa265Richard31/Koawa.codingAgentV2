@@ -1,0 +1,1 @@
+{"id":"t08","files":{"h.txt":"h\n"},"patch":{"h.txt":"h\nhh\nhhh\n"},"test":["python","-c","assert open('h.txt').read().count('h')==6"],"oracle":{"h.txt":"h\nhh\nhhh\n"}}

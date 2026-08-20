@@ -1,0 +1,1 @@
+{"id":"t18","files":{"r.txt":"r\n"},"patch":{"r.txt":"r\nr2\n"},"test":["python","-c","assert open('r.txt').read().splitlines()==['r','r2']"],"oracle":{"r.txt":"r\nr2\n"}}

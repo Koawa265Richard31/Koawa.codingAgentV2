@@ -1,0 +1,1 @@
+{"id":"t04","files":{"d.txt":"d\n"},"patch":{"d.txt":"d\nd2\n"},"test":["python","-c","assert len(open('d.txt').readlines())==2"],"oracle":{"d.txt":"d\nd2\n"}}

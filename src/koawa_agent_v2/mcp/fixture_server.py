@@ -1,0 +1,299 @@
+"""Real local MCP stdio fixture server with env-driven fault injection.
+
+Run as ``python -m koawa_agent_v2.mcp.fixture_server``.  The server speaks the
+same Content-Length framed JSON-RPC 2.0 as the MCP stdio transport so tests
+exercise a real subprocess boundary instead of a mock client.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+from typing import Any
+
+
+DEFAULT_PROTOCOL_VERSION = "2025-06-18"
+
+DEFAULT_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "echo",
+        "description": "Echo one bounded string back.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 1000,
+                }
+            },
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fail",
+        "description": "Return a typed error result.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+        "isError": True,
+        "result": {"content": [{"type": "text", "text": "boom"}]},
+    },
+    {
+        "name": "slow",
+        "description": "Return after a configurable delay.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+        "result": {"content": [{"type": "text", "text": "slow-ok"}]},
+    },
+]
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_tools() -> list[dict[str, Any]]:
+    raw = os.environ.get("KOAWA_MCP_FIXTURE_TOOLS_JSON")
+    if not raw:
+        return DEFAULT_TOOLS
+    try:
+        tools = json.loads(raw)
+    except json.JSONDecodeError:
+        return DEFAULT_TOOLS
+    if not isinstance(tools, list):
+        return DEFAULT_TOOLS
+    return [item for item in tools if isinstance(item, dict)]
+
+
+def _parse_message(raw: str) -> dict[str, Any] | None:
+    def pairs(values: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in values:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        document = json.loads(raw, object_pairs_hook=pairs)
+    except (json.JSONDecodeError, ValueError, UnicodeError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+class _FrameReader:
+    def read(self) -> bytes | None:
+        stream = sys.stdin.buffer
+        header = bytearray()
+        while True:
+            line = stream.readline()
+            if not line:
+                return None
+            if line == b"\r\n":
+                break
+            header.extend(line)
+            if len(header) > 8_192:
+                return None
+        text = header.decode("ascii", "ignore").strip()
+        if not text.startswith("Content-Length:"):
+            return None
+        value = text[len("Content-Length:"):].strip()
+        if not value.isdigit():
+            return None
+        length = int(value)
+        if length <= 0 or length > 4_194_304:
+            return None
+        body = stream.read(length)
+        if len(body) != length:
+            return None
+        return body
+
+
+def _write_frame(payload: bytes, lock: threading.Lock) -> None:
+    header = f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii")
+    with lock:
+        sys.stdout.buffer.write(header)
+        sys.stdout.buffer.write(payload)
+        sys.stdout.buffer.flush()
+
+
+def _canonical(document: Any) -> str:
+    return json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def main() -> int:
+    protocol_version = os.environ.get(
+        "KOAWA_MCP_FIXTURE_PROTOCOL_VERSION", DEFAULT_PROTOCOL_VERSION
+    )
+    tools = _load_tools()
+    page_size = _env_int("KOAWA_MCP_FIXTURE_PAGE_SIZE", 2)
+    call_delay_ms = _env_int("KOAWA_MCP_FIXTURE_CALL_DELAY_MS", 0)
+    list_changed_after = _env_int("KOAWA_MCP_FIXTURE_LIST_CHANGED_AFTER_CALLS", 0)
+    unknown_id = _env_bool("KOAWA_MCP_FIXTURE_UNKNOWN_ID_RESPONSE")
+    throw_on_tool = os.environ.get("KOAWA_MCP_FIXTURE_THROW_ON_TOOL")
+    malformed = os.environ.get("KOAWA_MCP_FIXTURE_MALFORMED_FIRST_FRAME", "")
+    huge_frame = _env_int("KOAWA_MCP_FIXTURE_HUGE_FRAME_BYTES", 0)
+    stderr_bytes = _env_int("KOAWA_MCP_FIXTURE_STDERR_BYTES", 0)
+    tools_by_name = {str(tool.get("name", "")): tool for tool in tools}
+
+    if malformed == "garbage":
+        sys.stdout.buffer.write(b"garbage-header\r\n\r\n")
+        sys.stdout.buffer.flush()
+    elif malformed == "bad-length":
+        sys.stdout.buffer.write(b"Content-Length: 999999\r\n\r\n{}")
+        sys.stdout.buffer.flush()
+    if stderr_bytes > 0:
+        sys.stderr.buffer.write(b"x" * stderr_bytes)
+        sys.stderr.buffer.flush()
+
+    initialized = False
+    call_count = 0
+    state_lock = threading.Lock()
+    write_lock = threading.Lock()
+    frame_reader = _FrameReader()
+
+    def respond(request_id: int, result: Any) -> None:
+        payload = _canonical(
+            {"jsonrpc": "2.0", "id": request_id, "result": result}
+        )
+        if huge_frame > 0:
+            payload = payload + " " * max(huge_frame - len(payload.encode("utf-8")), 0)
+        _write_frame(payload.encode("utf-8"), write_lock)
+
+    def respond_error(request_id: int, code: int, message: str) -> None:
+        payload = _canonical(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": code, "message": message},
+            }
+        )
+        _write_frame(payload.encode("utf-8"), write_lock)
+
+    def handle_request(request: dict[str, Any]) -> None:
+        nonlocal initialized, call_count
+        request_id = request.get("id")
+        if not isinstance(request_id, int):
+            return
+        method = request.get("method")
+        if method == "initialize":
+            result = {
+                "protocolVersion": protocol_version,
+                "capabilities": {"tools": {"listChanged": True}},
+                "serverInfo": {"name": "koawa-fixture", "version": "1.0.0"},
+            }
+            respond(request_id, result)
+            return
+        if method == "notifications/initialized":
+            initialized = True
+            return
+        if method == "tools/list":
+            params = request.get("params") or {}
+            cursor = params.get("cursor")
+            start = 0
+            if isinstance(cursor, str) and cursor.isdigit():
+                start = int(cursor)
+            page = tools[start : start + page_size]
+            result: dict[str, Any] = {"tools": page}
+            if start + page_size < len(tools):
+                result["nextCursor"] = str(start + page_size)
+            respond(request_id, result)
+            return
+        if method == "tools/call":
+            if not initialized:
+                respond_error(request_id, -32600, "not initialized")
+                return
+            params = request.get("params") or {}
+            tool_name = params.get("name")
+            tool = tools_by_name.get(tool_name)
+            if unknown_id:
+                respond_error(999999, -32602, "wrong id")
+                return
+            if throw_on_tool is not None and tool_name == throw_on_tool:
+                respond_error(request_id, -32602, "invalid params")
+                return
+            if tool is None:
+                respond_error(request_id, -32602, "unknown tool")
+                return
+            if tool_name == "slow" and call_delay_ms > 0:
+                import time
+
+                time.sleep(call_delay_ms / 1000.0)
+            arguments = params.get("arguments") or {}
+            if tool_name == "echo":
+                value = arguments.get("value", "")
+                result = {
+                    "content": [{"type": "text", "text": _canonical({"echo": value})}]
+                }
+            else:
+                result = dict(tool.get("result") or {})
+                if tool.get("isError"):
+                    result["isError"] = True
+            respond(request_id, result)
+            with state_lock:
+                call_count += 1
+                if list_changed_after > 0 and call_count == list_changed_after:
+                    notification = _canonical(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "notifications/tools/list_changed",
+                        }
+                    )
+                    _write_frame(notification.encode("utf-8"), write_lock)
+            return
+        respond_error(request_id, -32601, "method not found")
+
+    while True:
+        frame = frame_reader.read()
+        if frame is None:
+            return 0
+        try:
+            raw = frame.decode("utf-8", "strict")
+        except UnicodeError:
+            continue
+        message = _parse_message(raw)
+        if message is None:
+            continue
+        if "id" not in message:
+            if message.get("method") == "notifications/initialized":
+                initialized = True
+            continue
+        threading.Thread(
+            target=handle_request,
+            args=(message,),
+            daemon=True,
+        ).start()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
