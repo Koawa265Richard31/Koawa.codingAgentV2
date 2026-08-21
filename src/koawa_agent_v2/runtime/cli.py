@@ -341,14 +341,53 @@ def _scan_turns(store) -> list:
         cursor = page[-1].global_position
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str] | None = None) -> int:
+    """Deterministic legacy entry plus the P0 configured real entry.
+
+    Real mode::
+
+        python -m koawa_agent_v2.runtime.cli run --config cfg.json --task "..."
+        python -m koawa_agent_v2.runtime.cli resume --config cfg.json --turn-id UUID
+        python -m koawa_agent_v2.runtime.cli status --config cfg.json
+        python -m koawa_agent_v2.runtime.cli cancel --config cfg.json --turn-id UUID
+        python -m koawa_agent_v2.runtime.cli doctor --config cfg.json
+
+    Legacy deterministic mode is kept for D15 tests and offline demos::
+
+        python -m koawa_agent_v2.runtime.cli run <db> <repo>
+    """
+    argv = list(sys.argv if argv is None else argv)
+    if len(argv) > 1 and argv[1] in {
+        "run",
+        "resume",
+        "status",
+        "cancel",
+        "doctor",
+        "approvals",
+        "approve",
+        "deny",
+    }:
+        if "--config" in argv or "--help" in argv or "-h" in argv:
+            return _real_main(argv)
+    if len(argv) > 1 and argv[1] in ("--help", "-h"):
+        # Top-level help shows the real argparse surface (subcommands + flags).
+        return _real_main(argv)
     command = argv[1] if len(argv) > 1 else "doctor"
     db = Path(argv[2]) if len(argv) > 2 else Path("agent.sqlite3")
     if command == "run":
+        if len(argv) < 4:
+            print("usage: run <db> <repo>")
+            return 2
         result = run_command(db, Path(argv[3]))
     elif command == "resume":
+        if len(argv) < 5:
+            print("usage: resume <db> <turn_id> <repo>")
+            return 2
         result = resume_command(db, argv[3], Path(argv[4]))
     elif command == "cancel":
+        if len(argv) < 4:
+            print("usage: cancel <db> <turn_id>")
+            return 2
         result = cancel_command(db, argv[3])
     elif command == "status":
         result = status_command(db)
@@ -362,6 +401,88 @@ def main(argv: list[str]) -> int:
         return 2
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def _real_main(argv: list[str]) -> int:
+    import argparse
+
+    from .app import AppRuntime
+    from .config import RuntimeConfigError
+
+    parser = argparse.ArgumentParser(prog="koawa-agent-v2")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("--config", required=True)
+    run_parser.add_argument("--task", default=None)
+    run_parser.add_argument("--task-file", default=None)
+    resume_parser = subparsers.add_parser("resume")
+    resume_parser.add_argument("--config", required=True)
+    resume_parser.add_argument("--turn-id", required=True)
+    cancel_parser = subparsers.add_parser("cancel")
+    cancel_parser.add_argument("--config", required=True)
+    cancel_parser.add_argument("--turn-id", required=True)
+    approvals_parser = subparsers.add_parser("approvals")
+    approvals_parser.add_argument("--config", required=True)
+    approve_parser = subparsers.add_parser("approve")
+    approve_parser.add_argument("--config", required=True)
+    approve_parser.add_argument("--request-id", required=True)
+    approve_parser.add_argument("--no-resume", action="store_true")
+    deny_parser = subparsers.add_parser("deny")
+    deny_parser.add_argument("--config", required=True)
+    deny_parser.add_argument("--request-id", required=True)
+    for name in ("status", "doctor"):
+        subparser = subparsers.add_parser(name)
+        subparser.add_argument("--config", required=True)
+
+    arguments = parser.parse_args(argv[1:])
+    try:
+        app = AppRuntime.from_config_file(arguments.config)
+        if arguments.command == "run":
+            task = _read_task(arguments)
+            outcome = app.run(task)
+        elif arguments.command == "resume":
+            outcome = app.resume(arguments.turn_id)
+        elif arguments.command == "cancel":
+            outcome = app.cancel(arguments.turn_id)
+        elif arguments.command == "approvals":
+            outcome = app.pending_approvals()
+        elif arguments.command == "approve":
+            outcome = app.resolve_approval(
+                arguments.request_id,
+                True,
+                resume_after=not arguments.no_resume,
+            )
+        elif arguments.command == "deny":
+            outcome = app.resolve_approval(
+                arguments.request_id,
+                False,
+                resume_after=False,
+            )
+        elif arguments.command == "status":
+            outcome = app.status()
+        else:
+            outcome = app.doctor()
+        print(outcome.to_json())
+        return 0 if outcome.ok else 1
+    except RuntimeConfigError as exc:
+        print(json.dumps({"ok": False, "code": exc.code, "payload": {}}))
+        return 2
+    except Exception as exc:
+        print(json.dumps({"ok": False, "code": getattr(exc, "code", "runtime_error"), "payload": {}}))
+        return 1
+
+
+def _read_task(arguments) -> str:
+    if arguments.task and arguments.task_file:
+        raise SystemExit("use only one of --task or --task-file")
+    if arguments.task is not None:
+        return arguments.task
+    if arguments.task_file:
+        return Path(arguments.task_file).read_text(encoding="utf-8")
+    return (
+        "Read the repository, make the failing tests pass, verify with the "
+        "configured test profile, inspect git status and diff, then finalize."
+    )
 
 
 if __name__ == "__main__":

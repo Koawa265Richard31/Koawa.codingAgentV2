@@ -25,6 +25,10 @@ from koawa_agent_v2.model.stream import assemble_model_stream
 from koawa_agent_v2.model.openai_client import (
     OpenAICompatibleChatClient,
     OpenAICompatibleClientError,
+    ReasoningEffort,
+    _reasoning_effort_body,
+    _request_body,
+    reasoning_family,
 )
 
 
@@ -199,6 +203,74 @@ class OpenAICompatibleChatClientTest(unittest.TestCase):
         self.assertEqual(["read_file", "search"], [t["function"]["name"] for t in wire["tools"]])
         self.assertNotIn("super-secret-key", opener.request.data.decode("utf-8"))
         self.assertNotIn("super-secret-key", repr(client))
+
+    def test_reasoning_effort_translation_per_family(self) -> None:
+        """抽象档位按 provider/model 家族翻译成各自请求体字段。"""
+        cases = (
+            (
+                "siliconflow",
+                "Qwen/Qwen3.5-35B-A3B",
+                ReasoningEffort.OFF,
+                {"thinking": {"type": "disabled"}},
+            ),
+            (
+                "siliconflow",
+                "Qwen/Qwen3.5-35B-A3B",
+                ReasoningEffort.HIGH,
+                {"thinking": {"type": "enabled"}},
+            ),
+            (
+                "siliconflow",
+                "Qwen/Qwen3-32B",
+                ReasoningEffort.OFF,
+                {"chat_template_kwargs": {"enable_thinking": False}},
+            ),
+            (
+                "openai",
+                "o3-mini",
+                ReasoningEffort.MEDIUM,
+                {"reasoning_effort": "medium"},
+            ),
+        )
+        for provider, model, effort, expected in cases:
+            self.assertEqual(expected, _reasoning_effort_body(provider, model, effort))
+
+    def test_reasoning_effort_unknown_family_fails_closed(self) -> None:
+        self.assertIsNone(reasoning_family("siliconflow", "some/unknown"))
+        with self.assertRaises(OpenAICompatibleClientError) as raised:
+            _reasoning_effort_body("siliconflow", "some/unknown", ReasoningEffort.OFF)
+        self.assertEqual("reasoning_effort_unsupported", raised.exception.code)
+
+    def test_reasoning_effort_off_unsupported_on_openai_reasoning(self) -> None:
+        with self.assertRaises(OpenAICompatibleClientError) as raised:
+            _reasoning_effort_body("openai", "o3-mini", ReasoningEffort.OFF)
+        self.assertEqual("reasoning_effort_off_unsupported", raised.exception.code)
+
+    def test_wire_body_merges_reasoning_and_provider_options(self) -> None:
+        """请求体：canonical + reasoning 字段，raw provider_options 后合并覆盖。"""
+        request = _request(tools=True)
+        request = ModelRequest(
+            model_turn_id=request.model_turn_id,
+            provider="siliconflow",
+            model="Qwen/Qwen3.5-35B-A3B",
+            input_items=request.input_items,
+            max_output_tokens=request.max_output_tokens,
+            tool_definitions=request.tool_definitions,
+        )
+        body = json.loads(
+            _request_body(
+                request,
+                provider_options={"thinking": {"type": "enabled"}},
+                reasoning_effort=ReasoningEffort.OFF,
+            ).decode("utf-8")
+        )
+        # reasoning_effort=off generates disabled, but the raw override wins.
+        self.assertEqual({"type": "enabled"}, body["thinking"])
+
+        plain = json.loads(
+            _request_body(request, reasoning_effort=ReasoningEffort.OFF).decode("utf-8")
+        )
+        self.assertEqual({"type": "disabled"}, plain["thinking"])
 
     def test_interleaved_multiple_tool_calls_complete_in_canonical_order(self) -> None:
         """两个调用的 argument delta 可交错，但 call identity 和最终顺序不能串。"""

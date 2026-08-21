@@ -211,14 +211,65 @@ D14 adds trace, deterministic failure injection, and a 20-task eval harness:
 - Trace is wired into the model (AgentLoop), tool/ledger (LedgerExecutor), and
   MCP (McpSession) production paths via optional `trace_store`/`correlation_id`.
 
-D15 ships the minimal durable CLI and the interview package:
+D15 ships the durable CLI, the real provider assembly, and the interview package:
 
-- `run / resume / status / cancel / doctor` commands drive one durable task
-  through Registry → Policy → Ledger → patch → evidence final, and rebuild or
-  resume state from SQLite.
+- The deterministic `run / resume / status / cancel / doctor` commands remain
+  offline-testable; `--config` mode wires a real OpenAI-compatible provider into
+  Registry → Policy/Approval → Ledger → patch → test/git/diff → evidence final,
+  and `approvals / approve / deny` close the durable approval loop.
 - The dispatch-contract tests prove the built-in and MCP entries refuse raw
   execution once policy-bound (subagent entry refused via D11 write allowlist);
   D6/D7/D8 kill fixtures cover real subprocess crash windows.
+
+## Run the real P0 provider chain (optional, network + key required)
+
+The P0 assembly connects a real OpenAI-compatible provider to the same durable
+chain: verified coding registry -> policy/approval -> ledger -> patch/test/git/
+finalize -> checkpoint/resume. Config template:
+[`examples/p0_config.example.json`](examples/p0_config.example.json).
+
+Install the CLI once (Python 3.12+), then the `koawa-agent-v2` entry point is
+available in any shell:
+
+```powershell
+py -3.14 -m pip install -e .
+koawa-agent-v2 --help
+```
+
+```powershell
+# SiliconFlow example; the key is read from the environment only.
+$env:SF_CodingAgentTestKey = [Environment]::GetEnvironmentVariable(
+    'SF_CodingAgentTestKey', 'User')
+
+# Real repository run through the configured provider.
+koawa-agent-v2 run --config examples/p0_config.example.json `
+  --task "Fix the failing tests, run them, inspect git status/diff, finalize."
+
+# Status / durable approvals / resume.
+koawa-agent-v2 status --config examples/p0_config.example.json
+koawa-agent-v2 approvals --config examples/p0_config.example.json
+koawa-agent-v2 approve --config examples/p0_config.example.json --request-id <id>
+```
+
+Reasoning intensity is a user-facing knob, translated per provider/model family
+(see [docs/day-15-real-model-runtime.md](docs/day-15-real-model-runtime.md)):
+
+```json
+{ "provider": { "model": "Qwen/Qwen3.5-35B-A3B", "reasoning_effort": "off" } }
+```
+
+For agentic tool loops `off` is the measured recommendation: the same repair
+task finishes in ~25s with reasoning disabled, while Qwen3.5 with thinking on
+answers entirely inside `reasoning_content` (empty final answer) and Qwen3-8B
+spends minutes per round on reasoning alone. Raw provider-specific body fields
+remain reachable via `provider.provider_options` (wins over the knob).
+
+The end-to-end smoke is verified against SiliconFlow:
+
+```powershell
+$env:KOAWA_SF_MODEL = 'Qwen/Qwen3.5-35B-A3B'
+py -3.14 -B examples/day15_real_model_smoke.py   # ok:true, ~7-9 model rounds
+```
 
 ## Run D1 through D15 tests
 
@@ -343,6 +394,8 @@ The D14 trace, eval, and failure injection are in
 [docs/day-14-trace-eval-failure-injection.md](docs/day-14-trace-eval-failure-injection.md).
 The D15 CLI, E2E matrix, and interview package are in
 [docs/day-15-interview-package.md](docs/day-15-interview-package.md).
+The real provider assembly, approval commands, and MCP config are in
+[docs/day-15-real-model-runtime.md](docs/day-15-real-model-runtime.md).
 The D4 transaction phases and crash boundaries remain in
 [`docs/day-04-atomic-apply-patch.md`](docs/day-04-atomic-apply-patch.md).
 The D3 read-only implementation rationale remains in

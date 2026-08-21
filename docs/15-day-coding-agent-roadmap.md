@@ -104,7 +104,7 @@ python -W error::ResourceWarning -B -m unittest discover -s tests -v
 | D12 | COMPLETE | Per-Agent worktree + container isolation；真实 Docker runner 已接入 D8；7 个 D12 tests、D12 文档/示例 |
 | D13 | COMPLETE | Repository context + compaction；5 个 D13 tests、D13 文档/示例；当前全量 320 tests |
 | D14 | COMPLETE | Trace、eval、failure injection；trace 已接入 model/tool/ledger/mcp；4 个 D14 tests + 20 任务 eval、D14 文档/示例 |
-| D15 | COMPLETE | End-to-end acceptance + interview package；CLI 含 run/resume/status/cancel/doctor；builtin+MCP dispatch 契约、统一运行时；当前全量 332 tests |
+| D15 | COMPLETE | End-to-end acceptance + interview package；CLI 含 run/resume/status/cancel/doctor/approvals/approve/deny；真实 OpenAI-compatible provider 装配；builtin+MCP dispatch 契约、统一运行时；当前全量 333 tests |
 
 状态变更规则：只有当该日的 Definition of Done 全部成立，才允许把该行改为
 `COMPLETE`，并把下一行改为 `NEXT`。
@@ -1024,6 +1024,9 @@ mandatory reliability 使用 deterministic scripted/fake provider；真实模型
 - 一份失败分类报告，而不是只给平均成功率。
 
 ## 21. D15 — End-to-End Acceptance 与面试成果包（COMPLETE）
+
+真实 Provider 装配、approvals/approve/deny 命令、MCP 配置化与真模型 smoke 的
+补充说明见 `docs/day-15-real-model-runtime.md`；本节仍记录原始验收矩阵。
 
 ### 产品入口
 

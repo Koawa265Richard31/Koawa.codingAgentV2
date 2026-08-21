@@ -15,6 +15,7 @@ import urllib.request
 from time import monotonic
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, BinaryIO
 
 from .protocol import (
@@ -99,8 +100,65 @@ class _ToolBuffer:
     fragments: list[str] = field(default_factory=list)
 
 
+class ReasoningEffort(StrEnum):
+    """User-facing reasoning intensity knob, translated per provider/model family.
+
+    Providers expose very different knobs (binary thinking on/off vs.
+    low/medium/high budgets), so the runtime maps this abstract scale to the
+    concrete request body fields in _reasoning_effort_body.
+    """
+
+    OFF = "off"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+def reasoning_family(provider: str, model: str) -> str | None:
+    """Return the known reasoning-control family for a provider+model, or None."""
+    if provider == "siliconflow":
+        lowered = model.lower()
+        if "qwen3.5" in lowered:
+            return "qwen3.5-thinking"
+        if "qwen3" in lowered:
+            return "qwen3-thinking"
+        if "deepseek" in lowered:
+            return "deepseek-thinking"
+    if provider in ("openai", "openai_compatible"):
+        lowered = model.lower()
+        if any(token in lowered for token in ("o1", "o3", "o4")):
+            return "openai-reasoning"
+    return None
+
+
+def _reasoning_effort_body(
+    provider: str,
+    model: str,
+    effort: ReasoningEffort,
+) -> dict[str, Any]:
+    """Translate a reasoning effort into provider-specific request body fields.
+
+    Fail-closed: unknown provider/model families raise and direct the operator
+    to provider_options, because guessing a knob we cannot verify is worse
+    than refusing.
+    """
+    family = reasoning_family(provider, model)
+    enabled = effort is not ReasoningEffort.OFF
+    if family == "qwen3.5-thinking":
+        return {"thinking": {"type": "enabled" if enabled else "disabled"}}
+    if family == "qwen3-thinking":
+        return {"chat_template_kwargs": {"enable_thinking": enabled}}
+    if family == "deepseek-thinking":
+        return {"thinking": {"type": "enabled" if enabled else "disabled"}}
+    if family == "openai-reasoning":
+        if not enabled:
+            raise OpenAICompatibleClientError("reasoning_effort_off_unsupported")
+        return {"reasoning_effort": effort.value}
+    raise OpenAICompatibleClientError("reasoning_effort_unsupported")
+
+
 class OpenAICompatibleChatClient:
-    """通过 ``/chat/completions`` SSE 实现 ``ModelClient`` 的结构协议。
+    """OpenAI-compatible Chat Completions SSE adapter (D2 canonical stream).
 
     ``urlopen`` 参数只用于确定性测试或嵌入方注入受控 transport。生产默认使用
     :func:`urllib.request.urlopen`。该类每次 ``stream`` 只发起一次 HTTP 请求。
@@ -117,9 +175,18 @@ class OpenAICompatibleChatClient:
         max_request_bytes: int = 2 * 1024 * 1024,
         max_response_bytes: int = 16 * 1024 * 1024,
         max_sse_event_bytes: int = 2 * 1024 * 1024,
+        provider_options: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
         urlopen: Callable[..., Any] | None = None,
     ) -> None:
         self._endpoint = _chat_completions_endpoint(base_url)
+        self._provider_options = dict(provider_options or {})
+        self._reasoning_effort: ReasoningEffort | None = None
+        if reasoning_effort is not None:
+            try:
+                self._reasoning_effort = ReasoningEffort(reasoning_effort)
+            except ValueError:
+                raise ValueError("invalid reasoning_effort") from None
         self._api_key = _api_key(api_key)
         if (
             self._api_key is not None
@@ -189,7 +256,11 @@ class OpenAICompatibleChatClient:
         if request.provider != self._provider:
             raise OpenAICompatibleClientError("openai.provider_mismatch")
 
-        body = _request_body(request)
+        body = _request_body(
+            request,
+            self._provider_options,
+            self._reasoning_effort,
+        )
         if len(body) > self._max_request_bytes:
             raise OpenAICompatibleClientError("openai.request_limit_exceeded")
         headers = {
@@ -357,14 +428,30 @@ class _ChatStreamDecoder:
             )
         )
         if self._finish_reason is not None and choices:
+            # SiliconFlow intermittently appends a trailing chunk that still
+            # carries an (empty) choices array after the terminal finish.
+            # Tolerate an empty delta; any new content, tool call, or
+            # reasoning after finish remains a protocol fault.
+            first_after_finish = choices[0]
+            delta_after_finish = (
+                first_after_finish.get("delta")
+                if isinstance(first_after_finish, dict)
+                else None
+            )
+            if isinstance(delta_after_finish, dict) and not (
+                delta_after_finish.get("content")
+                or delta_after_finish.get("tool_calls")
+                or delta_after_finish.get("reasoning_content")
+            ):
+                return tuple(events)
             raise _fault("openai.choice_after_finish")
 
         usage_raw = payload.get("usage")
         if usage_raw is not None:
-            usage = _parse_usage(usage_raw)
-            if self._usage is not None:
-                raise _fault("openai.duplicate_usage")
-            self._usage = usage
+            # Some providers (e.g. SiliconFlow) attach cumulative usage to every
+            # chunk; the final chunk is authoritative. Store last-wins here and
+            # emit UsageReported exactly once from finish().
+            self._usage = _parse_usage(usage_raw)
 
         if not choices:
             if usage_raw is None:
@@ -415,7 +502,10 @@ class _ChatStreamDecoder:
         delta: Mapping[str, Any],
         provider_sequence: int,
     ) -> tuple[ModelStreamEvent, ...]:
-        known = {"role", "content", "tool_calls", "refusal"}
+        # reasoning_content is emitted by thinking-capable models (Qwen3 on
+        # SiliconFlow). We accept it but do not forward it: this provider
+        # cannot echo reasoning back (openai.reasoning_context_unsupported).
+        known = {"role", "content", "tool_calls", "refusal", "reasoning_content"}
         if any(key not in known and value is not None for key, value in delta.items()):
             raise _unknown("openai.unknown_delta_semantic")
         role = delta.get("role")
@@ -542,7 +632,9 @@ class _ChatStreamDecoder:
             if raw_id is not None and raw_id != call.call_id:
                 raise _fault("openai.tool_call_id_changed")
             raw_name = function.get("name")
-            if raw_name is not None and raw_name != call.name:
+            # SiliconFlow repeats an empty name ("") on continuation chunks;
+            # an empty name carries no identity change, so ignore it.
+            if raw_name is not None and raw_name.strip() and raw_name != call.name:
                 raise _fault("openai.tool_name_changed")
 
         arguments = function.get("arguments")
@@ -659,7 +751,11 @@ class _ChatStreamDecoder:
         return header
 
 
-def _request_body(request: ModelRequest) -> bytes:
+def _request_body(
+    request: ModelRequest,
+    provider_options: Mapping[str, Any] | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+) -> bytes:
     """把 canonical context 投影为 Chat Completions JSON，不记录正文。"""
     try:
         document: dict[str, Any] = {
@@ -669,6 +765,14 @@ def _request_body(request: ModelRequest) -> bytes:
             "stream_options": {"include_usage": True},
             "max_tokens": request.max_output_tokens,
         }
+        if reasoning_effort is not None:
+            # Abstract reasoning knob -> provider/model specific fields.
+            document.update(
+                _reasoning_effort_body(request.provider, request.model, reasoning_effort)
+            )
+        if provider_options:
+            # Raw provider-specific overrides win over generated fields.
+            document.update(provider_options)
         if request.tool_definitions:
             document["tools"] = [
                 {

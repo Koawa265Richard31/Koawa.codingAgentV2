@@ -578,6 +578,27 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _lock_roots() -> tuple[Path, ...]:
+    """Candidate OS-lock directories, newest-compatible first.
+
+    ``%TEMP%`` is the legacy location and remains the first choice, but a stale
+    directory created by another Windows account can make it inaccessible even
+    though the workspace itself is writable.  The user-local fallback prevents
+    every patch transaction from degrading to ``workspace_lock_failed``.
+    """
+    candidates: list[Path] = []
+    candidates.append(Path(tempfile.gettempdir()) / "koawa-agent-v2-locks")
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            candidates.append(Path(local_app_data) / "KoawaAgentV2" / "locks")
+    else:
+        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if xdg_runtime:
+            candidates.append(Path(xdg_runtime) / "koawa-agent-v2-locks")
+    return tuple(dict.fromkeys(candidates))
+
+
 @contextmanager
 def _workspace_mutation_lock(root: Path) -> Iterator[None]:
     """同进程 RLock + 跨进程 OS lock；锁文件只包含 root digest。"""
@@ -588,25 +609,35 @@ def _workspace_mutation_lock(root: Path) -> Iterator[None]:
     stream = None
     acquired = False
     try:
-        try:
-            lock_root = Path(tempfile.gettempdir()) / "koawa-agent-v2-locks"
-            lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            name = hashlib.sha256(key.encode("utf-8")).hexdigest() + ".lock"
-            stream = open(lock_root / name, "a+b", buffering=0)
-            if stream.seek(0, os.SEEK_END) == 0:
-                stream.write(b"\x00")
-            stream.seek(0)
-            if os.name == "nt":
-                import msvcrt
+        name = hashlib.sha256(key.encode("utf-8")).hexdigest() + ".lock"
+        for lock_root in _lock_roots():
+            candidate = None
+            try:
+                lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                candidate = open(lock_root / name, "a+b", buffering=0)
+                if candidate.seek(0, os.SEEK_END) == 0:
+                    candidate.write(b"\x00")
+                candidate.seek(0)
+                if os.name == "nt":
+                    import msvcrt
 
-                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
+                    msvcrt.locking(candidate.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
 
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-            acquired = True
-        except OSError:
-            raise PatchError("workspace_lock_failed") from None
+                    fcntl.flock(candidate.fileno(), fcntl.LOCK_EX)
+                stream = candidate
+                acquired = True
+                break
+            except OSError:
+                if candidate is not None:
+                    try:
+                        candidate.close()
+                    except OSError:
+                        pass
+                continue
+        if not acquired:
+            raise PatchError("workspace_lock_failed")
         yield
     finally:
         try:

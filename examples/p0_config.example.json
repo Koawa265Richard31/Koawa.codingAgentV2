@@ -1,0 +1,34 @@
+{
+  "repo": "D:/path/to/task_repo",
+  "db": "./agent.sqlite3",
+  "provider": {
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key_env": "SF_CodingAgentTestKey",
+    "model": "Qwen/Qwen3.5-35B-A3B",
+    "provider": "siliconflow",
+    "timeout_seconds": 120,
+    "max_stream_seconds": 900,
+    "max_output_tokens": 4096,
+    "reasoning_effort": "off"
+  },
+  "sandbox": {
+    "runner": "docker",
+    "image_id": "sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a",
+    "docker_executable": "docker"
+  },
+  "test_profiles": [
+    {
+      "profile_id": "python_unittest",
+      "argv": ["/usr/local/bin/python", "-m", "unittest", "discover", "-s", "tests"],
+      "timeout_seconds": 120,
+      "max_stdout_bytes": 262144,
+      "max_stderr_bytes": 262144
+    }
+  ],
+  "policy": {
+    "policy_version": "policy-v1",
+    "read_decision": "allow",
+    "patch_decision": "allow",
+    "test_decision": "allow"
+  }
+}

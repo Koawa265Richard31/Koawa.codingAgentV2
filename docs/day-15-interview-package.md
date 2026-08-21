@@ -2,8 +2,11 @@
 
 ## 1. 产品入口
 
-`python -m koawa_agent_v2.cli run <db> <repo>` / `resume <db> <turn_id> <repo>` /
-`cancel <db> <turn_id>` / `status <db>` / `doctor <db>`。
+`python -m koawa_agent_v2.runtime.cli run <db> <repo>` 是离线确定性入口；
+真实 provider 入口为
+`python -m koawa_agent_v2.runtime.cli run --config <cfg> --task "..."`。
+`resume` / `cancel` / `status` / `doctor` 以及 `approvals` / `approve` / `deny`
+同族命令见 [day-15-real-model-runtime.md](day-15-real-model-runtime.md)。
 真实凭据只来自受控 provider/env，不写入配置或 trace。
 
 ## 2. 最终链路与矩阵
@@ -31,7 +34,7 @@ Trace/Eval、D15 CLI/E2E —— 全部 COMPLETE。
 ## 4. 讲法
 
 - 5 分钟：问题（agent 可靠执行）→ 事件溯源控制面 → schema→policy→ledger→
-  sandbox 一条链 → 崩溃恢复与 exactly-once 边界 → 全量 323 tests。
+  sandbox 一条链 → 崩溃恢复与 exactly-once 边界 → 全量 333 tests。
 - 15 分钟：在上述基础上展开 D6 checkpoint、D7 crash matrix、D9 授权事务、
   D10 MCP binding、D11 orphan 接管、D12 集成投递、D14 eval/故障注入。
 
@@ -47,7 +50,7 @@ Checkpoint/Resume（day-06）、Ledger crash matrix（day-07）、Sandbox threat
 
 ## 7. 已知边界（README 公开）
 
-- 本环境 Docker daemon 不可用，D8 真容器集成与 D12 真容器 runner 以 skip/注入
-  runner 呈现；Docker 可用环境按 D8 原验收运行。
+- 真模型 smoke 是 opt-in 人工命令；模型驱动写子 Agent 仍未接真 Provider，
+  继续以 D11/D12 脚本 provider 证明控制面语义。
 - Streamable HTTP MCP、IDNA、任意 JSON Schema、dirty 基线快照、真实模型 eval
   为显式非目标。
