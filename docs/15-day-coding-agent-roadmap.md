@@ -105,7 +105,8 @@ python -W error::ResourceWarning -B -m unittest discover -s tests -v
 | D13 | COMPLETE | Repository context + compaction；5 个 D13 tests、D13 文档/示例；当前全量 320 tests |
 | D14 | COMPLETE | Trace、eval、failure injection；trace 已接入 model/tool/ledger/mcp；4 个 D14 tests + 20 任务 eval、D14 文档/示例 |
 | D15 | COMPLETE | End-to-end acceptance + interview package；CLI 含 run/resume/status/cancel/doctor/approvals/approve/deny；真实 OpenAI-compatible provider 装配；builtin+MCP dispatch 契约、统一运行时；当前全量 333 tests |
-| D16 | NEXT（PLANNED） | Interactive session：thread=会话、有界历史投影（白名单+截断）+ 会话压缩；行内审批；--repo 自选工作目录。设计见 docs/day-16-interactive-session.md，用户确认后开始 |
+| D16 | COMPLETE | Interactive session：thread=会话、有界历史投影（白名单+截断）+ 会话压缩（权威投影+可选模型摘要）；行内审批；--repo 自选工作目录；10 个 D16 tests、离线示例；当前全量 362 tests |
+| D17 | NEXT（PLANNED） | 会话记忆增强：压缩 v2（改动的文件集合 git 证据）、阶梯④检索召回（从事件存储按需召回）、session journal 工件（阶梯⑤）。设计文档待写，用户确认后开始 |
 
 状态变更规则：只有当该日的 Definition of Done 全部成立，才允许把该行改为
 `COMPLETE`，并把下一行改为 `NEXT`。

@@ -7,7 +7,7 @@ tests; production CLI uses this module when ``--config`` is supplied.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import UUID, uuid4
@@ -28,6 +28,7 @@ from .config import (
     load_runtime_config,
     resolve_api_key,
 )
+from .session import SessionHistory, SessionHistoryError
 
 EventSink = Callable[[object], None]
 
@@ -63,17 +64,26 @@ class AppRuntime:
             model_client=model_client,
             api_key=api_key,
         )
+        # Turns started through chat() resume without the D5 completion gate.
+        self._chat_turn_ids: set[UUID] = set()
 
     @classmethod
     def from_config_file(
         cls,
         path: str | Path,
         *,
+        repo_override: str | Path | None = None,
         model_client: object | None = None,
         api_key: str | None = None,
     ) -> "AppRuntime":
+        config = load_runtime_config(path)
+        if repo_override is not None:
+            config = replace(
+                config,
+                repo=Path(repo_override).expanduser().resolve(),
+            )
         return cls(
-            load_runtime_config(path),
+            config,
             model_client=model_client,
             api_key=api_key,
         )
@@ -101,6 +111,59 @@ class AppRuntime:
             )
         except (RuntimeConfigError, RuntimeAssemblyError, AgentError) as exc:
             return _failure(exc)
+
+    def chat(
+        self,
+        message: str,
+        *,
+        thread_id: str | UUID | None = None,
+        history: SessionHistory | None = None,
+        event_sink: EventSink | None = None,
+    ) -> CommandOutcome:
+        """Run one conversational turn on a thread, seeded with session history.
+
+        history carries the bounded whitelist projection of prior turns; the
+        worker's fresh-turn context becomes instructions + history + new input.
+        """
+        try:
+            if not isinstance(message, str) or not message.strip():
+                raise RuntimeAssemblyError("task_required")
+            runtime = self.assembled.runtime
+            if thread_id is None:
+                thread = runtime.create_thread(f"chat-{self.config.repo.name}")
+                resolved_thread = thread.thread_id
+            else:
+                resolved_thread = UUID(str(thread_id))
+                thread = runtime.get_thread(resolved_thread)
+            queued = runtime.create_turn(
+                resolved_thread,
+                message,
+                expected_thread_version=thread.version,
+            )
+            self._chat_turn_ids.add(queued.turn_id)
+            initial_context = (
+                history.context_items() if history is not None else ()
+            )
+            worker = self.assembled.build_worker(initial_context, task_mode=False)
+            result = worker.execute(
+                queued.turn_id,
+                queued.version,
+                event_sink=event_sink,
+            )
+            return CommandOutcome(
+                result.turn.status is TurnStatus.COMPLETED,
+                f"turn_{result.turn.status.value}",
+                _turn_document(result),
+            )
+        except (
+            RuntimeConfigError,
+            RuntimeAssemblyError,
+            AgentError,
+            SessionHistoryError,
+        ) as exc:
+            return _failure(exc)
+        except ValueError:
+            return CommandOutcome(False, "invalid_thread_id", {})
 
     def resume(
         self,
@@ -276,7 +339,12 @@ class AppRuntime:
         version: int,
         event_sink: EventSink | None,
     ) -> TurnWorkerResult:
-        return self.assembled.worker.execute(
+        worker = (
+            self.assembled.build_worker((), task_mode=False)
+            if turn_id in self._chat_turn_ids
+            else self.assembled.worker
+        )
+        return worker.execute(
             turn_id,
             version,
             event_sink=event_sink,
@@ -346,7 +414,8 @@ def _turn_document_from_state(turn) -> dict[str, Any]:
         "turn_id": str(turn.turn_id),
         "thread_id": str(turn.thread_id),
         "status": turn.status.value,
-        "final_text": turn.final_text,
+        # TurnState.outcome persists the worker's final_text on completion.
+        "final_text": turn.outcome,
         "error": turn.error,
     }
 

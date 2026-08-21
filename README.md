@@ -271,6 +271,32 @@ $env:KOAWA_SF_MODEL = 'Qwen/Qwen3.5-35B-A3B'
 py -3.14 -B examples/day15_real_model_smoke.py   # ok:true, ~7-9 model rounds
 ```
 
+## Interactive session (D16)
+
+Conversational mode over one repository: every message is a new turn on the
+same thread, and prior turns are projected into the model context under a
+bounded whitelist (user input + final answer only), with truncation and
+optional compaction. Choose any working directory with `--repo` (e.g. `.`).
+
+```powershell
+$env:SF_CodingAgentTestKey = [Environment]::GetEnvironmentVariable(
+    'SF_CodingAgentTestKey', 'User')
+
+koawa-agent-v2 interactive --config examples/p0_config.example.json --repo .
+
+# in the session: type messages, or
+#   /status  /approvals  /approve <id>  /deny <id>  /resume <turn-id>
+#   /history /thread <uuid> /help /exit
+```
+
+Offline deterministic walkthrough (no network, no key):
+
+```powershell
+py -3.14 -B examples/day16_interactive_session.py
+```
+
+Session design and tradeoffs: [docs/day-16-interactive-session.md](docs/day-16-interactive-session.md).
+
 ## Run D1 through D15 tests
 
 PowerShell:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -35,7 +36,7 @@ from ..ledger import (
 from ..mcp import McpSession, StdioTransport
 from ..mcp.tool_binding import McpBinding, McpCatalog, build_mcp_registry
 from ..model.openai_client import OpenAICompatibleChatClient
-from ..model.protocol import InstructionMessage, InstructionRole
+from ..model.protocol import InstructionMessage, InstructionRole, ModelContextItem
 from ..model.stream import StreamLimits
 from ..policy import (
     ActionKind,
@@ -109,12 +110,54 @@ class AssembledRuntime:
     worker: TurnWorker
     checkpoint_store: CheckpointStore
     correlation_id: object
+    loop: AgentLoop
     mcp_sessions: tuple[tuple[McpServerConfig, object, McpCatalog], ...] = ()
 
     def __repr__(self) -> str:
         return (
             f"AssembledRuntime(repo={str(self.config.repo)!r}, "
             f"db={str(self.config.db)!r}, provider_model={self.config.provider.model!r})"
+        )
+
+    def build_worker(
+        self,
+        initial_context: Sequence[ModelContextItem] = (),
+        *,
+        task_mode: bool = True,
+    ) -> TurnWorker:
+        """Build a TurnWorker over the same loop, optionally seeded with history.
+
+        task_mode=False drops the D5 completion gate: conversational turns may
+        stop without a finalize_task evidence trail (verification_required
+        would otherwise reject any chat reply).
+        """
+        loop = self.loop
+        if not task_mode:
+            loop = AgentLoop(
+                self.client,
+                tool_executor=self.executor,
+                completion_gate=None,
+                limits=AgentLoopLimits(
+                    max_model_rounds=self.config.model_rounds,
+                    max_tool_calls=self.config.max_tool_calls,
+                ),
+                stream_limits=StreamLimits(),
+                trace_store=self.trace,
+                correlation_id=self.correlation_id,
+            )
+        return TurnWorker(
+            self.runtime,
+            loop,
+            provider=self.config.provider.provider,
+            model=self.config.provider.model,
+            instructions=(
+                InstructionMessage(InstructionRole.SYSTEM, self.config.system_prompt),
+            ),
+            initial_context=tuple(initial_context),
+            max_output_tokens=self.config.provider.max_output_tokens,
+            checkpoint_store=self.checkpoint_store,
+            owner_id=self.config.owner_id,
+            lease_seconds=self.config.lease_seconds,
         )
 
 
@@ -220,6 +263,7 @@ def assemble_runtime(
             worker=worker,
             checkpoint_store=checkpoint_store,
             correlation_id=correlation_id,
+            loop=loop,
             mcp_sessions=mcp_sessions,
         )
     except (RuntimeConfigError, RuntimeAssemblyError):

@@ -365,6 +365,10 @@ class RuntimeConfig:
     lease_seconds: int = 30
     model_rounds: int = 32
     max_tool_calls: int = 128
+    # D16 interactive session: bounded conversation history projection.
+    history_max_turns: int = 16
+    history_max_chars: int = 32_000
+    compact_min_turns: int = 4
 
     def __post_init__(self) -> None:
         if not isinstance(self.repo, Path) or not self.repo.is_absolute():
@@ -419,9 +423,18 @@ class RuntimeConfig:
         for name, value in (
             ("model_rounds", self.model_rounds),
             ("max_tool_calls", self.max_tool_calls),
+            ("history_max_turns", self.history_max_turns),
+            ("compact_min_turns", self.compact_min_turns),
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise RuntimeConfigError(f"invalid_{name}")
+        if (
+            not isinstance(self.history_max_chars, int)
+            or isinstance(self.history_max_chars, bool)
+            or self.history_max_chars <= 0
+            or self.history_max_chars > 2_000_000
+        ):
+            raise RuntimeConfigError("invalid_history_max_chars")
 
     def __repr__(self) -> str:
         return (
@@ -475,6 +488,9 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         "lease_seconds",
         "model_rounds",
         "max_tool_calls",
+        "history_max_turns",
+        "history_max_chars",
+        "compact_min_turns",
     }
     unknown = set(document) - allowed
     if unknown:
@@ -492,6 +508,9 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     lease_seconds = document.get("lease_seconds", 30)
     model_rounds = document.get("model_rounds", 32)
     max_tool_calls = document.get("max_tool_calls", 128)
+    history_max_turns = document.get("history_max_turns", 16)
+    history_max_chars = document.get("history_max_chars", 32_000)
+    compact_min_turns = document.get("compact_min_turns", 4)
     return RuntimeConfig(
         repo=repo,
         db=db,
@@ -505,6 +524,9 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         lease_seconds=lease_seconds,
         model_rounds=model_rounds,
         max_tool_calls=max_tool_calls,
+        history_max_turns=history_max_turns,
+        history_max_chars=history_max_chars,
+        compact_min_turns=compact_min_turns,
     )
 
 

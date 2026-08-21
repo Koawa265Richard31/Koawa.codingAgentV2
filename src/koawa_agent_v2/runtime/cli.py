@@ -366,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         "approvals",
         "approve",
         "deny",
+        "interactive",
     }:
         if "--config" in argv or "--help" in argv or "-h" in argv:
             return _real_main(argv)
@@ -433,10 +434,24 @@ def _real_main(argv: list[str]) -> int:
     for name in ("status", "doctor"):
         subparser = subparsers.add_parser(name)
         subparser.add_argument("--config", required=True)
+    interactive_parser = subparsers.add_parser(
+        "interactive", help="conversational session over one repo"
+    )
+    interactive_parser.add_argument("--config", required=True)
+    interactive_parser.add_argument(
+        "--repo",
+        default=None,
+        help="override the configured repo (e.g. '.' for the current directory)",
+    )
 
     arguments = parser.parse_args(argv[1:])
     try:
-        app = AppRuntime.from_config_file(arguments.config)
+        app = AppRuntime.from_config_file(
+            arguments.config,
+            repo_override=getattr(arguments, "repo", None),
+        )
+        if arguments.command == "interactive":
+            return _interactive_main(app)
         if arguments.command == "run":
             task = _read_task(arguments)
             outcome = app.run(task)
@@ -470,6 +485,184 @@ def _real_main(argv: list[str]) -> int:
     except Exception as exc:
         print(json.dumps({"ok": False, "code": getattr(exc, "code", "runtime_error"), "payload": {}}))
         return 1
+
+
+_INTERACTIVE_HELP = """commands:
+  <message>             run one agent turn (conversation context is kept)
+  /status               show threads, turns and pending approvals
+  /approvals            list pending durable approvals
+  /approve <id>         approve a pending request (and resume)
+  /deny <id>            deny a pending request
+  /resume <turn-id>     resume a paused/interrupted turn
+  /history              show the current in-memory session history
+  /thread <uuid>        switch to (or create) a conversation thread
+  /help                 this help
+  /exit                 save session and quit
+EOF (Ctrl+Z) and Ctrl+C also quit cleanly."""
+
+
+def _interactive_main(app) -> int:
+    import json as _json
+    from uuid import UUID as _UUID
+
+    from .session import (
+        SessionHistory,
+        SessionHistoryError,
+        SessionHistoryLimits,
+        SessionTurn,
+        summarize_via_client,
+    )
+
+    config = app.config
+    limits = SessionHistoryLimits(
+        max_turns=config.history_max_turns,
+        max_chars=config.history_max_chars,
+        compact_min_turns=config.compact_min_turns,
+    )
+    summarize = None
+    if hasattr(app.assembled.client, "_endpoint"):
+        summarize = lambda text: summarize_via_client(
+            app.assembled.client,
+            provider=config.provider.provider,
+            model=config.provider.model,
+            text=text,
+        )
+    marker = Path(str(config.db) + ".session.json")
+    thread_id: _UUID | None = None
+    if marker.exists():
+        try:
+            thread_id = _UUID(
+                _json.loads(marker.read_text(encoding="utf-8"))["thread_id"]
+            )
+        except Exception:
+            thread_id = None
+
+    def save_marker() -> None:
+        if thread_id is None:
+            return
+        marker.write_text(
+            _json.dumps({"thread_id": str(thread_id)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    history = SessionHistory(
+        provider=config.provider.provider,
+        limits=limits,
+        summarize=summarize,
+    )
+    if thread_id is not None:
+        try:
+            history = SessionHistory.from_thread(
+                app.assembled.store,
+                app.assembled.runtime,
+                thread_id,
+                provider=config.provider.provider,
+                limits=limits,
+                summarize=summarize,
+            )
+        except SessionHistoryError:
+            thread_id = None
+
+    def drain_approvals() -> None:
+        pending = app.pending_approvals().payload.get("pending_approvals", [])
+        for item in pending:
+            answer = input(f"approve {item['request_id']}? [y/N] ").strip().lower()
+            result = app.resolve_approval(
+                item["request_id"], answer in ("y", "yes")
+            )
+            print(result.to_json())
+
+    print(
+        f"KoawaAgent V2 interactive session\n"
+        f"  repo : {config.repo}\n"
+        f"  db   : {config.db}\n"
+        f"  model: {config.provider.model} (reasoning_effort={config.provider.reasoning_effort})\n"
+        f"  thread: {thread_id or 'new (created on first message)'}\n"
+        f"type /help for commands"
+    )
+    while True:
+        try:
+            line = input("you> ")
+        except EOFError:
+            print("\nbye")
+            save_marker()
+            return 0
+        except KeyboardInterrupt:
+            print("\nbye")
+            save_marker()
+            return 0
+        text = line.strip()
+        if not text:
+            continue
+        if text in ("/exit", "/quit"):
+            save_marker()
+            return 0
+        if text == "/help":
+            print(_INTERACTIVE_HELP)
+            continue
+        if text == "/status":
+            print(app.status().to_json())
+            continue
+        if text == "/approvals":
+            print(app.pending_approvals().to_json())
+            continue
+        if text == "/history":
+            print(_json.dumps(
+                {
+                    "turns": history.turn_count,
+                    "projected_items": len(history.context_items()),
+                    "compacted_blocks": len(history.maybe_compact()),
+                },
+                ensure_ascii=False,
+            ))
+            continue
+        if text.startswith("/approve "):
+            print(app.resolve_approval(text[9:].strip(), True).to_json())
+            continue
+        if text.startswith("/deny "):
+            print(app.resolve_approval(text[6:].strip(), False, resume_after=False).to_json())
+            continue
+        if text.startswith("/resume "):
+            print(app.resume(text[8:].strip()).to_json())
+            continue
+        if text.startswith("/thread "):
+            try:
+                thread_id = _UUID(text[8:].strip())
+                history = SessionHistory.from_thread(
+                    app.assembled.store,
+                    app.assembled.runtime,
+                    thread_id,
+                    provider=config.provider.provider,
+                    limits=limits,
+                    summarize=summarize,
+                )
+                print(f"switched to thread {thread_id}")
+            except (ValueError, SessionHistoryError) as exc:
+                print(f"cannot switch thread: {getattr(exc, 'code', exc)}")
+            continue
+
+        outcome = app.chat(text, thread_id=thread_id, history=history)
+        payload = outcome.payload
+        final_text = payload.get("final_text") or ""
+        print(("agent> " + final_text).rstrip() if final_text else f"agent> [{outcome.code}] {payload.get('error')}")
+        if thread_id is None and payload.get("thread_id"):
+            thread_id = _UUID(payload["thread_id"])
+            save_marker()
+        if outcome.ok and payload.get("turn_id"):
+            history.append(
+                SessionTurn(
+                    user_input=text,
+                    final_text=final_text or None,
+                    turn_id=_UUID(payload["turn_id"]),
+                    status=payload.get("status"),
+                    error=payload.get("error"),
+                )
+            )
+            drain_approvals()
+        elif payload.get("status") == "waiting_for_approval":
+            drain_approvals()
+        else:
+            print(f"  [turn failed: {outcome.code}]")
 
 
 def _read_task(arguments) -> str:

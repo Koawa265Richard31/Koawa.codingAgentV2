@@ -19,6 +19,7 @@ from .loop import (
 from ..control.event_store import StreamId, WrongExpectedVersion
 from ..model.protocol import (
     InstructionMessage,
+    ModelContextItem,
     ModelError,
     ModelStreamFailure,
     StreamFailureKind,
@@ -72,6 +73,7 @@ class TurnWorker:
         provider: str,
         model: str,
         instructions: Sequence[InstructionMessage] = (),
+        initial_context: Sequence[ModelContextItem] = (),
         max_output_tokens: int = 4096,
         checkpoint_store: CheckpointStore | None = None,
         owner_id: str | None = None,
@@ -98,6 +100,9 @@ class TurnWorker:
         copied_instructions = tuple(instructions)
         if not all(isinstance(item, InstructionMessage) for item in copied_instructions):
             raise TypeError("instructions contains an invalid item")
+        copied_context = tuple(initial_context)
+        if not all(isinstance(item, ModelContextItem) for item in copied_context):
+            raise TypeError("initial_context contains an invalid item")
         if (
             checkpoint_store is not None
             and loop.has_tools
@@ -109,6 +114,7 @@ class TurnWorker:
         self._provider = provider
         self._model = model
         self._instructions = copied_instructions
+        self._initial_context = copied_context
         self._max_output_tokens = max_output_tokens
         self._checkpoint_store = checkpoint_store
         self._owner_id = owner_id or f"turn-worker-{uuid4()}"
@@ -176,7 +182,16 @@ class TurnWorker:
                     ),
                 )
         else:
-            context = (*self._instructions, UserMessage(input_id=f"turn:{queued.turn_id}:original", content=queued.user_input))
+            # Fresh turn: configured instructions, then any conversational
+            # history (interactive chat), then the new user input.
+            context = (
+                *self._instructions,
+                *self._initial_context,
+                UserMessage(
+                    input_id=f"turn:{queued.turn_id}:original",
+                    content=queued.user_input,
+                ),
+            )
 
         resume_phase = RunPhase.READY_FOR_MODEL if resume is None else resume.phase
         if queued.last_resume_response is not None:
