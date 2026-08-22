@@ -1,6 +1,6 @@
 # D20：真实会话健壮性（工具错误增强与自修复指引 + 全会话真模型验证）
 
-> 状态：Part A COMPLETE（2026-08）；Part B 待人工执行（真实模型验证，opt-in）。
+> 状态：COMPLETE（Part A 2026-08；Part B 2026-08 实跑 5 轮，证据与发现见 examples/d20_session_verification.md）。
 > 动机：D16–D19 全部只经 scripted provider 验证；真模型下"廉价模型不按 schema 调工具"
 > 是现场演示最容易翻车的点（已实证：HTML 任务 6 次 invalid_patch_change 烧光预算）。
 
@@ -53,4 +53,6 @@
 ## 6. Definition of Done
 
 - Part A：6 测试 + 全量回归绿 ✅；
-- Part B：待人工执行后补证据，另把状态改为 COMPLETE。
+- Part B：5 轮真模型验证完成，证据 examples/d20_session_verification.md ✅；
+  发现 5 项健壮性问题（F1 无工具幻觉完成、F2 UPDATE 基线误判（复现 4 轮）、F3 错误无修复指引、
+  F4 files= 覆盖缺口、F5 记忆随模型波动）——建议立项 D22 专项修复。
