@@ -17,6 +17,53 @@ from .errors import (
 )
 from .schema import ToolSpec
 
+_MAX_EXAMPLE_CHARS = 256
+
+
+def _minimal_example(spec: ToolSpec) -> str | None:
+    """Build a small legal-arguments JSON example from the compiled schema.
+
+    Best-effort: unknown shapes or builder failures degrade to None so the
+    argument error still carries the stable code.
+    """
+    try:
+        schema = spec.input_schema
+        properties = schema.get("properties")
+        if not isinstance(properties, dict) or not properties:
+            return None
+        required = schema.get("required")
+        keys = (
+            [key for key in required if isinstance(key, str) and key in properties]
+            if isinstance(required, list)
+            else list(properties)
+        )
+        example: dict[str, Any] = {}
+        for key in keys:
+            prop = properties[key]
+            if not isinstance(prop, dict):
+                continue
+            kind = prop.get("type")
+            if kind == "integer":
+                example[key] = 1
+            elif kind == "string":
+                example[key] = "<str>"
+            elif kind == "boolean":
+                example[key] = True
+            elif kind == "array":
+                example[key] = []
+            elif kind == "object":
+                example[key] = {}
+            else:
+                example[key] = None
+        if not example:
+            return None
+        import json as _json
+
+        text = _json.dumps(example, ensure_ascii=False, separators=(",", ":"))
+        return text[:_MAX_EXAMPLE_CHARS]
+    except Exception:
+        return None
+
 
 ArgumentsT = TypeVar("ArgumentsT")
 
@@ -161,7 +208,7 @@ class ToolRegistry:
                 entry,
                 call,
                 None,
-                argument_error_result(error),
+                argument_error_result(error, example=_minimal_example(entry.spec)),
                 self._issuance_token,
             )
             with self._lock:

@@ -109,7 +109,7 @@ python -W error::ResourceWarning -B -m unittest discover -s tests -v
 | D17 | COMPLETE | 异常修复：预算可配置（budget_action_limits）+ 非 git 仓库清晰报错（not_a_git_repository）+ CLI 失败解释；思考链显示通道（reasoning_sink，只显示不入库）；5 个新测试；文档 day-17-exception-and-thinking.md |
 | D18 | COMPLETE | 交互轨迹：interactive 实时打印 → 工具调用、✓/✗ 结果、[ctx] 上下文规模；2 个新测试；文档 day-18-interactive-trace.md |
 | D19 | COMPLETE | 会话记忆增强：压缩 v2（权威投影含改动的文件集合）、阶梯④词法检索召回（/recall，位置作用域圈定工具名）、阶梯⑤ session journal（/journal → SESSION.md）；4 个 D19 tests；文档 day-19-session-memory-enhancement.md |
-| D20 | NEXT（PLANNED） | 待定：候选方向见 day-19 边界（语义向量检索、journal 增量更新、多会话索引）。设计文档待写，用户确认后开始 |
+| D20 | COMPLETE（Part A）/ Part B 待人工 | 工具错误增强（patch detail + 参数 expected/example，错误码稳定）：6 个 D20 tests；全会话真模型验证（六步协议）待人工执行，证据入 examples/d20_session_verification.md |
 
 状态变更规则：只有当该日的 Definition of Done 全部成立，才允许把该行改为
 `COMPLETE`，并把下一行改为 `NEXT`。

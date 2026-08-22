@@ -272,16 +272,14 @@ class D3RegistryLoopTest(unittest.TestCase):
                     ]
                     self.assertEqual(1, len(results))
                     self.assertIs(True, results[0].is_error)
+                    parsed = json.loads(results[0].content)
                     self.assertEqual(
-                        {
-                            "error": {
-                                "code": "invalid_tool_arguments",
-                                "field": expected_field,
-                                "reason": expected_reason,
-                            }
-                        },
-                        json.loads(results[0].content),
+                        "invalid_tool_arguments", parsed["error"]["code"]
                     )
+                    self.assertEqual(expected_field, parsed["error"]["field"])
+                    self.assertEqual(expected_reason, parsed["error"]["reason"])
+                    # D20 enrichment: bounded repair hint (example) is present.
+                    self.assertIsInstance(parsed["error"].get("example"), str)
                     self.assertNotIn("do-not-echo", results[0].content)
                     return _final_script("handled", f"response-final-{name}")(
                         request

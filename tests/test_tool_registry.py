@@ -131,16 +131,12 @@ class ToolRegistryTest(unittest.TestCase):
 
         self.assertIs(True, result.is_error)
         self.assertLessEqual(len(result.content), MAX_TOOL_ERROR_CONTENT_CHARS)
-        self.assertEqual(
-            {
-                "error": {
-                    "code": "invalid_tool_arguments",
-                    "field": "secret_value",
-                    "reason": "additional_property",
-                }
-            },
-            json.loads(result.content),
-        )
+        parsed = json.loads(result.content)
+        self.assertEqual("invalid_tool_arguments", parsed["error"]["code"])
+        self.assertEqual("secret_value", parsed["error"]["field"])
+        self.assertEqual("additional_property", parsed["error"]["reason"])
+        # D20 enrichment: a bounded legal-arguments example is provided.
+        self.assertIsInstance(parsed["error"].get("example"), str)
         self.assertNotIn("do-not-echo", result.content)
         self.assertEqual(0, calls)
 

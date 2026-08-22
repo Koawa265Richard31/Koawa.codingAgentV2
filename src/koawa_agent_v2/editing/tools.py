@@ -104,7 +104,7 @@ class _ApplyPatchTool:
                 result.to_tool_content(max_chars=self._limits.max_result_chars)
             )
         except PatchError as error:
-            return tool_error_result(error.code)
+            return tool_error_result(error.code, detail=error.detail)
 
 
 def register_patch_tool(

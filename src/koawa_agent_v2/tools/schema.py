@@ -68,7 +68,9 @@ class _ValueSchema:
     def validate(self, value: Any, *, field: str) -> Any:
         if self.kind == "string":
             if not isinstance(value, str):
-                raise ToolArgumentError("wrong_type", field=field)
+                raise ToolArgumentError(
+                    "wrong_type", field=field, expected="value-type:string"
+                )
             # json.loads 会接受 ``\ud800`` 这类未配对 surrogate，但它不能被
             # UTF-8 编码。若让它进入 ToolResult，下一轮 Provider 请求才会在
             # 序列化阶段失败，错误位置也会从参数边界漂移到 transport 边界。
@@ -84,19 +86,33 @@ class _ValueSchema:
         if self.kind == "integer":
             # bool 是 int 的子类，但不是 JSON Schema integer 的本地工具语义。
             if not isinstance(value, int) or isinstance(value, bool):
-                raise ToolArgumentError("wrong_type", field=field)
+                raise ToolArgumentError(
+                    "wrong_type", field=field, expected="value-type:integer"
+                )
             if self.minimum is not None and value < self.minimum:
-                raise ToolArgumentError("below_minimum", field=field)
+                raise ToolArgumentError(
+                    "below_minimum",
+                    field=field,
+                    expected=f"value-type:integer minimum:{self.minimum}",
+                )
             if self.maximum is not None and value > self.maximum:
-                raise ToolArgumentError("above_maximum", field=field)
+                raise ToolArgumentError(
+                    "above_maximum",
+                    field=field,
+                    expected=f"value-type:integer maximum:{self.maximum}",
+                )
             return value
         if self.kind == "boolean":
             if not isinstance(value, bool):
-                raise ToolArgumentError("wrong_type", field=field)
+                raise ToolArgumentError(
+                    "wrong_type", field=field, expected="value-type:boolean"
+                )
             return value
         if self.kind == "array":
             if not isinstance(value, list):
-                raise ToolArgumentError("wrong_type", field=field)
+                raise ToolArgumentError(
+                    "wrong_type", field=field, expected="value-type:array"
+                )
             if self.min_items is not None and len(value) < self.min_items:
                 raise ToolArgumentError("too_few_items", field=field)
             if self.max_items is not None and len(value) > self.max_items:

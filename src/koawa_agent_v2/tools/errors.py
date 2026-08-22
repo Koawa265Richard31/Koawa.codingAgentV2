@@ -17,6 +17,7 @@ MAX_TOOL_ERROR_CONTENT_CHARS = 512
 _ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _ERROR_REASON = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _ERROR_FIELD = re.compile(r"[a-z][a-z0-9_]{0,63}(?:\[[0-9]{1,10}\])?")
+_ERROR_DETAIL = re.compile(r"[a-z0-9_:-]{1,192}")
 
 
 class ToolConfigurationError(ValueError):
@@ -40,11 +41,20 @@ class ToolArgumentError(Exception):
 
     code = "invalid_tool_arguments"
 
-    def __init__(self, reason: str, *, field: str | None = None) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        field: str | None = None,
+        expected: str | None = None,
+    ) -> None:
         self.reason = _stable_token(reason, _ERROR_REASON, "reason")
         if field is not None:
             field = _stable_token(field, _ERROR_FIELD, "field")
         self.field = field
+        self.expected = (
+            _stable_detail(expected, "expected") if expected is not None else None
+        )
         super().__init__(self.code)
 
 
@@ -53,14 +63,29 @@ def tool_error_result(
     *,
     reason: str | None = None,
     field: str | None = None,
+    expected: str | None = None,
+    example: str | None = None,
+    detail: str | None = None,
 ) -> ToolExecutionResult:
-    """构造模型可见的稳定 JSON 错误，不回显工具名、参数值或异常正文。"""
+    """构造模型可见的稳定 JSON 错误，不回显工具名、参数值或异常正文."""
     code = _stable_token(code, _ERROR_CODE, "code")
     error: dict[str, str] = {"code": code}
     if reason is not None:
         error["reason"] = _stable_token(reason, _ERROR_REASON, "reason")
     if field is not None:
         error["field"] = _stable_token(field, _ERROR_FIELD, "field")
+    if expected is not None:
+        safe = _stable_detail(expected, "expected")
+        if safe:
+            error["expected"] = safe
+    if example is not None and example.strip():
+        if len(example) > 256:
+            example = example[:256]
+        error["example"] = example
+    if detail is not None:
+        safe = _stable_detail(detail, "detail")
+        if safe:
+            error["detail"] = safe
     content = json.dumps(
         {"error": error},
         ensure_ascii=False,
@@ -73,14 +98,33 @@ def tool_error_result(
     return ToolExecutionResult(content, is_error=True)
 
 
-def argument_error_result(error: ToolArgumentError) -> ToolExecutionResult:
+def argument_error_result(
+    error: ToolArgumentError,
+    *,
+    example: str | None = None,
+) -> ToolExecutionResult:
     """把内部参数拒绝转换成 Registry 的模型可见结果。"""
     if not isinstance(error, ToolArgumentError):
         raise TypeError("error must be ToolArgumentError")
-    return tool_error_result(error.code, reason=error.reason, field=error.field)
+    return tool_error_result(
+        error.code,
+        reason=error.reason,
+        field=error.field,
+        expected=error.expected,
+        example=example,
+    )
 
 
 def _stable_token(value: str, pattern: re.Pattern[str], name: str) -> str:
     if not isinstance(value, str) or not pattern.fullmatch(value):
         raise ValueError(f"invalid tool error {name}")
+    return value
+
+
+def _stable_detail(value: str, name: str) -> str:
+    """Detail strings admit ':' (field:value) but stay token-safe and bounded."""
+    if not isinstance(value, str):
+        raise ValueError(f"invalid tool error {name}")
+    if not _ERROR_DETAIL.fullmatch(value) or len(value) > 192:
+        return ""
     return value

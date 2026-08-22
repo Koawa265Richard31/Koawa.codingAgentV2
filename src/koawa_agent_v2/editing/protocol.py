@@ -36,10 +36,13 @@ _PATCH_LIMIT_CEILINGS = {
 class PatchError(Exception):
     """可安全跨工具边界传播的稳定 Patch 失败。"""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, detail: str | None = None) -> None:
         if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", code):
             raise ValueError("invalid patch error code")
+        if detail is not None and not re.fullmatch(r"[a-z0-9_:-]{1,127}", detail):
+            raise ValueError("invalid patch error detail")
         self.code = code
+        self.detail = detail
         super().__init__(code)
 
 
@@ -289,7 +292,20 @@ def apply_update(
         if start > len(source) or end > len(source):
             raise PatchError("patch_context_mismatch")
         if source[start:end] != hunk.old_lines:
-            raise PatchError("patch_context_mismatch")
+            first_mismatch = start + next(
+                (
+                    index
+                    for index, (current, expected_line) in enumerate(
+                        zip(source[start:end], hunk.old_lines)
+                    )
+                    if current != expected_line
+                ),
+                -1,
+            )
+            detail = None
+            if first_mismatch >= 0:
+                detail = f"first_mismatch_line:{first_mismatch + 1}"
+            raise PatchError("patch_context_mismatch", detail=detail)
         output.extend(source[cursor:start])
         output.extend(hunk.new_lines)
         cursor = end
@@ -340,8 +356,17 @@ def _parse_change(raw: Any, limits: PatchLimits) -> FileChange:
     _utf8(path, "invalid_patch_change")
 
     if operation is PatchOperation.ADD:
-        if set(raw) != {"operation", "path", "content", "newline", "utf8_bom"}:
-            raise PatchError("invalid_patch_change")
+        expected_fields = {"operation", "path", "content", "newline", "utf8_bom"}
+        actual_fields = set(raw)
+        if actual_fields != expected_fields:
+            missing = sorted(expected_fields - actual_fields)
+            extra = sorted(actual_fields - expected_fields)
+            detail = None
+            if missing:
+                detail = "missing_field:" + missing[0]
+            elif extra:
+                detail = "unexpected_field:" + extra[0]
+            raise PatchError("invalid_patch_change", detail=detail)
         content = raw["content"]
         if not isinstance(content, str) or "\x00" in content:
             raise PatchError("invalid_patch_change")
