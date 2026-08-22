@@ -110,6 +110,7 @@ python -W error::ResourceWarning -B -m unittest discover -s tests -v
 | D18 | COMPLETE | 交互轨迹：interactive 实时打印 → 工具调用、✓/✗ 结果、[ctx] 上下文规模；2 个新测试；文档 day-18-interactive-trace.md |
 | D19 | COMPLETE | 会话记忆增强：压缩 v2（权威投影含改动的文件集合）、阶梯④词法检索召回（/recall，位置作用域圈定工具名）、阶梯⑤ session journal（/journal → SESSION.md）；4 个 D19 tests；文档 day-19-session-memory-enhancement.md |
 | D20 | COMPLETE（Part A）/ Part B 待人工 | 工具错误增强（patch detail + 参数 expected/example，错误码稳定）：6 个 D20 tests；全会话真模型验证（六步协议）待人工执行，证据入 examples/d20_session_verification.md |
+| D21 | COMPLETE | Agent 安全真实性包：威胁模型 docs/agent-security-threat-model.md（T1-T6 映射 OWASP + 诚实边界）、评估矩阵 tests/test_d21_agent_security.py（8 确定性用例全绿）、事故加固实录 docs/agent-security-engineering.md、逃逸演示 examples/day21_escape_demo.py。落地文档 day-21-detailed-implementation.md |
 
 状态变更规则：只有当该日的 Definition of Done 全部成立，才允许把该行改为
 `COMPLETE`，并把下一行改为 `NEXT`。
