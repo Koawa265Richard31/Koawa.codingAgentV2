@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Sequence
 from uuid import UUID, uuid4
 
@@ -58,6 +59,7 @@ class SessionTurn:
     turn_id: UUID | None = None
     status: str | None = None
     error: str | None = None
+    changed_files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.user_input, str) or not self.user_input.strip():
@@ -76,6 +78,11 @@ class SessionTurn:
             not isinstance(self.error, str) or not self.error.strip()
         ):
             raise ValueError("error must be non-empty text or None")
+        if not isinstance(self.changed_files, tuple) or any(
+            not isinstance(path, str) or not path.strip()
+            for path in self.changed_files
+        ):
+            raise ValueError("changed_files must be a tuple of non-empty paths")
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +156,10 @@ class SessionHistory:
     @property
     def turn_count(self) -> int:
         return len(self._turns)
+
+    @property
+    def turns(self) -> tuple[SessionTurn, ...]:
+        return tuple(self._turns)
 
     def append(self, turn: SessionTurn) -> None:
         if not isinstance(turn, SessionTurn):
@@ -298,6 +309,8 @@ def _authoritative_projection(turns: Sequence[SessionTurn]) -> str:
         prefix += f" status={turn.status or 'unknown'}"
         if turn.error is not None:
             prefix += f" error={turn.error}"
+        if turn.changed_files:
+            prefix += " files=" + ",".join(turn.changed_files)
         prefix += f" request={turn.user_input[:160]!r}"
         lines.append(prefix)
     return "\n".join(lines)
@@ -329,3 +342,178 @@ def summarize_via_client(
     if not summary:
         raise SessionHistoryError("empty_session_summary")
     return summary
+
+@dataclass(frozen=True, slots=True)
+class RecallHit:
+    """One retrieved turn summary from the event store."""
+
+    turn_id: UUID
+    user_input: str
+    final_text: str | None = None
+    tools: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
+    score: float = 0.0
+
+
+class SessionMemory:
+    """Lexical retrieval over the durable turn records of one thread (D19-4)."""
+
+    def __init__(self, store, runtime) -> None:
+        self._store = store
+        self._runtime = runtime
+
+    def recall(
+        self,
+        thread_id: UUID | str,
+        query: str,
+        limit: int = 5,
+    ) -> tuple[RecallHit, ...]:
+        """Rank completed turns of a thread by literal query-term hits."""
+        if not isinstance(query, str) or not query.strip():
+            return ()
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        terms = tuple(term for term in query.casefold().split() if term)
+        resolved = UUID(str(thread_id))
+        records = _thread_records(self._store, self._runtime, resolved)
+        hits: list[RecallHit] = []
+        for turn, tools in records:
+            score = _recall_score(terms, turn, tools)
+            if score > 0:
+                hits.append(
+                    RecallHit(
+                        turn_id=turn.turn_id,
+                        user_input=turn.user_input,
+                        final_text=turn.final_text,
+                        tools=tools,
+                        files=turn.changed_files,
+                        score=score,
+                    )
+                )
+        hits.sort(key=lambda hit: (-hit.score, str(hit.turn_id)))
+        return tuple(hits[:limit])
+
+
+class SessionJournal:
+    """Durable, human-readable session artifact written into the repo (D19-5)."""
+
+    DEFAULT_PATH = "SESSION.md"
+
+    def write(
+        self,
+        repo: Path,
+        turns: Sequence[SessionTurn],
+        *,
+        path: str = DEFAULT_PATH,
+    ) -> Path:
+        """Write a deterministic markdown summary of the session turns."""
+        if not isinstance(repo, Path) or not repo.is_dir():
+            raise SessionHistoryError("invalid_journal_repo")
+        lines = ["# Session journal", ""]
+        lines.append(f"- turns: {len(turns)}")
+        lines.append("")
+        for index, turn in enumerate(turns):
+            lines.append(f"## turn {index}")
+            lines.append(f"**user:** {turn.user_input}")
+            if turn.final_text is not None:
+                lines.append(f"**agent:** {turn.final_text}")
+            if turn.changed_files:
+                lines.append("**files:** " + ", ".join(turn.changed_files))
+            if turn.status is not None:
+                lines.append(f"**status:** {turn.status}")
+            if turn.error is not None:
+                lines.append(f"**error:** {turn.error}")
+            lines.append("")
+        target = repo / path
+        target.write_text("\n".join(lines), encoding="utf-8")
+        return target
+
+
+def _thread_records(
+    store,
+    runtime,
+    thread_id: UUID,
+) -> list[tuple[SessionTurn, tuple[str, ...]]]:
+    """Completed turns of a thread with their tool names, position-scoped.
+
+    D1 enforces one active turn per thread, so events between two consecutive
+    turn.created positions belong to the earlier turn.
+    """
+    created: list[tuple[int, UUID]] = []
+    cursor = 0
+    while True:
+        page = store.read_all(after_position=cursor, limit=500)
+        if not page:
+            break
+        for event in page:
+            if (
+                event.event_type == "turn.created.v1"
+                and UUID(event.payload["thread_id"]) == thread_id
+            ):
+                created.append((event.global_position, UUID(event.payload["turn_id"])))
+        if len(page) < 500:
+            break
+        cursor = page[-1].global_position
+    created.sort(key=lambda pair: pair[0])
+    records: list[tuple[SessionTurn, tuple[str, ...]]] = []
+    for index, (position, turn_id) in enumerate(created):
+        end = created[index + 1][0] if index + 1 < len(created) else None
+        state = runtime.get_turn(turn_id)
+        if not state.is_terminal:
+            continue
+        tools = _scan_tools(store, position, end)
+        records.append(
+            (
+                SessionTurn(
+                    user_input=state.user_input,
+                    final_text=state.outcome,
+                    turn_id=turn_id,
+                    status=state.status.value,
+                    error=state.error,
+                ),
+                tools,
+            )
+        )
+    return records
+
+
+def _scan_tools(store, start: int, end: int | None) -> tuple[str, ...]:
+    """Tool names from trace.tool.v1 events within a position range."""
+    names: set[str] = set()
+    cursor = start
+    while True:
+        page = store.read_all(after_position=cursor, limit=500)
+        if not page:
+            break
+        for event in page:
+            if end is not None and event.global_position >= end:
+                return tuple(sorted(names))
+            if event.event_type == "trace.tool.v1":
+                fields = event.payload.get("fields") or {}
+                name = fields.get("tool_name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+        if len(page) < 500:
+            break
+        cursor = page[-1].global_position
+    return tuple(sorted(names))
+
+
+def _recall_score(
+    terms: tuple[str, ...],
+    turn: SessionTurn,
+    tools: tuple[str, ...],
+) -> float:
+    """Deterministic literal scoring: request/answer x2, tools/files x1."""
+    score = 0.0
+    text_pool = f"{turn.user_input} {turn.final_text or ''}".casefold()
+    for term in terms:
+        if term in text_pool:
+            score += 2.0
+        for tool in tools:
+            if term in tool.casefold():
+                score += 1.0
+        for path in turn.changed_files:
+            if term in path.casefold():
+                score += 1.0
+    return score

@@ -637,6 +637,45 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
                 ensure_ascii=False,
             ))
             continue
+        if text.startswith("/recall "):
+            from .session import SessionMemory
+
+            if thread_id is None:
+                print("  （还没有会话线程）")
+                continue
+            hits = SessionMemory(
+                app.assembled.store, app.assembled.runtime
+            ).recall(thread_id, text[8:].strip())
+            if not hits:
+                print("  （无命中）")
+                continue
+            for hit in hits:
+                print(f"  [{hit.score:.0f}] {hit.user_input[:80]}")
+                if hit.final_text:
+                    print(f"      {hit.final_text[:120]}")
+                if hit.tools:
+                    print(f"      tools: {', '.join(hit.tools)}")
+                if hit.files:
+                    print(f"      files: {', '.join(hit.files)}")
+            continue
+        if text == "/journal":
+            from .session import SessionHistory, SessionJournal
+
+            if thread_id is None:
+                print("  （还没有会话线程）")
+                continue
+            try:
+                turns = SessionHistory.from_thread(
+                    app.assembled.store,
+                    app.assembled.runtime,
+                    thread_id,
+                    provider=config.provider.provider,
+                ).turns
+                target = SessionJournal().write(config.repo, turns)
+                print(f"  journal written: {target}")
+            except Exception as exc:
+                print(f"  journal failed: {getattr(exc, 'code', exc)}")
+            continue
         if text.startswith("/approve "):
             print(app.resolve_approval(text[9:].strip(), True).to_json())
             continue
@@ -696,6 +735,7 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
                     turn_id=_UUID(payload["turn_id"]),
                     status=payload.get("status"),
                     error=payload.get("error"),
+                    changed_files=_turn_changed_files(app, before_position),
                 )
             )
             drain_approvals()
@@ -792,6 +832,40 @@ def _print_tool_trace(app, after_position: int, calls: dict[str, str]) -> None:
         lines.append("  (工具轨迹读取失败：事件库异常)")
     for line in lines:
         print(line)
+
+
+def _turn_changed_files(app, after_position: int) -> tuple[str, ...]:
+    """changed_paths from the git_diff tool result within one turn's range."""
+    files: set[str] = set()
+    cursor = after_position
+    try:
+        while True:
+            page = app.assembled.store.read_all(after_position=cursor, limit=500)
+            if not page:
+                break
+            for event in page:
+                if event.event_type != "tool.execution-succeeded.v1":
+                    continue
+                content = event.payload.get("result", {}).get("content")
+                if not isinstance(content, str):
+                    continue
+                try:
+                    parsed = json.loads(content)
+                except Exception:
+                    continue
+                if (
+                    isinstance(parsed, dict)
+                    and isinstance(parsed.get("changed_paths"), list)
+                ):
+                    for path in parsed["changed_paths"]:
+                        if isinstance(path, str) and path:
+                            files.add(path)
+            if len(page) < 500:
+                break
+            cursor = page[-1].global_position
+    except Exception:
+        return ()
+    return tuple(sorted(files))
 
 
 def _read_task(arguments) -> str:
