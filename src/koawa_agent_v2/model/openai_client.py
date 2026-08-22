@@ -177,6 +177,7 @@ class OpenAICompatibleChatClient:
         max_sse_event_bytes: int = 2 * 1024 * 1024,
         provider_options: Mapping[str, Any] | None = None,
         reasoning_effort: str | None = None,
+        reasoning_sink: Callable[[str], None] | None = None,
         urlopen: Callable[..., Any] | None = None,
     ) -> None:
         self._endpoint = _chat_completions_endpoint(base_url)
@@ -187,6 +188,11 @@ class OpenAICompatibleChatClient:
                 self._reasoning_effort = ReasoningEffort(reasoning_effort)
             except ValueError:
                 raise ValueError("invalid reasoning_effort") from None
+        if reasoning_sink is not None and not callable(reasoning_sink):
+            raise TypeError("reasoning_sink must be callable or None")
+        # Display-only channel: reasoning fragments are forwarded to the sink,
+        # never persisted, never projected back into the canonical context.
+        self._reasoning_sink = reasoning_sink
         self._api_key = _api_key(api_key)
         if (
             self._api_key is not None
@@ -276,7 +282,7 @@ class OpenAICompatibleChatClient:
             headers=headers,
             method="POST",
         )
-        decoder = _ChatStreamDecoder(request)
+        decoder = _ChatStreamDecoder(request, reasoning_sink=self._reasoning_sink)
 
         try:
             _check_stream_progress(progress_guard, deadline)
@@ -339,9 +345,14 @@ class OpenAICompatibleChatClient:
 class _ChatStreamDecoder:
     """把 Chat Completions JSON chunks 转成 canonical stream lifecycle。"""
 
-    def __init__(self, request: ModelRequest) -> None:
+    def __init__(
+        self,
+        request: ModelRequest,
+        reasoning_sink: Callable[[str], None] | None = None,
+    ) -> None:
         self._request = request
         self._provider = request.provider
+        self._reasoning_sink = reasoning_sink
         self._response_id: str | None = None
         self._model: str | None = None
         self._next_sequence = 0
@@ -508,6 +519,10 @@ class _ChatStreamDecoder:
         known = {"role", "content", "tool_calls", "refusal", "reasoning_content"}
         if any(key not in known and value is not None for key, value in delta.items()):
             raise _unknown("openai.unknown_delta_semantic")
+        reasoning = delta.get("reasoning_content")
+        if reasoning and self._reasoning_sink is not None:
+            # Display-only thinking channel; never stored or echoed back.
+            self._reasoning_sink(reasoning)
         role = delta.get("role")
         if role is not None and role != "assistant":
             raise _unknown("openai.unknown_delta_role")

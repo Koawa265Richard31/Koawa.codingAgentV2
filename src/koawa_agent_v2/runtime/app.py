@@ -57,12 +57,14 @@ class AppRuntime:
         *,
         model_client: object | None = None,
         api_key: str | None = None,
+        reasoning_sink: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
         self.assembled = assemble_runtime(
             config,
             model_client=model_client,
             api_key=api_key,
+            reasoning_sink=reasoning_sink,
         )
         # Turns started through chat() resume without the D5 completion gate.
         self._chat_turn_ids: set[UUID] = set()
@@ -75,6 +77,7 @@ class AppRuntime:
         repo_override: str | Path | None = None,
         model_client: object | None = None,
         api_key: str | None = None,
+        reasoning_sink: Callable[[str], None] | None = None,
     ) -> "AppRuntime":
         config = load_runtime_config(path)
         if repo_override is not None:
@@ -86,6 +89,7 @@ class AppRuntime:
             config,
             model_client=model_client,
             api_key=api_key,
+            reasoning_sink=reasoning_sink,
         )
 
     def run(

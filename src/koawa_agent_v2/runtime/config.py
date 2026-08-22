@@ -369,6 +369,10 @@ class RuntimeConfig:
     history_max_turns: int = 16
     history_max_chars: int = 32_000
     compact_min_turns: int = 4
+    # Per-principal tool action budget per run (D9). Sorted (principal, limit)
+    # pairs; the interactive default is tight so small models cannot burn the
+    # whole turn on repeated failed attempts.
+    budget_action_limits: tuple[tuple[str, int], ...] = (("root", 20),)
 
     def __post_init__(self) -> None:
         if not isinstance(self.repo, Path) or not self.repo.is_absolute():
@@ -435,6 +439,26 @@ class RuntimeConfig:
             or self.history_max_chars > 2_000_000
         ):
             raise RuntimeConfigError("invalid_history_max_chars")
+        if not isinstance(self.budget_action_limits, tuple) or any(
+            not isinstance(pair, tuple)
+            or len(pair) != 2
+            or not isinstance(pair[0], str)
+            or not _ENV_NAME.fullmatch(pair[0])
+            or not isinstance(pair[1], int)
+            or isinstance(pair[1], bool)
+            or pair[1] <= 0
+            for pair in self.budget_action_limits
+        ):
+            raise RuntimeConfigError("invalid_budget_action_limits")
+        if len({pair[0] for pair in self.budget_action_limits}) != len(
+            self.budget_action_limits
+        ):
+            raise RuntimeConfigError("duplicate_budget_principal")
+        object.__setattr__(
+            self,
+            "budget_action_limits",
+            tuple(sorted(self.budget_action_limits, key=lambda pair: pair[0])),
+        )
 
     def __repr__(self) -> str:
         return (
@@ -491,6 +515,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         "history_max_turns",
         "history_max_chars",
         "compact_min_turns",
+        "budget_action_limits",
     }
     unknown = set(document) - allowed
     if unknown:
@@ -511,6 +536,12 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     history_max_turns = document.get("history_max_turns", 16)
     history_max_chars = document.get("history_max_chars", 32_000)
     compact_min_turns = document.get("compact_min_turns", 4)
+    raw_budget = document.get("budget_action_limits", {"root": 20})
+    if not isinstance(raw_budget, dict):
+        raise RuntimeConfigError("invalid_budget_action_limits")
+    budget_action_limits = tuple(
+        (str(key), value) for key, value in raw_budget.items()
+    )
     return RuntimeConfig(
         repo=repo,
         db=db,
@@ -527,6 +558,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         history_max_turns=history_max_turns,
         history_max_chars=history_max_chars,
         compact_min_turns=compact_min_turns,
+        budget_action_limits=budget_action_limits,
     )
 
 

@@ -11,6 +11,7 @@ from koawa_agent_v2.policy import Decision
 from koawa_agent_v2.runtime.config import (
     DEFAULT_SYSTEM_PROMPT,
     ProviderConfig,
+    RuntimeConfig,
     RuntimeConfigError,
     SandboxRunner,
     load_runtime_config,
@@ -107,6 +108,37 @@ class RuntimeConfigTest(unittest.TestCase):
         with self.assertRaises(RuntimeConfigError) as raised:
             load_runtime_config(_write_config(self.root, document))
         self.assertEqual("invalid_reasoning_effort", raised.exception.code)
+
+    def test_budget_action_limits_parsed_and_validated(self) -> None:
+        document = self._base_document()
+        document["budget_action_limits"] = {"root": 40, "reviewer": 5}
+        config = load_runtime_config(_write_config(self.root, document))
+        self.assertEqual((("reviewer", 5), ("root", 40)), config.budget_action_limits)
+
+    def test_budget_action_limits_reject_non_positive(self) -> None:
+        document = self._base_document()
+        document["budget_action_limits"] = {"root": 0}
+        with self.assertRaises(RuntimeConfigError) as raised:
+            load_runtime_config(_write_config(self.root, document))
+        self.assertEqual("invalid_budget_action_limits", raised.exception.code)
+
+    def test_budget_action_limits_reject_duplicate_principal(self) -> None:
+        document = self._base_document()
+        document["budget_action_limits"] = {"root": 1}
+        config = load_runtime_config(_write_config(self.root, document))
+        # duplicate principal cannot be expressed in JSON; validate via direct build
+        with self.assertRaises(RuntimeConfigError) as raised:
+            RuntimeConfig(
+                repo=self.root.resolve(),
+                db=(self.root.parent / f"{self.root.name}-db.sqlite3").resolve(),
+                provider=config.provider,
+                sandbox=config.sandbox,
+                test_profiles=config.test_profiles,
+                policy=config.policy,
+                system_prompt="s",
+                budget_action_limits=(("root", 1), ("root", 2)),
+            )
+        self.assertEqual("duplicate_budget_principal", raised.exception.code)
 
     def test_reasoning_effort_rejects_unknown_family(self) -> None:
         document = self._base_document()

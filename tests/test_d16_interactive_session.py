@@ -162,6 +162,33 @@ class _ChatModel:
         )
 
 
+class _TraceModel:
+    """Round 1: one successful read_file tool call; round 2: text answer."""
+
+    def __init__(self) -> None:
+        self.round = 0
+
+    def stream(self, request: ModelRequest) -> tuple[ModelStreamEvent, ...]:
+        self.round += 1
+        if self.round == 1:
+            return _stream(
+                request,
+                _call(
+                    "read_file",
+                    {"path": "calc.py", "start_line": 1, "max_lines": 5},
+                    "call-trace",
+                ),
+                FinishReason.TOOL_CALLS,
+                "t1",
+            )
+        return _stream(
+            request,
+            AssistantTextItem(0, "chat-text:t", "read it"),
+            FinishReason.STOP,
+            "t2",
+        )
+
+
 class _ApprovalModel:
     """Tool call first (triggers durable approval), then a final text answer."""
 
@@ -370,6 +397,56 @@ class InteractiveSessionTest(unittest.TestCase):
         outcome = app.chat("hello", thread_id="not-a-uuid")
         self.assertFalse(outcome.ok)
         self.assertEqual("invalid_thread_id", outcome.code)
+
+    def test_chat_event_sink_sees_tool_calls(self) -> None:
+        """事件通道把模型的工具调用实时暴露给 CLI（轨迹显示的数据源）。"""
+        model = _TraceModel()
+        app = AppRuntime(_runtime_config(self.repo), model_client=model)
+        seen: list[str] = []
+
+        def sink(event: object) -> None:
+            if (
+                isinstance(event, ItemCompleted)
+                and getattr(event.item, "kind", None) is OutputKind.TOOL_CALL
+            ):
+                seen.append(event.item.name)
+
+        outcome = app.chat(
+            "read calc.py",
+            history=SessionHistory(provider="test"),
+            event_sink=sink,
+        )
+        self.assertTrue(outcome.ok, outcome.payload)
+        self.assertEqual(["read_file"], seen)
+
+    def test_cli_tool_trace_helper_prints_ok_lines(self) -> None:
+        """CLI 工具轨迹：成功的工具执行打印 ✓ 行。"""
+        import contextlib
+        import io
+
+        from koawa_agent_v2.runtime.cli import _print_tool_trace, _store_position
+
+        model = _TraceModel()
+        app = AppRuntime(_runtime_config(self.repo), model_client=model)
+        before = _store_position(app)
+        calls: dict[str, str] = {}
+
+        def sink(event: object) -> None:
+            if (
+                isinstance(event, ItemCompleted)
+                and getattr(event.item, "kind", None) is OutputKind.TOOL_CALL
+            ):
+                calls[event.item.call_id] = event.item.name
+
+        app.chat(
+            "read calc.py",
+            history=SessionHistory(provider="test"),
+            event_sink=sink,
+        )
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            _print_tool_trace(app, before, calls)
+        self.assertIn("✓ read_file", buffer.getvalue())
 
     def test_approval_ask_then_approve_resumes_to_completed(self) -> None:
         model = _ApprovalModel()

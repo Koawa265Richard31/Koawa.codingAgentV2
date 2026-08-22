@@ -300,6 +300,41 @@ class RuntimeAssemblyTest(unittest.TestCase):
             self.assertIn("tool.execution-prepared.v1", event_types)
             self.assertIn("tool.execution-succeeded.v1", event_types)
 
+    def test_non_git_repo_fails_with_clear_code(self) -> None:
+        """非 git 目录装配时报 not_a_git_repository，而不是模糊的 runtime_assembly_failed。"""
+        from koawa_agent_v2.runtime.assembly import RuntimeAssemblyError
+        from koawa_agent_v2.runtime.config import RuntimeConfig, PolicyConfig
+
+        with TemporaryDirectory(prefix="koawa-p0-nongit-") as temporary:
+            base = Path(temporary)
+            root = base / "nongit"
+            root.mkdir()
+            config = RuntimeConfig(
+                repo=root,
+                db=base / "state.sqlite3",
+                provider=ProviderConfig(
+                    base_url="http://127.0.0.1:1/v1",
+                    api_key_env="P0_TEST_KEY",
+                    model="test-model",
+                ),
+                sandbox=SandboxConfig(
+                    runner=SandboxRunner.HOST,
+                    host_trust=RepositoryTrustMode.BUILTIN_FIXTURE,
+                ),
+                test_profiles=(
+                    TestProfileConfig(
+                        "unit",
+                        (str(Path(sys.executable).resolve()), "-B"),
+                        timeout_seconds=30,
+                    ),
+                ),
+                policy=PolicyConfig(),
+                system_prompt="s",
+            )
+            with self.assertRaises(RuntimeAssemblyError) as raised:
+                AppRuntime(config, model_client=_RepairModel())
+            self.assertEqual("not_a_git_repository", raised.exception.code)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -272,6 +272,47 @@ class OpenAICompatibleChatClientTest(unittest.TestCase):
         )
         self.assertEqual({"type": "disabled"}, plain["thinking"])
 
+    def test_reasoning_sink_receives_fragments_without_touching_stream(self) -> None:
+        """reasoning_content 只进显示通道，canonical stream 不受影响。"""
+        body = _sse(
+            _chunk(
+                choices=[
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "reasoning_content": "think a",
+                            "content": "",
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            ),
+            _chunk(
+                choices=[
+                    {
+                        "index": 0,
+                        "delta": {"reasoning_content": "b", "content": "答案"},
+                        "finish_reason": None,
+                    }
+                ]
+            ),
+            _chunk(choices=[{"index": 0, "delta": {}, "finish_reason": "stop"}]),
+        )
+        opener = _RecordingUrlOpen(_FakeResponse(body))
+        fragments: list[str] = []
+        client = OpenAICompatibleChatClient(
+            "https://example.test/v1/",
+            "super-secret-key",
+            reasoning_sink=fragments.append,
+            urlopen=opener,
+        )
+        events = tuple(client.stream(_request(tools=False)))
+        turn = assemble_model_stream(events)
+        self.assertEqual(["think a", "b"], fragments)
+        self.assertEqual("答案", turn.final_text)
+        self.assertEqual(FinishReason.STOP, turn.finish_reason)
+
     def test_interleaved_multiple_tool_calls_complete_in_canonical_order(self) -> None:
         """两个调用的 argument delta 可交错，但 call identity 和最终顺序不能串。"""
         body = _sse(

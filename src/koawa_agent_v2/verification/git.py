@@ -114,7 +114,16 @@ class GitFacade:
         except OSError:
             raise GitFacadeError("git_not_available") from None
         self._resolver = resolver
-        probe = self._git_command(("rev-parse", "--is-inside-work-tree"), max_bytes=128)
+        try:
+            probe = self._git_command(
+                ("rev-parse", "--is-inside-work-tree"), max_bytes=128
+            )
+        except GitFacadeError as exc:
+            # A non-repository directory makes rev-parse exit non-zero before
+            # any real probe output; report the actionable code.
+            if exc.code == "git_command_failed":
+                raise GitFacadeError("not_a_git_repository") from None
+            raise
         if probe.strip() != b"true":
             raise GitFacadeError("not_a_git_repository")
         # 可信 facade 会关闭用户/仓库配置中的 fsmonitor。第一次 status 允许 Git

@@ -446,12 +446,16 @@ def _real_main(argv: list[str]) -> int:
 
     arguments = parser.parse_args(argv[1:])
     try:
+        thinking = _ThinkingDisplay()
         app = AppRuntime.from_config_file(
             arguments.config,
             repo_override=getattr(arguments, "repo", None),
+            reasoning_sink=(
+                thinking if arguments.command == "interactive" else None
+            ),
         )
         if arguments.command == "interactive":
-            return _interactive_main(app)
+            return _interactive_main(app, thinking=thinking)
         if arguments.command == "run":
             task = _read_task(arguments)
             outcome = app.run(task)
@@ -501,7 +505,24 @@ _INTERACTIVE_HELP = """commands:
 EOF (Ctrl+Z) and Ctrl+C also quit cleanly."""
 
 
-def _interactive_main(app) -> int:
+class _ThinkingDisplay:
+    """Streams model reasoning fragments to stdout with a lazy header."""
+
+    def __init__(self) -> None:
+        self.started = False
+
+    def __call__(self, fragment: str) -> None:
+        if not self.started:
+            print("\n  … 思考: ", end="", flush=True)
+            self.started = True
+        print(fragment, end="", flush=True)
+
+    def finish(self) -> None:
+        if self.started:
+            print(flush=True)
+
+
+def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
     import json as _json
     from uuid import UUID as _UUID
 
@@ -641,7 +662,26 @@ def _interactive_main(app) -> int:
                 print(f"cannot switch thread: {getattr(exc, 'code', exc)}")
             continue
 
-        outcome = app.chat(text, thread_id=thread_id, history=history)
+        before_position = _store_position(app)
+        calls: dict[str, str] = {}
+
+        def event_sink(event: object) -> None:
+            if isinstance(event, ItemCompleted):
+                item = getattr(event, "item", None)
+                if (
+                    item is not None
+                    and getattr(item, "kind", None) is OutputKind.TOOL_CALL
+                ):
+                    calls[item.call_id] = item.name
+                    print(f"  → {item.name} {item.arguments_json}", flush=True)
+
+        outcome = app.chat(
+            text,
+            thread_id=thread_id,
+            history=history,
+            event_sink=event_sink,
+        )
+        thinking.finish()
         payload = outcome.payload
         final_text = payload.get("final_text") or ""
         print(("agent> " + final_text).rstrip() if final_text else f"agent> [{outcome.code}] {payload.get('error')}")
@@ -662,7 +702,96 @@ def _interactive_main(app) -> int:
         elif payload.get("status") == "waiting_for_approval":
             drain_approvals()
         else:
+            error_text = payload.get("error") or ""
             print(f"  [turn failed: {outcome.code}]")
+            if "resource_budget_exceeded" in error_text:
+                limits_map = dict(config.budget_action_limits)
+                print(
+                    f"  本轮工具动作预算已耗尽（{limits_map.get('root', '?')} 次/轮，"
+                    f"可在配置 budget_action_limits 中调大）。建议：把请求写得更具体，"
+                    f"例如明确要创建的文件名和内容。"
+                )
+        _print_tool_trace(app, before_position, calls)
+        print(
+            f"  [ctx] history_turns={history.turn_count} "
+            f"projected_items={len(history.context_items())}"
+        )
+
+
+def _store_position(app) -> int:
+    """Current last event position, used to scope diagnostics to one turn."""
+    store = app.assembled.store
+    cursor = 0
+    last = 0  # empty store: read_all(after_position=0) is the whole (empty) store
+    while True:
+        page = store.read_all(after_position=cursor, limit=500)
+        if not page:
+            return last
+        last = page[-1].global_position
+        if len(page) < 500:
+            return last
+        cursor = page[-1].global_position
+
+
+def _tool_error_code(content: object) -> str:
+    """Extract the stable error code from a tool result payload, if present."""
+    if not isinstance(content, str):
+        return "tool_error"
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        return "tool_error"
+    if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
+        code = parsed["error"].get("code")
+        if isinstance(code, str) and code:
+            return code
+    return "tool_error"
+
+
+def _print_tool_trace(app, after_position: int, calls: dict[str, str]) -> None:
+    """Print per-tool execution results since a store position (ok / failed).
+
+    Best-effort diagnostics: display must never break the interactive session,
+    so any unexpected event shape is skipped instead of raised.
+    """
+    store = app.assembled.store
+    exec_to_call: dict[str, str] = {}
+    lines: list[str] = []
+    cursor = after_position
+    try:
+        while True:
+            page = store.read_all(after_position=cursor, limit=500)
+            if not page:
+                break
+            for event in page:
+                try:
+                    payload = event.payload
+                    if event.event_type == "tool.execution-prepared.v1":
+                        exec_to_call[payload.get("execution_id")] = payload.get(
+                            "call_id"
+                        )
+                    elif event.event_type == "tool.execution-succeeded.v1":
+                        name = calls.get(
+                            exec_to_call.get(payload.get("execution_id")), "?"
+                        )
+                        lines.append(f"  ✓ {name}")
+                    elif event.event_type == "tool.execution-failed.v1":
+                        name = calls.get(
+                            exec_to_call.get(payload.get("execution_id")), "?"
+                        )
+                        code = _tool_error_code(
+                            payload.get("result", {}).get("content")
+                        )
+                        lines.append(f"  ✗ {name} [{code}]")
+                except Exception:
+                    continue  # skip unparseable events; never crash the session
+            if len(page) < 500:
+                break
+            cursor = page[-1].global_position
+    except Exception:
+        lines.append("  (工具轨迹读取失败：事件库异常)")
+    for line in lines:
+        print(line)
 
 
 def _read_task(arguments) -> str:

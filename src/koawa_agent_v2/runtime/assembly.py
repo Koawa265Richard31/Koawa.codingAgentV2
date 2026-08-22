@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import shutil
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -59,6 +59,7 @@ from ..verification.runner import (
     RepositoryTrust,
     TrustedCommandRunner,
 )
+from ..verification.git import GitFacadeError
 from ..verification.tools import build_verified_coding_tool_registry
 from .composite_registry import CompositeToolRegistry
 from .config import (
@@ -166,6 +167,7 @@ def assemble_runtime(
     *,
     model_client: object | None = None,
     api_key: str | None = None,
+    reasoning_sink: Callable[[str], None] | None = None,
 ) -> AssembledRuntime:
     """Build the complete runtime.
 
@@ -181,7 +183,11 @@ def assemble_runtime(
         store = SqliteEventStore(config.db)
         runtime = ThreadRuntime(store, actor="p0-runtime")
         ledger = ToolLedgerStore(store)
-        approvals = ApprovalService(store, ledger, budget_action_limits={"root": 20})
+        approvals = ApprovalService(
+            store,
+            ledger,
+            budget_action_limits=dict(config.budget_action_limits),
+        )
         trace = TraceStore(store)
         correlation_id = uuid4()
 
@@ -214,7 +220,11 @@ def assemble_runtime(
         )
         if model_client is None:
             key = api_key if api_key is not None else resolve_api_key(config.provider)
-            client = _build_openai_client(config.provider, key)
+            client = _build_openai_client(
+                config.provider,
+                key,
+                reasoning_sink=reasoning_sink,
+            )
         else:
             if not callable(getattr(model_client, "stream", None)):
                 raise RuntimeAssemblyError("invalid_model_client")
@@ -272,6 +282,8 @@ def assemble_runtime(
         raise RuntimeAssemblyError(getattr(exc, "code", "command_runner_failed")) from None
     except SandboxError as exc:
         raise RuntimeAssemblyError(getattr(exc, "code", "sandbox_failed")) from None
+    except GitFacadeError as exc:
+        raise RuntimeAssemblyError(getattr(exc, "code", "git_facade_failed")) from None
     except Exception as exc:
         raise RuntimeAssemblyError("runtime_assembly_failed") from None
 
@@ -532,7 +544,12 @@ def _bind_ledger_policy(
     )
 
 
-def _build_openai_client(provider: ProviderConfig, api_key: str | None):
+def _build_openai_client(
+    provider: ProviderConfig,
+    api_key: str | None,
+    *,
+    reasoning_sink: Callable[[str], None] | None = None,
+):
     return OpenAICompatibleChatClient(
         provider.base_url,
         api_key,
@@ -544,4 +561,5 @@ def _build_openai_client(provider: ProviderConfig, api_key: str | None):
         max_sse_event_bytes=provider.max_sse_event_bytes,
         provider_options=dict(provider.provider_options),
         reasoning_effort=provider.reasoning_effort,
+        reasoning_sink=reasoning_sink,
     )
