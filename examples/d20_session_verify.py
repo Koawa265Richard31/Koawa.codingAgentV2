@@ -30,8 +30,10 @@ DEMO_REPO = "D:/koawa-demo/d20_repo_" + uuid4().hex[:8]
 VERIFY_DB = "D:/koawa-demo/d20_verify.sqlite3"
 CONFIG_A = "D:/koawa-demo/my_config_d20_a.json"
 CONFIG_B = "D:/koawa-demo/my_config_d20_b.json"
-TRANSCRIPT_A = "D:/koawa-demo/d20_verify_a.txt"
-TRANSCRIPT_B = "D:/koawa-demo/d20_verify_b.txt"
+RUN_TAG = os.environ.get("D20_RUN_TAG", "")
+MODEL_OVERRIDE = os.environ.get("D20_MODEL", "")
+TRANSCRIPT_A = "D:/koawa-demo/d20_verify_a" + RUN_TAG + ".txt"
+TRANSCRIPT_B = "D:/koawa-demo/d20_verify_b" + RUN_TAG + ".txt"
 PYTHON = "py"
 V2_ROOT = "D:/KoawaAgent/v2"
 
@@ -179,11 +181,19 @@ def main() -> int:
         print("缺少 D:/koawa-demo/my_config.json —— 先准备演示环境")
         return 2
     fresh_demo_repo()
-    overrides_a = {"repo": DEMO_REPO, "db": VERIFY_DB,
-                   "history_max_turns": 2, "compact_min_turns": 2}
+    if MODEL_OVERRIDE:
+        overrides_a = {"repo": DEMO_REPO, "db": VERIFY_DB,
+                       "history_max_turns": 2, "compact_min_turns": 2,
+                       "provider": {"model": MODEL_OVERRIDE}}
+    else:
+        overrides_a = {"repo": DEMO_REPO, "db": VERIFY_DB,
+                       "history_max_turns": 2, "compact_min_turns": 2}
     write_variant(overrides_a, CONFIG_A)
+    provider_overrides: dict[str, object] = {"reasoning_effort": "low"}
+    if MODEL_OVERRIDE:
+        provider_overrides["model"] = MODEL_OVERRIDE
     write_variant({"repo": DEMO_REPO, "db": VERIFY_DB,
-                   "provider": {"reasoning_effort": "low"}}, CONFIG_B)
+                   "provider": provider_overrides}, CONFIG_B)
 
     print("== 会话 A（reasoning off）：", len(MESSAGES_A), "条输入 ==")
     transcript_a = run_cli(CONFIG_A, MESSAGES_A, timeout=1500)

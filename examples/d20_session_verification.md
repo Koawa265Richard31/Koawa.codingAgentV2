@@ -70,13 +70,13 @@
 文件实际不存在。交互模式（task_mode=False）没有 D5 完成门，模型可以空手"完成"。第 4/5 轮未再出现，
 但这是随机行为，不能靠运气。建议：交互模式也接一个轻量完成门（声明过的文件必须真实存在）。
 
-**F2 · UPDATE 路径被系统性误拦（严重，已复现 4 轮 × 干净仓库）**：
-任何对已提交文件的 UPDATE 都返回 baseline_dirty_path_forbidden。事件库证据显示运行期 git status 将
+**F2 · UPDATE 路径被高发误拦（严重：35B 4/4、122B 1/2 轮被拦；与模型无关）**：
+对已提交文件的 UPDATE 经常返回 baseline_dirty_path_forbidden。事件库证据显示运行期 git status 将
 未变更的 README 报为 " M"（baseline_dirty_paths=[README.md]，agent_changed_paths=[]）；会话结束后
 磁盘 git status 干净、文件 hash 与 HEAD 一致。驱动在第 5 轮运行前执行 git update-index --really-refresh，
-仍被拦截。结论：运行时对"未变更文件"的脏判定存在系统性假阳性（Windows stat/索引缓存时序，或每轮
-worktree/snapshot 与 GitFacade 初始化时序），需要单独定位修复（建议 D22 专项：GitFacade 保护路径
-判定回退到内容指纹比对，stat 脏但 hash 一致 → 视为干净）。ADD 路径不受影响，因此本协议能完成。
+仍被拦截；但 122B 对比轮 q122a 中同一任务四 UPDATE **一次成功**（README 第二行确实被改）——
+证明这是瞬态误判（高发而非必然），与模型无关，且 UPDATE 全链路本身可用。建议 D22 专项：GitFacade
+保护路径判定回退到内容指纹比对（stat 脏但 hash 一致 → 视为干净）。ADD 路径不受影响。
 
 **F3 · baseline_dirty 类错误无 detail 且不可自愈**：模型拿到 baseline_dirty_path_forbidden 后只会重试同一
 patch（3 次后撞 max_output_tokens）。任务 4 在用户明确"失败就复述原因"时才停止。错误码是稳定的、正确
@@ -104,3 +104,50 @@ patch（3 次后撞 max_output_tokens）。任务 4 在用户明确"失败就复
 - 每轮约 15–25 次真实模型调用（含 1–2 次压缩摘要），单轮 6–10 分钟；总计 5 轮。
 - 模型输出有随机性：A1/A3b 等行为断言可能随轮次波动；机制断言（A2/A3/A4/B/A5 族）稳定。
 - 验证不进 CI；复现命令见 examples/d20_session_verify.py 文件头。
+- 对比轮（122B）另记：单轮 8–14 分钟；35B 5 轮 + 122B 2 轮，总计 7 轮真模型会话。
+
+## 8. 对比轮：更强模型 Qwen/Qwen3.5-122B-A10B（2 轮，D20_RUN_TAG=_q122 / _q122b）
+
+> 目的：区分"35B-A3B 暴露的问题"哪些是模型能力问题、哪些是运行时问题。
+> 方法：同一 driver、同一协议、仅 D20_MODEL=Qwen/Qwen3.5-122B-A10B；模型更贵更慢（单轮约 8–14 分钟）。
+> 转写：D:/koawa-demo/d20_verify_a_q122.txt / d20_verify_a_q122b.txt。
+
+| # | 断言 | q122a | q122b | 与 35B（r4/r5）对比 |
+| --- | --- | --- | --- | --- |
+| A0 | 思考关闭无思考流 | PASS | PASS | 一致 |
+| A1 | 记忆投影回答 | FAIL¹ | FAIL¹ | 两轮首轮任务都被 F6 吞掉，模型如实说没有上一条消息——无法公平对比；行为诚实（优于 35B 轮 4 的答非所问） |
+| A2 | 压缩触发 | PASS | PASS | 一致 |
+| A2b | 压缩块含 files= | FAIL | FAIL | 一致（受 F2 影响：本会话无成功修改） |
+| A3 | /recall | PASS | PASS | 一致 |
+| A3b | calc.py 真实存在（防幻觉） | PASS | PASS | **显著改善**：35B 前两轮 3 次无工具幻觉完成；122B 两轮 0 次，全部真实调工具 |
+| A4 | /journal | PASS | PASS | 一致 |
+| A5 | index.html 完成 | PASS | PASS | 一致 |
+| A5a | 完成真实性 | PASS | PASS | 一致 |
+| A5b | 形状类失败带 detail | PASS（无触发） | PASS（无触发） | 一致 |
+| A5c | 无预算耗尽 | PASS | PASS | 一致 |
+| A5e | 任务一 UPDATE | FAIL¹ | FAIL¹ | 首轮任务被 F6 吞掉，未执行（见 F6） |
+| A5f | 任务四 UPDATE 如实呈现 | PASS **成功**（line2=edition=d20） | PASS（本轮被 baseline_dirty 拦截） | **关键对照**：UPDATE 时而被拦时而成功 → 坐实 F2 是与模型无关的瞬态判定；q122a 证明 UPDATE 全链路 E2E 可用（幻影缺席时） |
+| B | 思考链实时输出 | PASS | PASS | 一致（122B 思考内容更完整） |
+
+¹ 伪影：首轮（任务一）在工具调用前就因 F6 失败，后续轮次无该任务上下文。
+
+### 8.1 新发现 F6：122B 端点首轮必现 invalid_completed_snapshot（2/2）
+
+- 现象：会话第一轮模型响应在**未产生任何工具调用**时失败：agent> [turn_failed] d2:openai.invalid_completed_snapshot，history_turns=0。122B 复现率 2/2；35B 五轮从未出现。
+- 机制：model/openai_client.py 收流后构建 ModelTurn 的规范校验失败（TypeError/ValueError → openai.invalid_completed_snapshot，约 718 行）——122B 端点返回的完成快照（finish/usage 形态）不合解码器规范。
+- 影响：整轮任务丢失且无自动重试（任务一从未执行，后续记忆断言失真）。这是"无隐式重试"设计在**流协议级失败**上的边界。
+- 建议：随 D22 处理——对 provider 流协议级失败（非工具错误）做有界重试（1 次 + 审计事件），或解码器对 finish/usage 缺省做容错归一（与既有空 delta/usage 容错同一类）。
+
+### 8.2 模型能力问题的诚实归因
+
+1. **F1（无工具幻觉完成）= 模型能力问题**：35B 出现 3 次；122B 两轮 0 次、全部真实执行工具。更强模型显著改善，但样本小（n=2），完成门仍应作为兜底。
+2. **F5（记忆遵循）= 部分模型能力问题**：122B 在无上下文时诚实承认（优于 35B 的复述/编造倾向），但两轮首轮任务丢失，无法验证"有上下文时"的记忆遵循；机制层（投影/压缩）两模型一致正常。
+3. **F2（UPDATE 基线误判）= 运行时问题，与模型无关**：122B 两轮一成一败，与 35B 全败的差异是同机时序而非模型；q122a 的成功证明 UPDATE 自修复链路本身可用。
+4. **F6 = 端点/解码器契约问题**：122B 特有 2/2，35B 无——指向运行时缺少流协议级有界重试（或解码器归一）。
+5. 机制类断言（A0/A2/A3/A4/A5/A5a/A5b/A5c/B）两个模型完全一致通过：运行时能力不受模型影响。
+
+## 9. 最终结论
+
+- D20 Part B 协议全部机制通过；真实模型暴露的问题已按性质归因：模型能力 ×2（F1/F5）、运行时 ×3（F2/F3/F4）、端点 ×1（F6）。
+- 建议 D22 专项：F2（基线判定回退内容指纹）、F1（交互完成门）、F6（流协议级有界重试）、F4（files= 覆盖 ADD）；F3（失败错误附修复指引）低风险优先。
+
