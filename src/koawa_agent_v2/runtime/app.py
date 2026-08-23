@@ -148,7 +148,11 @@ class AppRuntime:
             initial_context = (
                 history.context_items() if history is not None else ()
             )
-            worker = self.assembled.build_worker(initial_context, task_mode=False)
+            worker = self.assembled.build_worker(
+                initial_context,
+                task_mode=False,
+                claim_gate=True,
+            )
             result = worker.execute(
                 queued.turn_id,
                 queued.version,

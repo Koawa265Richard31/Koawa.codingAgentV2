@@ -282,7 +282,51 @@ class OpenAICompatibleChatClient:
             headers=headers,
             method="POST",
         )
+        # D22 F6：空完成（零输出）在客户端做单次有界重试。重试只在没有任何
+        # 内容事件对外可见时发生（_attempt 缓冲 TurnStarted 直到出现内容或终态），
+        # 幂等安全：未发文本、未执行工具，无副作用可重复。签名更换后 _attempt 负责
+        # 单次 HTTP+解码；本层只做分类与重试纪律（原则同 codex responses_retry：
+        # 传输类才可重试；这里是"空完成"这个端点怪癖的有意例外，见 D22 注释）。
+        retried = False
+        while True:
+            try:
+                yield from self._attempt(
+                    request,
+                    http_request,
+                    progress_guard=progress_guard,
+                    deadline=deadline,
+                )
+                return
+            except OpenAICompatibleClientError as exc:
+                if exc.code == "openai.empty_completion" and not retried:
+                    retried = True
+                    continue
+                if exc.code == "openai.empty_completion":
+                    raise OpenAICompatibleClientError(
+                        "openai.empty_completion_retried"
+                    ) from None
+                raise
+
+    def _attempt(
+        self,
+        request: ModelRequest,
+        http_request: urllib.request.Request,
+        *,
+        progress_guard: Callable[[], None] | None,
+        deadline: float,
+    ) -> Iterator[ModelStreamEvent]:
+        """一次 HTTP+解码尝试；首个内容事件出现前缓冲 TurnStarted。"""
         decoder = _ChatStreamDecoder(request, reasoning_sink=self._reasoning_sink)
+        pending: list[ModelStreamEvent] = []
+        flushed = False
+
+        def flush() -> None:
+            """把缓冲的首事件（TurnStarted 等）按序释放。"""
+            nonlocal flushed
+            if not flushed and pending:
+                yield from pending
+                pending.clear()
+            flushed = True
 
         try:
             _check_stream_progress(progress_guard, deadline)
@@ -312,17 +356,27 @@ class OpenAICompatibleChatClient:
                     events = decoder.feed(data, provider_sequence)
                     for event in events:
                         _check_stream_progress(progress_guard, deadline)
-                        yield event
+                        if isinstance(event, TurnStarted):
+                            pending.append(event)
+                        else:
+                            yield from flush()
+                            yield event
                         decoder.note_emitted(event)
                 _check_stream_progress(progress_guard, deadline)
                 for event in decoder.finish():
                     _check_stream_progress(progress_guard, deadline)
+                    yield from flush()
                     yield event
                     decoder.note_emitted(event)
         except GeneratorExit:
             raise
         except _AdapterFault as exc:
+            if exc.code == "openai.empty_completion" and not flushed:
+                # 缓冲里只有 TurnStarted（或为空）：对外零可见输出，丢弃缓冲并
+                # 交给上层做单次重试；不要发布 StreamFailed。
+                raise OpenAICompatibleClientError(exc.code) from None
             if decoder.turn_started_emitted:
+                yield from flush()
                 failure = decoder.failure_event(exc)
                 yield failure
                 decoder.note_emitted(failure)
@@ -334,6 +388,7 @@ class OpenAICompatibleChatClient:
                 StreamFailureKind.STREAM_INTERRUPTED,
                 True,
             )
+            yield from flush()
             if decoder.turn_started_emitted:
                 failure = decoder.failure_event(fault)
                 yield failure
@@ -683,6 +738,15 @@ class _ChatStreamDecoder:
             raise _fault("openai.missing_finish_reason")
         if self._terminal_emitted:
             raise _fault("openai.duplicate_terminal")
+        if not self._outputs:
+            # D22 F6 归一：端点以合规快照结束但零输出（SiliconFlow 122B 首轮
+            # 2/2 复现，35B 五轮零次）。归为独立稳定故障而非笼统的 snapshot
+            # 校验错误；客户端对它在零输出前提下做单次有界重试。
+            raise _AdapterFault(
+                "openai.empty_completion",
+                StreamFailureKind.STREAM_INTERRUPTED,
+                True,
+            )
 
         items: list[OutputItem] = []
         try:

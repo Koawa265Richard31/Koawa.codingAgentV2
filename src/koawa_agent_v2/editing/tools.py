@@ -93,7 +93,12 @@ class _ApplyPatchTool:
                 change.path.casefold() in self._protected_paths
                 for change in patch.changes
             ):
-                return tool_error_result("baseline_dirty_path_forbidden")
+                # D22 F3: 保护路径 = 启动时内容真脏/未跟踪的用户工作；detail
+                # 只出现在真实保护场景（幻影已由 F2 内容锚定判定剔除）。
+                return tool_error_result(
+                    "baseline_dirty_path_forbidden",
+                    detail="protected_user_changes:start",
+                )
             result = self._workspace.apply(
                 patch,
                 progress_guard=context.check_progress,

@@ -216,6 +216,7 @@ class AgentLoop:
         *,
         tool_executor: ToolExecutor | None = None,
         completion_gate: CompletionGate | None = None,
+        claim_gate: bool = False,
         limits: AgentLoopLimits | None = None,
         stream_limits: StreamLimits | None = None,
         trace_store: "TraceStore | None" = None,
@@ -232,9 +233,13 @@ class AgentLoop:
             completion_gate, "assert_complete"
         ):
             raise TypeError("completion_gate must implement CompletionGate")
+        if not isinstance(claim_gate, bool):
+            raise TypeError("claim_gate must be bool")
         self._client = client
         self._tool_executor = tool_executor
         self._completion_gate = completion_gate
+        self._claim_gate = claim_gate
+        self._successful_writes: frozenset[str] = frozenset()
         definitions = (
             tuple(tool_executor.definitions())
             if tool_executor is not None
@@ -317,6 +322,7 @@ class AgentLoop:
             raise TypeError("ownership_guard must be callable or None")
         context: list[ModelContextItem] = list(input_items)
         model_turns: list[ModelTurn] = []
+        self._successful_writes = frozenset()
         total_tool_calls = initial_tool_calls
         total_output_chars = initial_output_chars
 
@@ -379,6 +385,8 @@ class AgentLoop:
                 raise AgentLoopError("tool_executor_failed") from None
             if not isinstance(result, ToolExecutionResult): raise AgentLoopError("invalid_tool_executor_result")
             message = ToolResultMessage(echo.call_ref, result.content, result.is_error)
+            if call.name == "apply_patch" and not message.is_error:
+                self._successful_writes = self._successful_writes | frozenset({"apply_patch"})
             context.append(message); total_tool_calls += 1
             if durable_sink is not None: durable_sink.tool_completed(message, total_tool_calls)
 
@@ -432,6 +440,12 @@ class AgentLoop:
                 context.extend(projected)
                 if not turn.final_text.strip():
                     raise AgentLoopError("empty_final_answer")
+                if self._claim_gate:
+                    from ..runtime.claim_gate import claim_gate_allows
+
+                    if not claim_gate_allows(turn.final_text, self._successful_writes):
+                        # D22 F1: 声称改了文件却没有成功写工具 → 防无工具幻觉完成。
+                        raise AgentLoopError("claimed_change_without_tool")
                 if self._completion_gate is not None:
                     try:
                         self._completion_gate.assert_complete(run_id)
@@ -531,6 +545,8 @@ class AgentLoop:
                         content=result.content,
                         is_error=result.is_error,
                     )
+                if call.name == "apply_patch" and not result_message.is_error:
+                    self._successful_writes = self._successful_writes | frozenset({"apply_patch"})
                 results.append(result_message)
                 total_tool_calls += 1
                 if durable_sink is not None:

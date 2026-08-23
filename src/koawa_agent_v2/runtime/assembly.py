@@ -125,6 +125,7 @@ class AssembledRuntime:
         initial_context: Sequence[ModelContextItem] = (),
         *,
         task_mode: bool = True,
+        claim_gate: bool = False,
     ) -> TurnWorker:
         """Build a TurnWorker over the same loop, optionally seeded with history.
 
@@ -138,6 +139,7 @@ class AssembledRuntime:
                 self.client,
                 tool_executor=self.executor,
                 completion_gate=None,
+                claim_gate=claim_gate,
                 limits=AgentLoopLimits(
                     max_model_rounds=self.config.model_rounds,
                     max_tool_calls=self.config.max_tool_calls,

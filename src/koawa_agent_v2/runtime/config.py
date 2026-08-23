@@ -369,6 +369,10 @@ class RuntimeConfig:
     history_max_turns: int = 16
     history_max_chars: int = 32_000
     compact_min_turns: int = 4
+    # D22 F6b: optional summary-fallback model. 仅在回合主体完成但最终回复失败
+    # 时，对一次摘要请求使用该模型（request-scoped，不切换会话模型）。
+    # None/空 = 关闭（默认）：失败时只输出确定性摘要。
+    fallback_summary_model: str | None = None
     # Per-principal tool action budget per run (D9). Sorted (principal, limit)
     # pairs; the interactive default is tight so small models cannot burn the
     # whole turn on repeated failed attempts.
@@ -413,6 +417,15 @@ class RuntimeConfig:
         object.__setattr__(
             self, "system_prompt", _non_empty_text(self.system_prompt, "system_prompt")
         )
+        if self.fallback_summary_model is not None:
+            value = self.fallback_summary_model
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > 200
+                or any(ord(char) < 32 for char in value)
+            ):
+                raise RuntimeConfigError("invalid_fallback_summary_model")
         object.__setattr__(
             self, "owner_id", _provider_name(self.owner_id, "owner_id")
         )
@@ -516,6 +529,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         "history_max_chars",
         "compact_min_turns",
         "budget_action_limits",
+        "fallback_summary_model",
     }
     unknown = set(document) - allowed
     if unknown:
@@ -536,6 +550,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     history_max_turns = document.get("history_max_turns", 16)
     history_max_chars = document.get("history_max_chars", 32_000)
     compact_min_turns = document.get("compact_min_turns", 4)
+    fallback_summary_model = document.get("fallback_summary_model")
     raw_budget = document.get("budget_action_limits", {"root": 20})
     if not isinstance(raw_budget, dict):
         raise RuntimeConfigError("invalid_budget_action_limits")
@@ -559,6 +574,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         history_max_chars=history_max_chars,
         compact_min_turns=compact_min_turns,
         budget_action_limits=budget_action_limits,
+        fallback_summary_model=fallback_summary_model,
     )
 
 

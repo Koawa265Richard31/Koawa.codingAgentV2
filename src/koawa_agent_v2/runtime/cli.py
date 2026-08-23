@@ -751,6 +751,9 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
                     f"可在配置 budget_action_limits 中调大）。建议：把请求写得更具体，"
                     f"例如明确要创建的文件名和内容。"
                 )
+            else:
+                # D22 F6b：回合主体已完成但最终回复失败 → 可见的收尾摘要。
+                _print_turn_failure_summary(app, before_position, calls, config)
         _print_tool_trace(app, before_position, calls)
         print(
             f"  [ctx] history_turns={history.turn_count} "
@@ -834,8 +837,89 @@ def _print_tool_trace(app, after_position: int, calls: dict[str, str]) -> None:
         print(line)
 
 
+def _print_turn_failure_summary(app, after_position: int, calls, config) -> None:
+    """D22 F6b：确定性收尾摘要；可选 fallback_summary_model 只用于这一次请求。"""
+    try:
+        ok_tools: list[str] = []
+        exec_to_call: dict[str, str] = {}
+        cursor = after_position
+        while True:
+            page = app.assembled.store.read_all(after_position=cursor, limit=500)
+            if not page:
+                break
+            for event in page:
+                try:
+                    payload = event.payload
+                    if event.event_type == "tool.execution-prepared.v1":
+                        exec_to_call[payload.get("execution_id")] = payload.get("call_id")
+                    elif event.event_type == "tool.execution-succeeded.v1":
+                        call_id = exec_to_call.get(payload.get("execution_id"))
+                        name = calls.get(call_id)
+                        if name:
+                            ok_tools.append(name)
+                except Exception:
+                    continue
+            if len(page) < 500:
+                break
+            cursor = page[-1].global_position
+        if not ok_tools:
+            return  # 本回合没有完成任何工具动作：纯失败，无需摘要
+        changed_files = _turn_changed_files(app, after_position)
+        from .turn_summary import build_turn_summary, summarize_with_model
+
+        text = build_turn_summary(ok_tools, changed_files)
+        summary_model = getattr(config, "fallback_summary_model", None)
+        if summary_model:
+            trace_text = (
+                "已执行工具：" + ", ".join(sorted(set(ok_tools)))
+                + ("；改动文件：" + ", ".join(changed_files) if changed_files else "")
+            )
+            try:
+                fallback_text, ok = summarize_with_model(
+                    app.assembled.client,
+                    provider=config.provider.provider,
+                    model=summary_model,
+                    text=trace_text,
+                )
+            except Exception:
+                fallback_text, ok = None, False
+            if ok and fallback_text:
+                print(f"  【最终回复失败，已用模型 {summary_model} 生成摘要】")
+                print("  " + fallback_text)
+                print(f"  （本次摘要仅用该模型一次；下一轮仍使用主模型 {config.provider.model}）")
+                return
+        print(text)
+    except Exception:
+        return
+
+
+def _collect_changed_files(parsed: object) -> set[str]:
+    """D22 F4：从工具结果 JSON 收集改动文件（apply_patch changes + git_diff 补集）。"""
+    files: set[str] = set()
+    if not isinstance(parsed, dict):
+        return files
+    changed_paths = parsed.get("changed_paths")
+    if isinstance(changed_paths, list):
+        for path in changed_paths:
+            if isinstance(path, str) and path:
+                files.add(path)
+    changes = parsed.get("changes")
+    if isinstance(changes, list):
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            path = change.get("path")
+            if isinstance(path, str) and path:
+                files.add(path)
+    return files
+
+
 def _turn_changed_files(app, after_position: int) -> tuple[str, ...]:
-    """changed_paths from the git_diff tool result within one turn's range."""
+    """本回合改动的文件：apply_patch 结果（权威，含 ADD）+ git_diff 补集。
+
+    D22 F4：文件清单的权威来源是 apply_patch 成功结果的 changes[].path；
+    git diff 的 changed_paths 只作补集（内容展示/外部变更检测职责）。
+    """
     files: set[str] = set()
     cursor = after_position
     try:
@@ -853,13 +937,7 @@ def _turn_changed_files(app, after_position: int) -> tuple[str, ...]:
                     parsed = json.loads(content)
                 except Exception:
                     continue
-                if (
-                    isinstance(parsed, dict)
-                    and isinstance(parsed.get("changed_paths"), list)
-                ):
-                    for path in parsed["changed_paths"]:
-                        if isinstance(path, str) and path:
-                            files.add(path)
+                files.update(_collect_changed_files(parsed))
             if len(page) < 500:
                 break
             cursor = page[-1].global_position

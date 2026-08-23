@@ -135,6 +135,11 @@ class GitFacade:
         self._baseline_fingerprints = {
             item.path: self._fingerprint(item.path) for item in self._baseline.entries
         }
+        # D22 F2: 保护路径集合必须内容锚定。status 元数据可能出现 stat 缓存幻影
+        # （报告 " M" 但内容与索引 blob 一致——D20 实测 6 轮中的 5 轮），授权判定
+        # 不得信任它：逐个 baseline 条目用 git hash-object 与 ls-files -s 的索引
+        # blob 比对，内容一致即视为干净、不保护。未跟踪路径无 blob，一律保护。
+        self._protected_paths = self._content_verified_protection(self._baseline)
 
     @property
     def baseline(self) -> GitStatusSnapshot:
@@ -142,7 +147,29 @@ class GitFacade:
 
     @property
     def protected_paths(self) -> frozenset[str]:
-        return self._baseline_paths
+        return self._protected_paths
+
+    def _content_verified_protection(
+        self,
+        baseline: GitStatusSnapshot,
+    ) -> frozenset[str]:
+        """Startup protection set with content-truth dirty classification.
+
+        A path is protected only when it has no index blob (untracked) or when
+        its current content hash differs from the index blob sha.  Phantom
+        stat-cache modifications (metadata says " M", content identical) are
+        therefore NOT protected; the D4 transaction still re-verifies
+        base_sha256 against the live content before applying.
+        """
+        protected: set[str] = set()
+        for entry in baseline.entries:
+            key = entry.path.casefold()
+            if entry.status == "??":
+                protected.add(key)
+                continue
+            if self._diff_has_changes(entry.path):
+                protected.add(key)
+        return frozenset(protected)
 
     def status(
         self,
@@ -240,15 +267,8 @@ class GitFacade:
             status.digest,
         )
 
-    def _git_command(
-        self,
-        arguments: tuple[str, ...],
-        *,
-        max_bytes: int,
-        progress_guard: Callable[[], None] | None = None,
-        allow_truncation: bool = False,
-    ) -> bytes:
-        prefix = (
+    def _git_prefix(self) -> tuple[str, ...]:
+        return (
             str(self._git),
             "-c", "core.hooksPath=" + os.devnull,
             "-c", "core.fsmonitor=false",
@@ -262,20 +282,33 @@ class GitFacade:
             "-c", "submodule.recurse=false",
             "-C", str(self._root),
         )
+
+    @staticmethod
+    def _git_environment() -> dict[str, str]:
+        return {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_EXTERNAL_DIFF": "",
+            "GIT_PAGER": "cat",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+
+    def _git_command(
+        self,
+        arguments: tuple[str, ...],
+        *,
+        max_bytes: int,
+        progress_guard: Callable[[], None] | None = None,
+        allow_truncation: bool = False,
+    ) -> bytes:
         result = run_bounded_process(
             self._root,
-            prefix + arguments,
+            self._git_prefix() + arguments,
             timeout_seconds=self._limits.timeout_seconds,
             max_stdout_bytes=max_bytes,
             max_stderr_bytes=32_768,
-            environment={
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_CONFIG_SYSTEM": os.devnull,
-                "GIT_EXTERNAL_DIFF": "",
-                "GIT_PAGER": "cat",
-                "GIT_TERMINAL_PROMPT": "0",
-            },
+            environment=self._git_environment(),
             progress_guard=progress_guard,
         )
         if result.start_failed:
@@ -287,6 +320,44 @@ class GitFacade:
         if result.stdout_bytes > len(result.stdout) and not allow_truncation:
             raise GitFacadeError("git_output_too_large")
         return result.stdout
+
+    def _diff_has_changes(self, relative: str) -> bool:
+        """Content-anchored dirty test for a tracked path.
+
+        Uses git diff (worktree vs index) with --ignore-space-at-eol: stat-cache
+        phantom " M" entries and pure CRLF/LF byte differences are clean, real
+        text changes or deletions are dirty -> protected.
+
+        Why --ignore-space-at-eol: the facade neutralizes ALL git config
+        (GIT_CONFIG_* = devnull, D5 hardening) which disables core.autocrlf.
+        On Windows, Python/editor writes are CRLF while the index holds LF
+        blobs -> status reports " M" although the text is identical. That
+        deterministic misclassification blocked every UPDATE for 6 rounds in
+        D20. CR is trailing whitespace at EOL, so this flag makes the decision
+        config-neutral and reproducible; real text changes still exit 1.
+        """
+        result = run_bounded_process(
+            self._root,
+            self._git_prefix()
+            + (
+                "diff",
+                "--quiet",
+                "--ignore-space-at-eol",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--",
+                relative,
+            ),
+            timeout_seconds=self._limits.timeout_seconds,
+            max_stdout_bytes=512,
+            max_stderr_bytes=32_768,
+            environment=self._git_environment(),
+            progress_guard=None,
+        )
+        if result.start_failed or result.timed_out:
+            return True  # fail-closed: cannot verify -> protect
+        return result.exit_code != 0
 
     def _fingerprint(self, relative: str) -> str:
         try:
