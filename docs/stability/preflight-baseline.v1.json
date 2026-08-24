@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-24T19:57:56Z",
+  "document_base_commit": "f24c15407e7c48860bdad51c38d504d60c992831",
+  "observed_head": "f24c15407e7c48860bdad51c38d504d60c992831",
+  "branch": "main",
+  "dirty_relative_paths": [
+    "docs/v2-stabilization-and-production-readiness-plan.md",
+    "docs/v2-stabilization-detailed-implementation.md"
+  ],
+  "environment": {
+    "python": "3.14.3",
+    "implementation": "CPython",
+    "os": "Windows",
+    "architecture": "AMD64",
+    "sqlite": "3.45.1",
+    "git": "2.53.0.windows.2",
+    "docker_available": false,
+    "docker_client": "29.6.1",
+    "docker_server": null
+  },
+  "test_runs": [
+    {
+      "ordinal": 1,
+      "command_id": "full-unittest-resourcewarning-v1",
+      "exit_code": 1,
+      "tests_run": 417,
+      "failures": 0,
+      "errors": 2,
+      "skipped": 16,
+      "duration_ms": 216797,
+      "error_test_ids": [
+        "test_d10_integration.D10McpIntegrationTest.test_timeout_marks_outcome_unknown",
+        "test_d10_integration.D10McpIntegrationTest.test_unknown_response_id_becomes_uncertain_outcome"
+      ],
+      "failure_test_ids": []
+    },
+    {
+      "ordinal": 2,
+      "command_id": "full-unittest-resourcewarning-v1",
+      "exit_code": 1,
+      "tests_run": 417,
+      "failures": 0,
+      "errors": 1,
+      "skipped": 16,
+      "duration_ms": 216767,
+      "error_test_ids": [
+        "test_d10_integration.D10McpIntegrationTest.test_timeout_marks_outcome_unknown"
+      ],
+      "failure_test_ids": []
+    }
+  ],
+  "skips": [
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_workspace_mount_is_canonical_and_rejects_link_escape", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_workspace_mount_rejects_same_volume_hard_link_escape", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_real_runner_success_and_container_attack_evidence", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_failure_timeout_output_pids_and_oom_are_typed_and_cleaned", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_cancellation_kills_container_tree_persists_identity_and_propagates", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_os_process_crash_after_create_before_bind_is_exactly_reaped", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_reaper_refuses_unknown_and_tampered_owner_nonce_containers", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_bound_allocation_reaps_only_persisted_id_and_refuses_label_clone", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_bound_container_label_identity_mismatch_is_refused_without_release", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_create_timeout_or_empty_identity_stays_intended_and_open", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_reaper_inspect_control_plane_errors_do_not_publish_not_found", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_d8_docker_integration.D8DockerRunnerIntegrationTest.test_cancellation_survives_finish_append_failure_and_later_recovery", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_golden_composite_e2e.GoldenCompositeE2ETest.test_full_composite_kill_and_resume", "reason_code": "docker_unavailable", "replacement_lane": "docker-required" },
+    { "test_id": "test_workspace_paths.WorkspacePathResolverTests.test_external_file_symlink_and_directory_symlink_are_rejected", "reason_code": "platform_not_applicable", "replacement_lane": "posix-required" },
+    { "test_id": "test_workspace_paths.WorkspacePathResolverTests.test_fifo_is_rejected_without_blocking", "reason_code": "platform_not_applicable", "replacement_lane": "posix-required" },
+    { "test_id": "test_workspace_paths.WorkspacePathResolverTests.test_invalid_utf8_directory_entry_cannot_enter_a_listing", "reason_code": "platform_not_applicable", "replacement_lane": "posix-required" }
+  ]
+}
