@@ -11,6 +11,7 @@ import os
 import re
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -305,7 +306,22 @@ def run_bounded_process(
     """固定 argv 的底层执行器；并行排空输出，超时/取消时终止进程树。"""
     root = Path(cwd)
     start = time.monotonic()
-    env = _minimal_environment(environment or {})
+    # I1: shared minimal environment contract (never inherits the parent env).
+    # Local import avoids the verification/runtime package cycle.
+    from ..runtime.subprocess_env import (
+        SubprocessEnvError,
+        build_minimal_environment,
+    )
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="koawa-runner-tmp") as private_tmp:
+            env = build_minimal_environment(
+                environment or {},
+                allowed_names=_SAFE_ENV_NAMES,
+                private_temp=Path(private_tmp),
+            )
+    except SubprocessEnvError as error:
+        raise CommandRunnerError(error.code) from None
     creationflags = 0
     popen_extra: dict[str, object] = {}
     if os.name == "nt":
@@ -394,24 +410,7 @@ class _BoundedCollector:
                 self.kept.extend(chunk[:remaining])
 
 
-def _minimal_environment(extra: Mapping[str, str]) -> dict[str, str]:
-    environment: dict[str, str] = {
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        "PYTHONHASHSEED": "0",
-        "PYTHONIOENCODING": "utf-8",
-        "PYTHONDONTWRITEBYTECODE": "1",
-    }
-    if os.name == "nt":
-        for name in ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"):
-            value = os.environ.get(name)
-            if value:
-                environment[name] = value
-    for name, value in extra.items():
-        if name not in _SAFE_ENV_NAMES:
-            raise CommandRunnerError("unsafe_command_environment")
-        environment[name] = value
-    return environment
+
 
 
 def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:

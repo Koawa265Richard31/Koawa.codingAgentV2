@@ -8,6 +8,7 @@ keys; a provider key is loaded only from the environment variable named by
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -206,6 +207,24 @@ class McpServerConfig:
     cwd: Path | None = None
     environment: tuple[tuple[str, str], ...] = ()
     request_timeout_seconds: float = 15.0
+    # I1 staged deadlines: startup handshake must NOT inherit the short
+    # tool-call deadline (Windows cold spawn measured 0.57-0.76s vs old 0.5s).
+    process_start_timeout_seconds: float = 30.0
+    initialize_timeout_seconds: float = 30.0
+    tools_list_timeout_seconds: float = 30.0
+    tool_call_timeout_seconds: float = 15.0
+    io_poll_timeout_seconds: float = 0.25
+    shutdown_timeout_seconds: float = 5.0
+    max_pending_requests: int = 64
+    max_inbound_messages: int = 1024
+    max_list_pages: int = 32
+    max_tools: int = 512
+    max_notifications_per_window: int = 64
+    max_cursor_bytes: int = 4096
+    max_frame_bytes: int = 1_048_576
+    max_stderr_bytes: int = 262_144
+    max_result_bytes: int = 1_048_576
+    request_timeout_deprecation: bool = False
     decision: Decision = Decision.ASK
     side_effect_class: str = "read_only"
     recovery_mode: str = "retry"
@@ -251,6 +270,39 @@ class McpServerConfig:
             or float(self.request_timeout_seconds) <= 0
             or float(self.request_timeout_seconds) > 600
         ):
+            raise RuntimeConfigError("invalid_mcp_server")
+        for name, minimum, maximum in (
+            ("process_start_timeout_seconds", 0.1, 600.0),
+            ("initialize_timeout_seconds", 0.1, 600.0),
+            ("tools_list_timeout_seconds", 0.1, 600.0),
+            ("tool_call_timeout_seconds", 0.1, 600.0),
+            ("io_poll_timeout_seconds", 0.01, 5.0),
+            ("shutdown_timeout_seconds", 0.1, 60.0),
+        ):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or float(value) < minimum
+                or float(value) > maximum
+            ):
+                raise RuntimeConfigError("invalid_mcp_server")
+        for name, maximum in (
+            ("max_pending_requests", 4096),
+            ("max_inbound_messages", 65536),
+            ("max_list_pages", 1024),
+            ("max_tools", 16384),
+            ("max_notifications_per_window", 65536),
+            ("max_cursor_bytes", 1_048_576),
+            ("max_frame_bytes", 16 * 1024 * 1024),
+            ("max_stderr_bytes", 16 * 1024 * 1024),
+            ("max_result_bytes", 16 * 1024 * 1024),
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or not (1 <= value <= maximum):
+                raise RuntimeConfigError("invalid_mcp_server")
+        if not isinstance(self.request_timeout_deprecation, bool):
             raise RuntimeConfigError("invalid_mcp_server")
         if not isinstance(self.decision, Decision):
             raise RuntimeConfigError("invalid_mcp_server")
@@ -714,11 +766,36 @@ def _parse_mcp_servers(value: Any, base: Path) -> tuple[McpServerConfig, ...]:
             "cwd",
             "environment",
             "request_timeout_seconds",
+            "process_start_timeout_seconds",
+            "initialize_timeout_seconds",
+            "tools_list_timeout_seconds",
+            "tool_call_timeout_seconds",
+            "io_poll_timeout_seconds",
+            "shutdown_timeout_seconds",
+            "max_pending_requests",
+            "max_inbound_messages",
+            "max_list_pages",
+            "max_tools",
+            "max_notifications_per_window",
+            "max_cursor_bytes",
+            "max_frame_bytes",
+            "max_stderr_bytes",
+            "max_result_bytes",
             "decision",
             "side_effect_class",
             "recovery_mode",
         }
         _reject_unknown(item, allowed, "invalid_mcp_server")
+        _new_timeouts = {
+            "process_start_timeout_seconds",
+            "initialize_timeout_seconds",
+            "tools_list_timeout_seconds",
+            "tool_call_timeout_seconds",
+            "io_poll_timeout_seconds",
+            "shutdown_timeout_seconds",
+        }
+        if "request_timeout_seconds" in item and _new_timeouts & set(item):
+            raise RuntimeConfigError("ambiguous_mcp_timeout_config")
         try:
             command = tuple(item.get("command", ()))
             cwd_value = item.get("cwd")
@@ -730,15 +807,49 @@ def _parse_mcp_servers(value: Any, base: Path) -> tuple[McpServerConfig, ...]:
             environment = tuple(
                 tuple(pair) for pair in item.get("environment", ())
             )
+            legacy_timeout = item.get("request_timeout_seconds")
+            deprecation = legacy_timeout is not None
+            tool_call_timeout = item.get(
+                "tool_call_timeout_seconds",
+                15.0 if legacy_timeout is None else legacy_timeout,
+            )
             servers.append(
                 McpServerConfig(
                     server_id=item.get("server_id", ""),
                     command=command,
                     cwd=cwd,
                     environment=environment,
-                    request_timeout_seconds=item.get(
-                        "request_timeout_seconds", 15.0
+                    request_timeout_seconds=(
+                        15.0 if legacy_timeout is None else legacy_timeout
                     ),
+                    process_start_timeout_seconds=item.get(
+                        "process_start_timeout_seconds", 30.0
+                    ),
+                    initialize_timeout_seconds=item.get(
+                        "initialize_timeout_seconds", 30.0
+                    ),
+                    tools_list_timeout_seconds=item.get(
+                        "tools_list_timeout_seconds", 30.0
+                    ),
+                    tool_call_timeout_seconds=tool_call_timeout,
+                    io_poll_timeout_seconds=item.get(
+                        "io_poll_timeout_seconds", 0.25
+                    ),
+                    shutdown_timeout_seconds=item.get(
+                        "shutdown_timeout_seconds", 5.0
+                    ),
+                    max_pending_requests=item.get("max_pending_requests", 64),
+                    max_inbound_messages=item.get("max_inbound_messages", 1024),
+                    max_list_pages=item.get("max_list_pages", 32),
+                    max_tools=item.get("max_tools", 512),
+                    max_notifications_per_window=item.get(
+                        "max_notifications_per_window", 64
+                    ),
+                    max_cursor_bytes=item.get("max_cursor_bytes", 4096),
+                    max_frame_bytes=item.get("max_frame_bytes", 1_048_576),
+                    max_stderr_bytes=item.get("max_stderr_bytes", 262_144),
+                    max_result_bytes=item.get("max_result_bytes", 1_048_576),
+                    request_timeout_deprecation=deprecation,
                     decision=_decision(item.get("decision", "ask")),
                     side_effect_class=item.get("side_effect_class", "read_only"),
                     recovery_mode=item.get("recovery_mode", "retry"),

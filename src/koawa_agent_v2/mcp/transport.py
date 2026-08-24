@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from collections.abc import Mapping, Sequence
 
 from .protocol import (
@@ -251,6 +252,12 @@ class StdioTransport:
 
 
 def spawn_fixture_command(extra_env: Mapping[str, str] | None = None) -> list[str]:
-    """Return the stdio command for the local MCP fixture server."""
+    """Return the stdio command for the local MCP fixture server.
 
-    return [sys.executable, "-m", "koawa_agent_v2.mcp.fixture_server"]
+    I1: absolute interpreter + absolute script path; no "python -m", no PATH
+    or PYTHONPATH dependency.  The fixture module imports only the stdlib, so
+    it also runs correctly as a plain script under the minimal environment.
+    """
+
+    script = Path(__file__).with_name("fixture_server.py").resolve(strict=True)
+    return [sys.executable, str(script)]
