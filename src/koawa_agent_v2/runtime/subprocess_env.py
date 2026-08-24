@@ -31,12 +31,21 @@ _INJECTION_NAMES = frozenset({
     "PYTHONSTARTUP", "PYTHONINSPECT", "PYTHONPLUGLIBDIR",
     "BASH_ENV", "ENV", "PERL5LIB", "RUBYOPT", "NODE_OPTIONS",
 })
+# Security-side deny sets are compared casefolded on EVERY platform (env var
+# names are case-insensitive on Windows, and over-denying on POSIX only blocks
+# hostile casing variants).
+_INJECTION_NAMES_CASEFOLD = frozenset(
+    {name.casefold() for name in _INJECTION_NAMES}
+)
 _ALWAYS_OWNED = frozenset({
     "LANG", "LC_ALL",
     "PYTHONHASHSEED", "PYTHONUTF8", "PYTHONIOENCODING",
     "PYTHONDONTWRITEBYTECODE",
     "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
 })
+_ALWAYS_OWNED_CASEFOLD = frozenset(
+    {name.casefold() for name in _ALWAYS_OWNED}
+)
 _FIXED_PYTHON_ENV = {
     "PYTHONHASHSEED": "0",
     "PYTHONUTF8": "1",
@@ -113,16 +122,17 @@ def build_minimal_environment(
     )
     seen: set[str] = set()
     for name, value in explicit.items():
-        key = name.casefold() if os.name == "nt" else name
         if not isinstance(name, str) or not name:
             raise SubprocessEnvError("invalid_environment_name")
-        if key in _INJECTION_NAMES:
+        key = name.casefold() if os.name == "nt" else name
+        canonical = key.casefold()
+        if canonical in _INJECTION_NAMES_CASEFOLD:
             raise SubprocessEnvError("injection_variable_forbidden")
         if _SECRET_NAME.search(name):
             raise SubprocessEnvError("secret_variable_forbidden")
         if key not in allow_keys or key in seen:
             raise SubprocessEnvError("environment_not_allowlisted")
-        if key in _ALWAYS_OWNED:
+        if canonical in _ALWAYS_OWNED_CASEFOLD:
             raise SubprocessEnvError("reserved_variable_overridden")
         if not isinstance(value, str) or "\x00" in value or len(value) > 16_384:
             raise SubprocessEnvError("invalid_environment_value")
