@@ -8,10 +8,11 @@ the D2 loop and D6 worker.
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
@@ -73,6 +74,8 @@ from .config import (
     resolve_api_key,
 )
 
+_logger = logging.getLogger(__name__)
+
 _ASSEMBLY_ERROR = re.compile(r"[a-z][a-z0-9_]{0,127}")
 
 READ_TOOL_NAMES = (
@@ -112,7 +115,9 @@ class AssembledRuntime:
     checkpoint_store: CheckpointStore
     correlation_id: object
     loop: AgentLoop
-    mcp_sessions: tuple[tuple[McpServerConfig, object, McpCatalog], ...] = ()
+    mcp_sessions: tuple[tuple[McpServerConfig, McpSession, McpCatalog], ...] = ()
+    # Idempotent teardown marker (frozen dataclass: mutated via object.__setattr__).
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __repr__(self) -> str:
         return (
@@ -162,6 +167,34 @@ class AssembledRuntime:
             owner_id=self.config.owner_id,
             lease_seconds=self.config.lease_seconds,
         )
+
+    def close(self) -> None:
+        """Idempotent teardown in reverse assembly order (doc 3.6).
+
+        Closes every successfully created MCP session/transport in reverse
+        assembly order. Re-calling close() is a no-op; close failures are
+        logged and never escape, so teardown always converges to a fully
+        closed runtime.
+        """
+        if self._closed:
+            return
+        object.__setattr__(self, "_closed", True)
+        _close_mcp_sessions([item[1] for item in self.mcp_sessions])
+
+    def __enter__(self) -> "AssembledRuntime":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
+def _close_mcp_sessions(sessions: Sequence[object]) -> None:
+    """Close sessions in reverse assembly order; never raises."""
+    for session in reversed(tuple(sessions)):
+        try:
+            session.close()
+        except Exception as exc:
+            _logger.warning("mcp session close failed: %r", exc)
 
 
 def assemble_runtime(
@@ -371,7 +404,9 @@ def _connect_mcp_servers(
             catalog = session.connect()
             adapter = build_mcp_registry(session, catalog)
             opened.append(session)
-            sessions.append((server_config, adapter, catalog))
+            # Retain the McpSession (not the adapter) so the ownership chain
+            # can close every real transport/session in reverse order.
+            sessions.append((server_config, session, catalog))
             bindings[server_config.server_id] = (
                 server_config,
                 adapter,
@@ -379,11 +414,10 @@ def _connect_mcp_servers(
             )
         return tuple(sessions), bindings
     except BaseException:
-        for session in opened:
-            try:
-                session.close()
-            except Exception:
-                pass
+        # Mid-assembly failure: close every already-started session through
+        # the same idempotent teardown helper that AssembledRuntime.close()
+        # uses (reverse order, never raises).
+        _close_mcp_sessions(opened)
         raise
 
 

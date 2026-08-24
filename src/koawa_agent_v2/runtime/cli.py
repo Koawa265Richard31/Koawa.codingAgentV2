@@ -445,6 +445,9 @@ def _real_main(argv: list[str]) -> int:
     )
 
     arguments = parser.parse_args(argv[1:])
+    # app is closed in the `finally` block below on every exit path (normal,
+    # exception and KeyboardInterrupt) for every configured subcommand.
+    app = None
     try:
         thinking = _ThinkingDisplay()
         app = AppRuntime.from_config_file(
@@ -489,6 +492,15 @@ def _real_main(argv: list[str]) -> int:
     except Exception as exc:
         print(json.dumps({"ok": False, "code": getattr(exc, "code", "runtime_error"), "payload": {}}))
         return 1
+    finally:
+        # I1 ownership chain: every configured entry point (run / resume /
+        # cancel / approvals / approve / deny / status / doctor / interactive)
+        # closes the AppRuntime on normal return, on exception, and on
+        # KeyboardInterrupt (which is not caught above but still reaches this
+        # finally).  `_interactive_main` returns through this frame for /exit,
+        # EOF, Ctrl-C and turn errors, so every interactive exit path closes.
+        if app is not None:
+            app.close()
 
 
 _INTERACTIVE_HELP = """commands:

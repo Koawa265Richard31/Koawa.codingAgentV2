@@ -92,6 +92,20 @@ class AppRuntime:
             reasoning_sink=reasoning_sink,
         )
 
+    def close(self) -> None:
+        """Release every owned resource (delegates to the assembly).
+
+        Idempotent: ``AssembledRuntime.close()`` is itself idempotent, so
+        repeated close() calls and context-manager exit are safe.
+        """
+        self.assembled.close()
+
+    def __enter__(self) -> "AppRuntime":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
     def run(
         self,
         task: str,
