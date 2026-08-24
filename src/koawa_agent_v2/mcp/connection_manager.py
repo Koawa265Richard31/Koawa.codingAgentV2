@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 import threading
+import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -28,6 +30,25 @@ from .protocol import (
 from .tool_binding import McpBinding, McpBindingError, McpCatalog, bind_catalog
 from .transport import TransportError, TransportTimeout
 from ..telemetry.trace import TraceStore
+
+
+def _bounded_positive(value: float, minimum: float, maximum: float, code: str) -> float:
+    """I1: finite, non-bool positive phase deadline with a stable error."""
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) < minimum
+        or float(value) > maximum
+    ):
+        raise McpSessionError(code)
+    return float(value)
+
+
+def _bounded_int(value: int, minimum: int, maximum: int, code: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not (minimum <= value <= maximum):
+        raise McpSessionError(code)
+    return value
 
 
 class McpSessionError(RuntimeError):
@@ -74,8 +95,19 @@ class McpSession:
         transport,
         *,
         protocol_version: str = MCP_PROTOCOL_VERSION,
-        request_timeout: float = 10.0,
+        # I1 staged deadlines: startup handshake must never inherit the short
+        # tool-call deadline (Windows cold spawn measured 0.57-0.76s vs old 0.5s).
+        request_timeout: float | None = None,
+        initialize_timeout_seconds: float = 30.0,
+        tools_list_timeout_seconds: float = 30.0,
+        tool_call_timeout_seconds: float = 15.0,
+        io_poll_timeout_seconds: float = 0.25,
+        shutdown_timeout_seconds: float = 5.0,
+        max_pending_requests: int = 64,
         max_tools: int = 128,
+        max_list_pages: int = 32,
+        max_cursor_bytes: int = 4096,
+        max_notifications_per_window: int = 64,
         max_result_chars: int = 262_144,
         auto_refresh: bool = False,
         trace_store: TraceStore | None = None,
@@ -91,9 +123,34 @@ class McpSession:
         self._server_id = server_id
         self._transport = transport
         self._protocol_version = protocol_version
-        self._request_timeout = request_timeout
-        self._max_tools = max_tools
-        self._max_result_chars = max_result_chars
+        # Legacy request_timeout maps to the tool-call phase ONLY (I1).
+        if request_timeout is not None:
+            tool_call_timeout_seconds = float(request_timeout)
+        self._initialize_timeout_seconds = _bounded_positive(
+            initialize_timeout_seconds, 0.1, 600.0, "mcp_initialize_timeout"
+        )
+        self._tools_list_timeout_seconds = _bounded_positive(
+            tools_list_timeout_seconds, 0.1, 600.0, "mcp_tools_list_timeout"
+        )
+        self._tool_call_timeout_seconds = _bounded_positive(
+            tool_call_timeout_seconds, 0.1, 600.0, "mcp_tool_call_timeout"
+        )
+        self._io_poll_timeout_seconds = _bounded_positive(
+            io_poll_timeout_seconds, 0.01, 5.0, "mcp_io_poll_timeout"
+        )
+        self._shutdown_timeout_seconds = _bounded_positive(
+            shutdown_timeout_seconds, 0.1, 60.0, "mcp_shutdown_timeout"
+        )
+        self._max_pending_requests = _bounded_int(
+            max_pending_requests, 1, 4096, "mcp_pending_limit"
+        )
+        self._max_tools = _bounded_int(max_tools, 1, 16384, "mcp_tool_limit")
+        self._max_list_pages = _bounded_int(max_list_pages, 1, 1024, "mcp_list_pages_limit")
+        self._max_cursor_bytes = _bounded_int(max_cursor_bytes, 1, 1_048_576, "mcp_cursor_limit")
+        self._max_notifications_per_window = _bounded_int(
+            max_notifications_per_window, 1, 65536, "mcp_notification_limit"
+        )
+        self._max_result_chars = _bounded_int(max_result_chars, 1, 16 * 1024 * 1024, "mcp_result_limit")
         self._auto_refresh = auto_refresh
         self._trace_store = trace_store
         self._correlation_id = correlation_id
@@ -108,6 +165,9 @@ class McpSession:
         self._closed = False
         self._pending_refresh = False
         self._unknown_response_count = 0
+        self._refresh_worker_busy = threading.Lock()
+        self._notify_window_started = time.monotonic()
+        self._notify_window_count = 0
 
     @property
     def server_id(self) -> str:
@@ -223,6 +283,9 @@ class McpSession:
         pending = _PendingCall()
         request_id = next(self._next_id)
         with self._pending_lock:
+            if len(self._pending) >= self._max_pending_requests:
+                # Fail closed BEFORE any byte is sent (I1 pending slot).
+                raise McpSessionError("mcp_pending_limit_exceeded")
             self._pending[request_id] = pending
         try:
             self._transport.send(
@@ -236,8 +299,11 @@ class McpSession:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
             raise McpSessionError(error.code) from None
-        deadline = self._request_timeout if timeout is None else timeout
-        if not pending.event.wait(deadline):
+        deadline_abs = time.monotonic() + (
+            self._tool_call_timeout_seconds if timeout is None else timeout
+        )
+        remaining = max(0.0, deadline_abs - time.monotonic())
+        if not pending.event.wait(remaining):
             with self._pending_lock:
                 self._pending.pop(request_id, None)
             self._trace("mcp", "call_uncertain", {"server_id": self._server_id})
@@ -280,7 +346,7 @@ class McpSession:
         except TransportError:
             pass
         if self._notify_thread is not None:
-            self._notify_thread.join(timeout=5)
+            self._notify_thread.join(timeout=self._shutdown_timeout_seconds)
 
     def _shutdown_transport(self) -> None:
         try:
@@ -288,7 +354,7 @@ class McpSession:
         except TransportError:
             pass
         if self._notify_thread is not None:
-            self._notify_thread.join(timeout=5)
+            self._notify_thread.join(timeout=self._shutdown_timeout_seconds)
 
     def handler(self, binding: McpBinding):
         """Return the D3-style typed handler bound to this session/binding."""
@@ -305,6 +371,8 @@ class McpSession:
         pending = _PendingCall()
         request_id = next(self._next_id)
         with self._pending_lock:
+            if len(self._pending) >= self._max_pending_requests:
+                raise McpSessionError("mcp_pending_limit_exceeded")
             self._pending[request_id] = pending
         try:
             self._transport.send(request_payload(request_id, method, dict(params)))
@@ -312,8 +380,11 @@ class McpSession:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
             raise McpSessionError(error.code) from None
-        deadline = self._request_timeout if timeout is None else timeout
-        if not pending.event.wait(deadline):
+        deadline_abs = time.monotonic() + (
+            self._tool_call_timeout_seconds if timeout is None else timeout
+        )
+        remaining = max(0.0, deadline_abs - time.monotonic())
+        if not pending.event.wait(remaining):
             with self._pending_lock:
                 self._pending.pop(request_id, None)
             raise McpSessionError("mcp_request_timeout")
@@ -327,9 +398,24 @@ class McpSession:
     def _list_tools(self, generation: int) -> McpCatalog:
         tools: list[Any] = []
         cursor: str | None = None
+        seen_cursors: set[str] = set()
+        pages = 0
+        total_deadline = time.monotonic() + self._tools_list_timeout_seconds
         while True:
+            pages += 1
+            if pages > self._max_list_pages:
+                raise McpSessionError("mcp_list_pages_exceeded")
+            remaining = total_deadline - time.monotonic()
+            if remaining <= 0:
+                raise McpSessionError("mcp_tools_list_timeout")
+            if cursor is not None:
+                if len(cursor) > self._max_cursor_bytes:
+                    raise McpSessionError("mcp_cursor_too_large")
+                if cursor in seen_cursors:
+                    raise McpSessionError("mcp_cursor_repeated")
+                seen_cursors.add(cursor)
             params: dict[str, Any] = {} if cursor is None else {"cursor": cursor}
-            result = self._request(TOOLS_LIST, params)
+            result = self._request(TOOLS_LIST, params, timeout=remaining)
             if not isinstance(result, Mapping):
                 raise McpSessionError("mcp_tools_list_failed")
             page = result.get("tools")
@@ -373,7 +459,7 @@ class McpSession:
     def _notification_loop(self) -> None:
         while not self._closed:
             try:
-                message = self._transport.read(self._request_timeout)
+                message = self._transport.read(self._io_poll_timeout_seconds)
             except TransportTimeout:
                 # No message arrived within the poll window; the session is
                 # still healthy and the caller's own deadline decides timeouts.
@@ -389,13 +475,11 @@ class McpSession:
                 return
             if isinstance(message, JsonRpcNotification):
                 if message.method == TOOLS_LIST_CHANGED_NOTIFICATION:
+                    if not self._throttle_notify():
+                        continue
                     self._pending_refresh = True
                     if self._auto_refresh and self._state == self.READY:
-                        threading.Thread(
-                            target=self._safe_refresh,
-                            name=f"mcp-refresh-{self._server_id}",
-                            daemon=True,
-                        ).start()
+                        self._spawn_refresh_worker()
                 continue
             if isinstance(message, JsonRpcResponse):
                 with self._pending_lock:
@@ -431,6 +515,38 @@ class McpSession:
             kind=kind,
             fields=fields,
         )
+
+    def _throttle_notify(self) -> bool:
+        """I1: merge notification storms; False means this notification is dropped."""
+        now = time.monotonic()
+        if now - self._notify_window_started >= 1.0:
+            self._notify_window_started = now
+            self._notify_window_count = 0
+        self._notify_window_count += 1
+        if self._notify_window_count > self._max_notifications_per_window:
+            self._trace("mcp", "notification_throttled", {"server_id": self._server_id})
+            return False
+        return True
+
+    def _spawn_refresh_worker(self) -> None:
+        """I1: single-flight refresh worker; concurrent notifications merge."""
+        if not self._refresh_worker_busy.acquire(blocking=False):
+            return  # a refresh worker is already running (or finished this round)
+        try:
+            threading.Thread(
+                target=self._refresh_worker_run,
+                name=f"mcp-refresh-{self._server_id}",
+                daemon=True,
+            ).start()
+        except BaseException:
+            self._refresh_worker_busy.release()
+            raise
+
+    def _refresh_worker_run(self) -> None:
+        try:
+            self._safe_refresh()
+        finally:
+            self._refresh_worker_busy.release()
 
     def _safe_refresh(self) -> None:
         try:

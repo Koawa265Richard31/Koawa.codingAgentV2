@@ -35,6 +35,16 @@ from koawa_agent_v2.mcp import (
     build_mcp_registry,
     spawn_fixture_command,
 )
+import threading
+import time
+
+from koawa_agent_v2.mcp.connection_manager import TOOLS_LIST_CHANGED_NOTIFICATION
+from koawa_agent_v2.mcp.protocol import (
+    JsonRpcNotification,
+    JsonRpcResponse,
+    MCP_PROTOCOL_VERSION,
+)
+from koawa_agent_v2.mcp.transport import TransportClosed, TransportTimeout
 from koawa_agent_v2.model.protocol import ModelCallRef, ToolCallItem
 from koawa_agent_v2.policy import (
     ActionKind,
@@ -410,6 +420,183 @@ class D10McpIntegrationTest(unittest.TestCase):
         )
         self.assertFalse(result.is_error)
 
+
+class SessionDeadlineLimitsTest(unittest.TestCase):
+    """I1 Stage D: session-level staged deadlines and bounded limits (impl doc 3.6)."""
+
+    class _ScriptedTransport:
+        """Serves scripted responses gated on observed request sends (the
+        notification loop consumes asynchronously, so a response must never
+        be popped before its request was actually sent). Notifications are
+        server-initiated and pop freely."""
+
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.reads: list[object] = []
+            self.closed = False
+            self.sent_event = threading.Event()
+            self._request_count = 0
+
+        def open(self) -> None:
+            if self.closed:
+                raise TransportClosed()
+
+        def send(self, payload: str) -> None:
+            self.sent.append(payload)
+            self.sent_event.set()
+
+        def read(self, timeout: float):
+            if not self.reads:
+                raise TransportTimeout()
+            item = self.reads[0]
+            if hasattr(item, "method"):
+                self.reads.pop(0)
+                return item
+            # JsonRpcResponse: wait until the matching request actually left.
+            deadline = time.monotonic() + timeout
+            while True:
+                requests = self._sent_requests()
+                if len(requests) > self._request_count:
+                    self._request_count += 1
+                    self.reads.pop(0)
+                    return item
+                if time.monotonic() >= deadline:
+                    raise TransportTimeout()
+                self.sent_event.wait(0.02)
+
+        def _sent_requests(self) -> list[int]:
+            ids: list[int] = []
+            for payload in self.sent:
+                try:
+                    parsed = json.loads(payload)
+                except Exception:
+                    continue
+                if isinstance(parsed, dict) and isinstance(parsed.get("id"), int):
+                    ids.append(parsed["id"])
+            return ids
+
+        def close(self) -> None:
+            self.closed = True
+
+    @staticmethod
+    def init_response():
+        return JsonRpcResponse("2.0", 1, {"protocolVersion": MCP_PROTOCOL_VERSION})
+
+    @staticmethod
+    def list_page(request_id: int, next_cursor: str | None):
+        result: dict[str, object] = {
+            "tools": [
+                {"name": "echo", "description": "d",
+                 "inputSchema": {"type": "object",
+                                 "properties": {"value": {"type": "string", "description": "v",
+                                                          "minLength": 1, "maxLength": 10}},
+                                 "required": ["value"], "additionalProperties": False}},
+            ],
+        }
+        if next_cursor is not None:
+            result["nextCursor"] = next_cursor
+        return JsonRpcResponse("2.0", request_id, result)
+
+    def test_pending_limit_sends_zero_bytes(self) -> None:
+        """Fill one pending slot; the second request must fail before sending."""
+        transport = self._ScriptedTransport()
+        session = McpSession("srv", transport,
+                             tool_call_timeout_seconds=0.5,
+                             max_pending_requests=1)
+        result: list[str] = []
+
+        def first() -> None:
+            try:
+                session._request("ping", {})
+            except McpSessionError as exc:
+                result.append(exc.code)
+
+        thread = threading.Thread(target=first, daemon=True)
+        thread.start()
+        self.assertTrue(transport.sent_event.wait(1.0), "first request must be sent")
+        with self.assertRaises(McpSessionError) as raised:
+            session._request("ping-two", {})
+        self.assertEqual("mcp_pending_limit_exceeded", raised.exception.code)
+        self.assertEqual(1, len(transport.sent))
+        thread.join(timeout=2.0)
+        self.assertEqual(["mcp_request_timeout"], result)
+
+    def test_list_cursor_repeated_fails_closed(self) -> None:
+        transport = self._ScriptedTransport()
+        transport.reads = [self.init_response(),
+                           self.list_page(2, "c1"),
+                           self.list_page(3, "c1")]
+        session = McpSession("srv", transport, tools_list_timeout_seconds=5.0)
+        with self.assertRaises(McpSessionError) as raised:
+            session.connect()
+        self.assertEqual("mcp_cursor_repeated", raised.exception.code)
+
+    def test_list_pages_exceeded_fails_closed(self) -> None:
+        transport = self._ScriptedTransport()
+        transport.reads = [self.init_response()] + [
+            self.list_page(index + 1, f"c{index}") for index in range(1, 5)
+        ]
+        session = McpSession("srv", transport, tools_list_timeout_seconds=5.0,
+                             max_list_pages=3)
+        with self.assertRaises(McpSessionError) as raised:
+            session.connect()
+        self.assertEqual("mcp_list_pages_exceeded", raised.exception.code)
+
+    def test_cursor_too_large_fails_closed(self) -> None:
+        transport = self._ScriptedTransport()
+        transport.reads = [self.init_response(),
+                           self.list_page(2, "12345")]
+        session = McpSession("srv", transport, tools_list_timeout_seconds=5.0,
+                             max_cursor_bytes=4)
+        with self.assertRaises(McpSessionError) as raised:
+            session.connect()
+        self.assertEqual("mcp_cursor_too_large", raised.exception.code)
+
+    def test_initialize_deadline_is_independent_of_tool_call(self) -> None:
+        """A short initialize deadline fails fast although the tool-call
+        deadline is generous: startup never inherits the call deadline."""
+        transport = self._ScriptedTransport()
+        session = McpSession("srv", transport,
+                             initialize_timeout_seconds=0.1,
+                             tool_call_timeout_seconds=10.0)
+        with self.assertRaises(McpSessionError) as raised:
+            session.connect()
+        self.assertEqual("mcp_request_timeout", raised.exception.code)
+        self.assertTrue(transport.closed, "failed session must tear down transport")
+
+    def test_notification_storm_is_throttled(self) -> None:
+        """After max_notifications_per_window the loop drops further notices;
+        pending_refresh stays visible without unbounded worker spawning."""
+        transport = self._ScriptedTransport()
+        transport.reads = [self.init_response(),
+                           self.list_page(2, None),
+                           *([JsonRpcNotification("2.0", TOOLS_LIST_CHANGED_NOTIFICATION)] * 20)]
+        session = McpSession("srv", transport, tools_list_timeout_seconds=0.1,
+                             max_notifications_per_window=5, auto_refresh=True)
+        session.connect()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and session._notify_window_count < 6:
+            time.sleep(0.01)
+        self.assertGreaterEqual(session._notify_window_count, 6)
+        self.assertTrue(session.pending_refresh)
+        session.close()
+        self.assertEqual("closed", session.state)
+
+    def test_refresh_worker_runs_and_releases_single_flight_lock(self) -> None:
+        """An in-flight worker absorbs concurrent attempts; the worker must
+        run to completion and release the single-flight lock."""
+        transport = self._ScriptedTransport()
+        session = McpSession("srv", transport, tools_list_timeout_seconds=0.1)
+        self.assertTrue(session._refresh_worker_busy.acquire(blocking=False))
+        session._spawn_refresh_worker()
+        self.assertFalse(session._refresh_worker_busy.acquire(blocking=False),
+                         "busy lock must absorb concurrent spawn")
+        session._refresh_worker_busy.release()
+        session._spawn_refresh_worker()
+        acquired = session._refresh_worker_busy.acquire(blocking=True, timeout=2.0)
+        self.assertTrue(acquired, "worker must finish and release the lock")
+        session._refresh_worker_busy.release()
+        session.close()
 
 if __name__ == "__main__":
     unittest.main()

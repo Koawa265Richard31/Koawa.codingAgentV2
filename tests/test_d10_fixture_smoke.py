@@ -24,7 +24,10 @@ from koawa_agent_v2.mcp.transport import (
 
 
 def _fixture_command():
-    return [sys.executable, "-m", "koawa_agent_v2.mcp.fixture_server"]
+    # I1: absolute interpreter + absolute script; no -m / PATH / PYTHONPATH.
+    from koawa_agent_v2.mcp.transport import spawn_fixture_command
+
+    return spawn_fixture_command()
 
 
 def _base_env(extra: dict[str, str] | None = None) -> dict[str, str]:

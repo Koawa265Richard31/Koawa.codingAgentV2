@@ -393,11 +393,32 @@ def _connect_mcp_servers(
                     if server_config.cwd is None
                     else str(server_config.cwd)
                 ),
+                # I1 staged deadlines: startup never inherits the short
+                # tool-call deadline (Windows cold spawn 0.57-0.76s).
+                process_start_timeout_seconds=(
+                    server_config.process_start_timeout_seconds
+                ),
+                shutdown_timeout_seconds=server_config.shutdown_timeout_seconds,
+                max_inbound_messages=server_config.max_inbound_messages,
+                max_stderr_bytes=server_config.max_stderr_bytes,
             )
             session = McpSession(
                 server_config.server_id,
                 transport,
-                request_timeout=server_config.request_timeout_seconds,
+                # I1: legacy request_timeout exists only for config compat; the
+                # staged fields drive the phases.  The parser already maps a
+                # legacy request_timeout_seconds into tool_call_timeout_seconds.
+                initialize_timeout_seconds=server_config.initialize_timeout_seconds,
+                tools_list_timeout_seconds=server_config.tools_list_timeout_seconds,
+                tool_call_timeout_seconds=server_config.tool_call_timeout_seconds,
+                io_poll_timeout_seconds=server_config.io_poll_timeout_seconds,
+                shutdown_timeout_seconds=server_config.shutdown_timeout_seconds,
+                max_pending_requests=server_config.max_pending_requests,
+                max_tools=server_config.max_tools,
+                max_list_pages=server_config.max_list_pages,
+                max_cursor_bytes=server_config.max_cursor_bytes,
+                max_notifications_per_window=server_config.max_notifications_per_window,
+                max_result_chars=server_config.max_result_bytes,
                 trace_store=trace,
                 correlation_id=correlation_id,
             )
