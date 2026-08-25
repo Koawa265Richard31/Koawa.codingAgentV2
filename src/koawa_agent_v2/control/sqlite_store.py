@@ -68,6 +68,33 @@ class SqliteEventStore:
 
         return Path(self._database_path)
 
+    def database_time(self) -> datetime:
+        """Return the SQLite database-authoritative UTC clock.
+
+        The value comes from strftime('%Y-%m-%dT%H:%M:%fZ','now') evaluated
+        inside SQLite itself, so all processes sharing one database observe a
+        single clock even if host wall clocks drift.
+        """
+
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+            ).fetchone()
+            if row is None or not row[0]:
+                raise EventStoreError("database clock unavailable")
+            value = row[0]
+            parsed = datetime.fromisoformat(
+                value[:-1] + "+00:00" if value.endswith("Z") else value
+            )
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except sqlite3.Error as exc:
+            raise EventStoreError(f"SQLite clock failure: {exc}") from exc
+        finally:
+            connection.close()
+
     def append_batch(
         self,
         writes: Sequence[StreamWrite],

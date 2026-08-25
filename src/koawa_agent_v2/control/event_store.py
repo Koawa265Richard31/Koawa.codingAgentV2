@@ -286,6 +286,16 @@ class AppendReceipt:
 class EventStore(Protocol):
     """Runtime 控制面的持久化端口；SQLite/Postgres 实现都应遵守此契约。"""
 
+    def database_time(self) -> datetime:
+        """Return the backend-authoritative UTC clock.
+
+        Lease and expiry decisions must use this clock (contract §2.4);
+        the local wall clock is only for non-authoritative display. Tests may
+        inject a fake clock to observe paths that depend on it.
+        """
+
+        ...
+
     def append_batch(
         self,
         writes: Sequence[StreamWrite],

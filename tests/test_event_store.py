@@ -18,6 +18,7 @@ from koawa_agent_v2.control.event_store import (
     InvalidEvent,
     NewEvent,
     StreamId,
+    StreamPrecondition,
     StreamWrite,
     WrongExpectedVersion,
 )
@@ -374,5 +375,58 @@ class SqliteEventStoreTest(unittest.TestCase):
         self.assertEqual(0, stored[0].stream_version)
 
 
+    def test_database_time_returns_aware_utc_clock(self) -> None:
+        """I2 4.2: database_time() is the backend-authoritative UTC clock."""
+        value = self.store.database_time()
+        self.assertIsNotNone(value.tzinfo)
+        self.assertIsNotNone(value.utcoffset())
+        self.assertEqual(0, value.utcoffset().total_seconds())
+        self.assertLess(abs((value - datetime.now(timezone.utc)).total_seconds()), 120)
+
+    def test_precondition_failure_rolls_back_writes_and_receipt(self) -> None:
+        """I2 4.2: failing precondition writes nothing and leaves no receipt."""
+        guard = StreamId("agent", uuid4())
+        written = StreamId("mailbox", uuid4())
+        guard_key = uuid4()
+        self.store.append_batch(
+            (StreamWrite(guard, -1, (self.event(guard_key),)),),
+            idempotency_key=guard_key,
+        )
+        key = uuid4()
+        with self.assertRaises(WrongExpectedVersion):
+            self.store.append_batch(
+                (StreamWrite(written, -1, (self.event(key),)),),
+                idempotency_key=key,
+                preconditions=(
+                    StreamPrecondition(guard, 99),
+                ),
+            )
+        self.assertEqual((), self.store.read_stream(written))
+        self.assertEqual(1, len(self.store.read_stream(guard)))
+        self.assertIsNone(
+            self.store.read_idempotency(key, request_fingerprint="fingerprint")
+        )
+
+    def test_explicit_fingerprint_keeps_original_receipt_across_regenerated_events(self) -> None:
+        """I2 4.2: explicit fingerprint returns original receipt on retry."""
+        stream = StreamId("mailbox", uuid4())
+        key = uuid4()
+        first = self.store.append_batch(
+            (StreamWrite(stream, -1, (self.event(key, {"value": 7}),)),),
+            idempotency_key=key,
+            request_fingerprint='{"operation":"deliver","message":"m1"}',
+        )
+        saved_now = datetime(2026, 8, 12, 11, 0, tzinfo=timezone.utc)
+        self.now = saved_now
+        regenerated = self.store.append_batch(
+            (StreamWrite(stream, -1, (self.event(key, {"value": 7}),)),),
+            idempotency_key=key,
+            request_fingerprint='{"operation":"deliver","message":"m1"}',
+        )
+        self.assertEqual(first, regenerated)
+        self.assertEqual(1, len(self.store.read_stream(stream)))
+
+
 if __name__ == "__main__":
     unittest.main()
+

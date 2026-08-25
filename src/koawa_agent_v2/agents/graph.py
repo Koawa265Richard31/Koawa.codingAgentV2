@@ -58,6 +58,8 @@ class AgentRecord:
     outcome: str | None = None
     reason: str | None = None
     abandoned_run_id: UUID | None = None
+    waiting_run_id: UUID | None = None
+    blocking_message_ids: tuple[UUID, ...] = ()
 
     @property
     def depth(self) -> int:
@@ -86,6 +88,12 @@ class AgentRecord:
             "abandoned_run_id": (
                 None if self.abandoned_run_id is None else str(self.abandoned_run_id)
             ),
+            "waiting_run_id": (
+                None if self.waiting_run_id is None else str(self.waiting_run_id)
+            ),
+            "blocking_message_ids": [
+                str(item) for item in self.blocking_message_ids
+            ],
         }
 
 
@@ -114,6 +122,21 @@ def _require_enum(payload: Mapping[str, Any], key: str, enum_type) -> Any:
         return enum_type(value)
     except ValueError:
         raise AgentError("corrupt_agent_stream") from None
+
+
+def _require_uuid_list(payload: Mapping[str, Any], key: str) -> tuple[UUID, ...]:
+    value = payload.get(key)
+    if not isinstance(value, (list, tuple)):
+        raise AgentError("corrupt_agent_stream")
+    result: list[UUID] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise AgentError("corrupt_agent_stream")
+        try:
+            result.append(UUID(item))
+        except ValueError:
+            raise AgentError("corrupt_agent_stream") from None
+    return tuple(result)
 
 
 def _optional_datetime(value: Any) -> datetime | None:
@@ -182,9 +205,12 @@ def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
                 abandoned_run_id=_require_uuid(payload, "abandoned_run_id"),
                 run_id=None,
             )
-        elif event.event_type == "agent.taken-over.v1":
+        elif event.event_type in ("agent.taken-over.v1", "agent.taken-over.v2"):
             if record.state is not AgentState.ORPHANED:
                 raise AgentError("invalid_agent_takeover")
+            if event.event_type == "agent.taken-over.v2":
+                if payload.get("abandoned_run_id") != str(record.abandoned_run_id):
+                    raise AgentError("corrupt_agent_stream")
             record = replace(
                 record,
                 state=AgentState.RUNNING,
@@ -193,6 +219,47 @@ def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
                 run_id=_require_uuid(payload, "run_id"),
                 lease_expires_at=_optional_datetime(payload.get("lease_expires_at")),
                 abandoned_run_id=None,
+                waiting_run_id=None,
+                blocking_message_ids=(),
+            )
+        elif event.event_type == "agent.waiting-for-message-resolution.v1":
+            if record.state is not AgentState.RUNNING:
+                raise AgentError("invalid_agent_waiting")
+            run_id = _require_uuid(payload, "run_id")
+            if run_id != record.run_id:
+                raise AgentError("stale_agent_run_fenced")
+            if int(payload["attempt"]) != record.attempt:
+                raise AgentError("corrupt_agent_stream")
+            blocking = _require_uuid_list(payload, "blocking_message_ids")
+            if not blocking:
+                raise AgentError("corrupt_agent_stream")
+            record = replace(
+                record,
+                state=AgentState.WAITING,
+                version=event.stream_version,
+                run_id=None,
+                lease_expires_at=None,
+                waiting_run_id=run_id,
+                blocking_message_ids=blocking,
+            )
+        elif event.event_type == "agent.resumed.v1":
+            if record.state is not AgentState.WAITING:
+                raise AgentError("invalid_agent_resume")
+            if payload.get("previous_run_id") != str(record.waiting_run_id):
+                raise AgentError("stale_agent_run_fenced")
+            block_ids = set(record.blocking_message_ids)
+            resolved = _require_uuid_list(payload, "resolved_message_ids")
+            if set(resolved) != block_ids:
+                raise AgentError("corrupt_agent_stream")
+            record = replace(
+                record,
+                state=AgentState.RUNNING,
+                version=event.stream_version,
+                attempt=int(payload["attempt"]),
+                run_id=_require_uuid(payload, "run_id"),
+                lease_expires_at=_optional_datetime(payload.get("lease_expires_at")),
+                waiting_run_id=None,
+                blocking_message_ids=(),
             )
         elif event.event_type == "agent.completed.v1":
             if payload.get("run_id") != str(record.run_id):
