@@ -337,16 +337,31 @@ class EventStore(Protocol):
 
         ...
 
+    def current_global_position(self) -> int:
+        """Return the highest committed global position (0 for an empty log).
+
+        The high-water is captured from one read statement so projections can
+        fix a scan boundary and never observe events committed afterwards
+        (contract §5.3).
+        """
+
+        ...
+
     def read_all(
         self,
         *,
         after_position: int = 0,
+        through_position: int | None = None,
         limit: int = 500,
     ) -> tuple[StoredEvent, ...]:
-        """按 global_position 读取全局事件日志，用于投影、审计和订阅。"""
+        """按 global_position 读取全局事件日志，用于投影、审计和订阅。
+
+        ``through_position`` 是包含上界的扫描边界：只返回
+        ``after < global_position <= through`` 的事件。事件日志不可变，因此
+        先捕获 high-water 再分页读取可以得到一个稳定快照（合同 §5.3）。
+        """
 
         ...
-
 
 def _require_aware(value: datetime, name: str) -> None:
     """要求时间携带可计算的 UTC offset，避免跨进程/容器时间歧义。"""

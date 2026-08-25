@@ -129,6 +129,7 @@ def main() -> None:
         "d11.provider.entered",
         "d11.result.after_commit",
         "d11.ack.after_commit",
+        "d11.terminal.after_commit",
     ):
         try:
             scheduler.run_attempt(worker.agent_id)

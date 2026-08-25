@@ -454,27 +454,63 @@ class SqliteEventStore:
         finally:
             connection.close()
 
+    def current_global_position(self) -> int:
+        """Return the highest committed global position (0 for an empty log).
+
+        One read statement computes the high-water so projections can pin a
+        scan boundary; the append-only log never changes underneath it.
+        """
+
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(global_position), 0) AS high_water FROM events"
+            ).fetchone()
+            if row is None:
+                raise EventStoreError("global position unavailable")
+            return int(row["high_water"])
+        except sqlite3.Error as exc:
+            raise EventStoreError(f"SQLite read failure: {exc}") from exc
+        finally:
+            connection.close()
+
     def read_all(
         self,
         *,
         after_position: int = 0,
+        through_position: int | None = None,
         limit: int = 500,
     ) -> tuple[StoredEvent, ...]:
         """按全局位置升序读取整个事件库的一页。
 
         ``after_position`` 同样是排他游标，主要服务投影、审计、Trace 和监控；
         单个聚合的恢复应优先使用 ``read_stream``。
+        ``through_position`` 是包含上界：只返回
+        ``after < global_position <= through`` 的事件，与合同 §5.3 的
+        high-water 扫描边界一致。
         """
 
         _validate_page(after_position, limit, cursor_name="after_position", minimum=0)
+        if through_position is not None:
+            if (
+                not isinstance(through_position, int)
+                or isinstance(through_position, bool)
+                or through_position < 0
+            ):
+                raise ValueError("through_position must be an integer >= 0")
         connection = self._connect()
         try:
-            rows = connection.execute(
+            statement = (
                 _EVENT_SELECT
                 + " WHERE events.global_position > ?"
-                + " ORDER BY events.global_position ASC LIMIT ?",
-                (after_position, limit),
-            ).fetchall()
+                + (" AND events.global_position <= ?" if through_position is not None else "")
+                + " ORDER BY events.global_position ASC LIMIT ?"
+            )
+            parameters: list[object] = [after_position]
+            if through_position is not None:
+                parameters.append(through_position)
+            parameters.append(limit)
+            rows = connection.execute(statement, parameters).fetchall()
             return tuple(_stored_event(row) for row in rows)
         except sqlite3.Error as exc:
             raise EventStoreError(f"SQLite read failure: {exc}") from exc

@@ -2,7 +2,15 @@
 
 from .graph import AgentError, AgentGraph, AgentRecord, AgentState, ContextMode
 from .messages import MessageKind, MessageRecord, MessageStatus
-from .control import AgentBudgetLimits, AgentControlPlane, Principal
+from .resources import ParentCapacity, RootAgentBudget
+from .control import (
+    AgentBudgetLimits,
+    AgentControlPlane,
+    Principal,
+    ResourceReconcileReceipt,
+    terminal_result_identity,
+    terminal_run_result_ref,
+)
 from .scheduler import AgentLeaseKeeper, AgentScheduler, ScriptedAgentProvider
 
 __all__ = [
@@ -18,6 +26,11 @@ __all__ = [
     "MessageKind",
     "MessageRecord",
     "MessageStatus",
+    "ParentCapacity",
     "Principal",
+    "ResourceReconcileReceipt",
+    "RootAgentBudget",
     "ScriptedAgentProvider",
+    "terminal_result_identity",
+    "terminal_run_result_ref",
 ]

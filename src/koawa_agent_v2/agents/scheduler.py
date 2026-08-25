@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
-from .control import AgentControlPlane, NO_FAULTS, FaultInjector
+from .control import (
+    AgentControlPlane,
+    NO_FAULTS,
+    FaultInjector,
+    terminal_result_identity,
+)
 from .graph import AgentError, AgentState
 from .messages import MessageKind, MessageRecord, MessageStatus
 
@@ -25,6 +30,7 @@ D11_READ_ONLY_TOOLS = frozenset({"read_file", "list_files", "search_text"})
 class AgentRunResult:
     state: AgentState
     summary: str
+    result_refs: tuple[str, ...] = ()
 
 
 class ScriptedAgentProvider:
@@ -188,6 +194,7 @@ class AgentLeaseKeeper:
                 self._control.heartbeat(
                     self._agent_id,
                     run_id=self._run_id,
+                    attempt=self._attempt,
                     lease_seconds=self._lease_seconds,
                     max_cas_retries=self._max_cas_retries,
                     beat_number=beat,
@@ -362,13 +369,32 @@ class AgentScheduler:
                 agent_id, message.message_id, run_id=run_id
             )
             keeper.stop(assert_owned=True)
+            snapshot = self._control.mailbox.snapshot(agent_id)
+            attempt = self._control.graph.load(agent_id).attempt
+            result_ref, result_digest = terminal_result_identity(
+                agent_id,
+                run_id,
+                AgentState.FAILED,
+                error.code,
+                snapshot.messages,
+            )
             self._control.terminal(
                 agent_id,
                 run_id=run_id,
+                expected_attempt=attempt,
                 state=AgentState.FAILED,
                 reason=error.code,
+                result_ref=result_ref,
+                result_digest=result_digest,
+                source_message_ids=tuple(
+                    item.message_id
+                    for item in snapshot.messages
+                    if item.status is MessageStatus.ACKED
+                ),
             )
-            return AgentRunResult(AgentState.FAILED, error.code)
+            return AgentRunResult(
+                AgentState.FAILED, error.code, (result_ref,)
+            )
         self._fault(
             "d11.provider.returned",
             self._facts(agent_id, message, delivered),
@@ -423,35 +449,55 @@ class AgentScheduler:
         messages = snapshot.messages
         error_code = self._first_error_code(messages)
         if error_code is not None:
-            self._control.terminal(
-                agent_id,
-                run_id=run_id,
-                state=AgentState.FAILED,
-                reason=error_code,
+            return self._terminal(
+                agent_id, run_id, AgentState.FAILED, error_code, messages
             )
-            return AgentRunResult(AgentState.FAILED, error_code)
         cancel_intent = cancelled or any(
             message.cancel_requested for message in messages
         ) or any(
             message.status is MessageStatus.CANCELLED for message in messages
         )
         if cancel_intent:
-            self._control.terminal(
-                agent_id,
-                run_id=run_id,
-                state=AgentState.CANCELLED,
-                reason="cancelled",
+            return self._terminal(
+                agent_id, run_id, AgentState.CANCELLED, "cancelled", messages
             )
-            return AgentRunResult(AgentState.CANCELLED, "cancelled")
-        outcome = self._completion_outcome(messages)
+        return self._terminal(
+            agent_id, run_id, AgentState.COMPLETED, None, messages
+        )
+
+    def _terminal(
+        self,
+        agent_id: UUID,
+        run_id: UUID,
+        state: AgentState,
+        reason: str | None,
+        messages,
+    ) -> AgentRunResult:
+        """Compute the exact aggregate identity and call the atomic terminal."""
+        result_ref, result_digest = terminal_result_identity(
+            agent_id, run_id, state, reason, messages
+        )
+        source_message_ids = tuple(
+            message.message_id
+            for message in messages
+            if message.status is MessageStatus.ACKED
+        )
+        attempt = self._control.graph.load(agent_id).attempt
         self._control.terminal(
             agent_id,
             run_id=run_id,
-            state=AgentState.COMPLETED,
-            reason="completed",
-            outcome=outcome,
+            expected_attempt=attempt,
+            state=state,
+            reason=reason,
+            result_ref=result_ref,
+            result_digest=result_digest,
+            source_message_ids=source_message_ids,
         )
-        return AgentRunResult(AgentState.COMPLETED, outcome or "completed")
+        return AgentRunResult(
+            state,
+            reason or "completed",
+            (result_ref,),
+        )
 
     @staticmethod
     def _first_error_code(messages) -> str | None:

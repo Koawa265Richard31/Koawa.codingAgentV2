@@ -407,6 +407,51 @@ class SqliteEventStoreTest(unittest.TestCase):
             self.store.read_idempotency(key, request_fingerprint="fingerprint")
         )
 
+    def test_current_global_position_tracks_high_water(self) -> None:
+        """I3 5.3: current_global_position is the committed high-water."""
+        self.assertEqual(0, self.store.current_global_position())
+        key = uuid4()
+        stream = StreamId("agent-capacity", uuid4())
+        self.store.append_batch(
+            (StreamWrite(stream, -1, (self.event(key, {"n": 1}),)),),
+            idempotency_key=key,
+        )
+        self.assertEqual(1, self.store.current_global_position())
+        second_key = uuid4()
+        self.store.append_batch(
+            (StreamWrite(stream, 0, (self.event(second_key, {"n": 2}),)),),
+            idempotency_key=second_key,
+        )
+        self.assertEqual(2, self.store.current_global_position())
+
+    def test_read_all_through_position_is_an_inclusive_boundary(self) -> None:
+        """I3 5.3: after < position <= through keeps the scan snapshot stable."""
+        stream = StreamId("agent", uuid4())
+        for index in range(3):
+            key = uuid4()
+            self.store.append_batch(
+                (StreamWrite(stream, index - 1, (self.event(key, {"i": index}),)),),
+                idempotency_key=key,
+            )
+        high_water = self.store.current_global_position()
+        snapshot = self.store.read_all(
+            after_position=0, through_position=high_water
+        )
+        self.assertEqual([1, 2, 3], [e.global_position for e in snapshot])
+        # events committed after the boundary never appear in the snapshot
+        key = uuid4()
+        self.store.append_batch(
+            (StreamWrite(stream, 2, (self.event(key, {"i": 3}),)),),
+            idempotency_key=key,
+        )
+        again = self.store.read_all(after_position=0, through_position=high_water)
+        self.assertEqual(snapshot, again)
+        self.assertEqual(
+            [4],
+            [e.global_position for e in self.store.read_all(after_position=high_water)],
+        )
+        self.assertEqual(4, self.store.current_global_position())
+
     def test_explicit_fingerprint_keeps_original_receipt_across_regenerated_events(self) -> None:
         """I2 4.2: explicit fingerprint returns original receipt on retry."""
         stream = StreamId("mailbox", uuid4())

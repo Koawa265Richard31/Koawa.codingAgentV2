@@ -1,4 +1,11 @@
-"""D11 durable parent/child Agent graph model (event-sourced)."""
+"""D11 durable parent/child Agent graph model (event-sourced).
+
+I3 (section 5.4) adds agent.spawned.v2, agent.child-spawn-authorized.v1,
+agent.heartbeat.v2 and terminal v2 events with exact keys; the reducer keeps
+v1 events replayable and hardens every transition (started only from CREATED,
+takeover only from ORPHANED, heartbeat only from RUNNING with matching
+run/attempt, terminal only from RUNNING). Illegal history fails closed.
+"""
 
 from __future__ import annotations
 
@@ -60,10 +67,13 @@ class AgentRecord:
     abandoned_run_id: UUID | None = None
     waiting_run_id: UUID | None = None
     blocking_message_ids: tuple[UUID, ...] = ()
-
-    @property
-    def depth(self) -> int:
-        return 0 if self.parent_agent_id is None else 1
+    root_agent_id: UUID | None = None
+    depth: int | None = None
+    capacity_reservation_id: UUID | None = None
+    budget_reservation_id: UUID | None = None
+    result_ref: str | None = None
+    result_digest: str | None = None
+    legacy_spawn: bool = False
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -94,10 +104,27 @@ class AgentRecord:
             "blocking_message_ids": [
                 str(item) for item in self.blocking_message_ids
             ],
+            "root_agent_id": (
+                None if self.root_agent_id is None else str(self.root_agent_id)
+            ),
+            "depth": self.depth,
+            "capacity_reservation_id": (
+                None
+                if self.capacity_reservation_id is None
+                else str(self.capacity_reservation_id)
+            ),
+            "budget_reservation_id": (
+                None
+                if self.budget_reservation_id is None
+                else str(self.budget_reservation_id)
+            ),
+            "result_ref": self.result_ref,
+            "result_digest": self.result_digest,
+            "legacy_spawn": self.legacy_spawn,
         }
 
 
-def _require_uuid(payload: Mapping[str, Any], key: str) -> UUID:
+def _require_uuid(payload: Mapping[str, Any], key: str) -> UUID | None:
     value = payload.get(key)
     if value is None:
         return None
@@ -139,6 +166,15 @@ def _require_uuid_list(payload: Mapping[str, Any], key: str) -> tuple[UUID, ...]
     return tuple(result)
 
 
+def _exact_keys(payload: Mapping[str, Any], keys: set[str]) -> None:
+    """Exact-key validation: unknown or missing fields corrupt the stream."""
+
+    if not isinstance(payload, Mapping):
+        raise AgentError("corrupt_agent_stream")
+    if set(payload.keys()) != keys:
+        raise AgentError("corrupt_agent_stream")
+
+
 def _optional_datetime(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -151,7 +187,15 @@ def _optional_datetime(value: Any) -> datetime | None:
 
 
 def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
-    """Replay one agent stream into its current durable state."""
+    """Replay one agent stream into its current durable state.
+
+    Supports the I2/I3 wire: spawned.v1/.v2, child-spawn-authorized.v1,
+    started, heartbeat.v1/.v2, orphaned, taken-over.v1/.v2, waiting, resumed
+    and terminal v1/.v2 events. State machines are enforced during replay:
+    started only from CREATED, takeover only from ORPHANED, heartbeat only
+    from RUNNING with matching run/attempt, terminal only from RUNNING; any
+    illegal history fails closed as corrupt_agent_stream.
+    """
 
     record: AgentRecord | None = None
     for event in events:
@@ -172,13 +216,75 @@ def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
                 state=AgentState.CREATED,
                 version=event.stream_version,
                 created_at=_optional_datetime(payload.get("created_at")),
+                legacy_spawn=True,
+            )
+            continue
+        if event.event_type == "agent.spawned.v2":
+            if record is not None or event.stream_version != 0:
+                raise AgentError("corrupt_agent_stream")
+            _exact_keys(
+                payload,
+                {
+                    "agent_id",
+                    "parent_agent_id",
+                    "root_agent_id",
+                    "task_id",
+                    "attempt",
+                    "run_id",
+                    "principal_id",
+                    "scopes",
+                    "context_mode",
+                    "created_at",
+                    "depth",
+                    "capacity_reservation_id",
+                    "budget_reservation_id",
+                },
+            )
+            parent = _require_uuid(payload, "parent_agent_id")
+            root = _require_uuid(payload, "root_agent_id")
+            depth = int(payload["depth"])
+            capacity_reservation = _require_uuid(payload, "capacity_reservation_id")
+            budget_reservation = _require_uuid(payload, "budget_reservation_id")
+            if parent is None:
+                if root != agent_id or depth != 0:
+                    raise AgentError("corrupt_agent_stream")
+                if capacity_reservation is not None or budget_reservation is not None:
+                    raise AgentError("corrupt_agent_stream")
+            else:
+                if depth < 1:
+                    raise AgentError("corrupt_agent_stream")
+                if capacity_reservation is None or budget_reservation is None:
+                    raise AgentError("corrupt_agent_stream")
+                if capacity_reservation != budget_reservation:
+                    raise AgentError("corrupt_agent_stream")
+            record = AgentRecord(
+                agent_id=agent_id,
+                parent_agent_id=parent,
+                task_id=_require_text(payload, "task_id"),
+                attempt=int(payload["attempt"]),
+                run_id=_require_uuid(payload, "run_id"),
+                principal_id=_require_text(payload, "principal_id"),
+                scopes=tuple(sorted(payload.get("scopes", ()))),
+                context_mode=_require_enum(payload, "context_mode", ContextMode),
+                state=AgentState.CREATED,
+                version=event.stream_version,
+                created_at=_optional_datetime(payload.get("created_at")),
+                root_agent_id=root,
+                depth=depth,
+                capacity_reservation_id=capacity_reservation,
+                budget_reservation_id=budget_reservation,
             )
             continue
         if record is None or event.stream_version != record.version + 1:
             raise AgentError("corrupt_agent_stream")
-        if payload.get("agent_id") != str(agent_id):
+        if (
+            event.event_type != "agent.child-spawn-authorized.v1"
+            and payload.get("agent_id") != str(agent_id)
+        ):
             raise AgentError("corrupt_agent_stream")
         if event.event_type == "agent.started.v1":
+            if record.state is not AgentState.CREATED:
+                raise AgentError("corrupt_agent_stream")
             run_id = _require_uuid(payload, "run_id")
             record = replace(
                 record,
@@ -189,15 +295,56 @@ def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
                 lease_expires_at=_optional_datetime(payload.get("lease_expires_at")),
                 abandoned_run_id=None,
             )
-        elif event.event_type == "agent.heartbeat.v1":
+        elif event.event_type in ("agent.heartbeat.v1", "agent.heartbeat.v2"):
+            if record.state is not AgentState.RUNNING:
+                raise AgentError("corrupt_agent_stream")
             if payload.get("run_id") != str(record.run_id):
                 raise AgentError("stale_agent_run_fenced")
+            if event.event_type == "agent.heartbeat.v2":
+                if int(payload["attempt"]) != record.attempt:
+                    raise AgentError("corrupt_agent_stream")
             record = replace(
                 record,
                 version=event.stream_version,
                 lease_expires_at=_optional_datetime(payload.get("lease_expires_at")),
             )
+        elif event.event_type == "agent.child-spawn-authorized.v1":
+            _exact_keys(
+                payload,
+                {
+                    "parent_agent_id",
+                    "parent_run_id",
+                    "parent_attempt",
+                    "child_agent_id",
+                    "root_agent_id",
+                    "depth",
+                    "reservation_id",
+                },
+            )
+            if payload["parent_agent_id"] != str(agent_id):
+                raise AgentError("corrupt_agent_stream")
+            if record.state in (
+                AgentState.COMPLETED,
+                AgentState.FAILED,
+                AgentState.CANCELLED,
+            ):
+                raise AgentError("corrupt_agent_stream")
+            parent_run_id = _require_uuid(payload, "parent_run_id")
+            parent_attempt = int(payload["parent_attempt"])
+            if parent_run_id is not None:
+                if (
+                    record.state is not AgentState.RUNNING
+                    or record.run_id != parent_run_id
+                    or record.attempt != parent_attempt
+                ):
+                    raise AgentError("stale_agent_run_fenced")
+            declared_depth = int(payload["depth"])
+            if record.depth is not None and declared_depth != record.depth + 1:
+                raise AgentError("corrupt_agent_stream")
+            record = replace(record, version=event.stream_version)
         elif event.event_type == "agent.orphaned.v1":
+            if record.state is not AgentState.RUNNING:
+                raise AgentError("corrupt_agent_stream")
             record = replace(
                 record,
                 state=AgentState.ORPHANED,
@@ -262,6 +409,8 @@ def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
                 blocking_message_ids=(),
             )
         elif event.event_type == "agent.completed.v1":
+            if record.state is not AgentState.RUNNING:
+                raise AgentError("corrupt_agent_stream")
             if payload.get("run_id") != str(record.run_id):
                 raise AgentError("stale_agent_run_fenced")
             record = replace(
@@ -273,6 +422,8 @@ def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
                 lease_expires_at=None,
             )
         elif event.event_type == "agent.failed.v1":
+            if record.state is not AgentState.RUNNING:
+                raise AgentError("corrupt_agent_stream")
             if payload.get("run_id") != str(record.run_id):
                 raise AgentError("stale_agent_run_fenced")
             record = replace(
@@ -284,6 +435,8 @@ def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
                 lease_expires_at=None,
             )
         elif event.event_type == "agent.cancelled.v1":
+            if record.state is not AgentState.RUNNING:
+                raise AgentError("corrupt_agent_stream")
             if payload.get("run_id") != str(record.run_id):
                 raise AgentError("stale_agent_run_fenced")
             record = replace(
@@ -293,6 +446,69 @@ def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
                 reason=_require_text(payload, "reason"),
                 run_id=None,
                 lease_expires_at=None,
+            )
+        elif event.event_type == "agent.completed.v2":
+            if record.state is not AgentState.RUNNING:
+                raise AgentError("corrupt_agent_stream")
+            if payload.get("run_id") != str(record.run_id):
+                raise AgentError("stale_agent_run_fenced")
+            _exact_keys(
+                payload,
+                {
+                    "agent_id",
+                    "run_id",
+                    "attempt",
+                    "result_ref",
+                    "result_digest",
+                    "terminal_at",
+                },
+            )
+            if int(payload["attempt"]) != record.attempt:
+                raise AgentError("corrupt_agent_stream")
+            record = replace(
+                record,
+                state=AgentState.COMPLETED,
+                version=event.stream_version,
+                outcome=None,
+                reason=None,
+                run_id=None,
+                lease_expires_at=None,
+                result_ref=_require_text(payload, "result_ref"),
+                result_digest=_require_text(payload, "result_digest"),
+            )
+        elif event.event_type in ("agent.failed.v2", "agent.cancelled.v2"):
+            if record.state is not AgentState.RUNNING:
+                raise AgentError("corrupt_agent_stream")
+            if payload.get("run_id") != str(record.run_id):
+                raise AgentError("stale_agent_run_fenced")
+            _exact_keys(
+                payload,
+                {
+                    "agent_id",
+                    "run_id",
+                    "attempt",
+                    "result_ref",
+                    "result_digest",
+                    "terminal_at",
+                    "reason",
+                },
+            )
+            if int(payload["attempt"]) != record.attempt:
+                raise AgentError("corrupt_agent_stream")
+            terminal_state = (
+                AgentState.FAILED
+                if event.event_type == "agent.failed.v2"
+                else AgentState.CANCELLED
+            )
+            record = replace(
+                record,
+                state=terminal_state,
+                version=event.stream_version,
+                reason=_require_text(payload, "reason"),
+                run_id=None,
+                lease_expires_at=None,
+                result_ref=_require_text(payload, "result_ref"),
+                result_digest=_require_text(payload, "result_digest"),
             )
         else:
             raise AgentError("unknown_agent_event")
@@ -316,27 +532,26 @@ class AgentGraph:
     def children(self, parent_agent_id: UUID) -> list[AgentRecord]:
         """Return children whose spawn event names this parent."""
 
-        # The graph is append-only; a child registry is not maintained, so a
-        # linear scan over the agent category is bounded by D11's small scale.
         results: list[AgentRecord] = []
         cursor = 0
         while True:
             page = self._event_store.read_all(after_position=cursor, limit=500)
             for event in page:
-                if event.event_type == "agent.spawned.v1":
-                    payload = event.payload
-                    raw_parent = payload.get("parent_agent_id")
-                    if raw_parent != str(parent_agent_id):
-                        continue
-                    raw_agent = payload.get("agent_id")
-                    if not isinstance(raw_agent, str):
-                        continue
-                    try:
-                        record = self.load(UUID(raw_agent))
-                    except ValueError:
-                        continue
-                    if record is not None:
-                        results.append(record)
+                if event.event_type not in ("agent.spawned.v1", "agent.spawned.v2"):
+                    continue
+                payload = event.payload
+                raw_parent = payload.get("parent_agent_id")
+                if raw_parent != str(parent_agent_id):
+                    continue
+                raw_agent = payload.get("agent_id")
+                if not isinstance(raw_agent, str):
+                    continue
+                try:
+                    record = self.load(UUID(raw_agent))
+                except ValueError:
+                    continue
+                if record is not None:
+                    results.append(record)
             if len(page) < 500:
                 break
             cursor = page[-1].global_position
@@ -364,3 +579,4 @@ class AgentGraph:
             if len(page) < 500:
                 return tuple(values)
             cursor = page[-1].stream_version
+

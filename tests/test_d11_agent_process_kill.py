@@ -370,6 +370,65 @@ class D11ProcessKillTest(unittest.TestCase):
                 if event.event_type == "agent.resumed.v1"
             ]
             self.assertEqual(1, len(resumes))
+    def test_terminal_commit_then_kill_releases_once_and_can_respawn(self) -> None:
+        """P0-05: terminal + capacity + budget settle in one batch; a restart
+        sees the true terminal and a fresh spawn fits the released budget."""
+        with tempfile.TemporaryDirectory() as directory:
+            process, database, marker, calls = _spawn_worker(
+                Path(directory), "d11.terminal.after_commit"
+            )
+            try:
+                _wait_for_marker(process, marker, "d11.terminal.after_commit")
+                process.kill()
+                process.communicate(timeout=5)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=5)
+            control, agent_id = self._run_point(
+                "d11.terminal.after_commit", marker
+            )
+            agent = control.graph.load(agent_id)
+            self.assertEqual(AgentState.COMPLETED, agent.state)
+            all_events = control.event_store.read_all()
+            terminal_events = [
+                event for event in all_events
+                if event.event_type == "agent.completed.v2"
+            ]
+            capacity_releases = [
+                event for event in all_events
+                if event.event_type == "agent.capacity-released.v1"
+            ]
+            budget_releases = [
+                event for event in all_events
+                if event.event_type == "budget.released.v2"
+            ]
+            self.assertEqual(1, len(terminal_events))
+            self.assertEqual(1, len(capacity_releases))
+            self.assertEqual(1, len(budget_releases))
+            commits = {
+                event.commit_id
+                for event in terminal_events + capacity_releases + budget_releases
+            }
+            self.assertEqual(1, len(commits))
+            parent = control.graph.load(agent.parent_agent_id)
+            self.assertEqual(AgentState.CREATED, parent.state)
+            self.assertEqual(0, control._budget(parent.agent_id))
+            self.assertEqual(
+                0, control._parent_capacity(parent.agent_id).active_count
+            )
+            # after the kill + restart the freed budget accepts a new spawn
+            respawn = control.spawn_agent(
+                parent_agent_id=parent.agent_id,
+                task_id="after-kill",
+                principal_id="worker",
+                scopes=("read",),
+                context_mode=ContextMode.FRESH,
+            )
+            self.assertEqual(AgentState.CREATED, respawn.state)
+            self.assertEqual(1, control._budget(parent.agent_id))
+            self.assertEqual(1, self._provider_calls(calls))
+
 
 
 def schedule_replay(control, agent_id):

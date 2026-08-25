@@ -10,6 +10,7 @@ from koawa_agent_v2.agents.control import (
     AgentBudgetLimits,
     AgentControlPlane,
     Principal,
+    terminal_result_identity,
 )
 from koawa_agent_v2.agents.graph import AgentError, AgentState, ContextMode
 from koawa_agent_v2.agents.messages import (
@@ -48,7 +49,7 @@ class D11AgentControlTest(unittest.TestCase):
         self.control = AgentControlPlane(
             self.store,
             limits=AgentBudgetLimits(
-                max_depth=3,
+                max_depth=2,
                 max_total_agents=4,
                 max_concurrent_children=2,
             ),
@@ -110,24 +111,115 @@ class D11AgentControlTest(unittest.TestCase):
             )
         self.assertEqual("agent_depth_exceeded", raised.exception.code)
 
+        # A parent with an active child cannot terminal (agent_children_active);
+        # settle the grandchild first so child_a's capacity head is empty.
+        gc_message = self.control.send_message(
+            grandchild.agent_id,
+            from_agent_id=child_a.agent_id,
+            kind=MessageKind.TASK,
+            body_ref="gc-work",
+            idempotency_key="gc-work-1",
+        )
+        gc_run = self.control.start_attempt(
+            grandchild.agent_id, expected_version=grandchild.version
+        )
+        gc_delivered = self.control.deliver_message(
+            grandchild.agent_id, gc_message.message_id, run_id=gc_run.run_id
+        )
+        self.control.record_message_result(
+            grandchild.agent_id,
+            gc_message.message_id,
+            run_id=gc_run.run_id,
+            expected_delivery_attempt=gc_delivered.delivery_attempt,
+            outcome="gc-ok",
+        )
+        self.control.ack_message(
+            grandchild.agent_id, gc_message.message_id, run_id=gc_run.run_id
+        )
+        gc_current = self.control.graph.load(grandchild.agent_id)
+        gc_ref, gc_digest = terminal_result_identity(
+            grandchild.agent_id,
+            gc_run.run_id,
+            AgentState.COMPLETED,
+            None,
+            self.control.mailbox.load(grandchild.agent_id),
+        )
+        self.control.terminal(
+            grandchild.agent_id,
+            run_id=gc_run.run_id,
+            expected_attempt=gc_current.attempt,
+            state=AgentState.COMPLETED,
+            reason=None,
+            result_ref=gc_ref,
+            result_digest=gc_digest,
+            source_message_ids=(gc_message.message_id,),
+        )
+        self.assertEqual(AgentState.COMPLETED,
+                            self.control.graph.load(grandchild.agent_id).state)
+        # The parent receives the settled child's result as a queued message.
+        child_a_mailbox = self.control.mailbox.load(child_a.agent_id)
+        self.assertEqual(1, len(child_a_mailbox))
+        self.assertEqual(MessageKind.RESULT, child_a_mailbox[0].kind)
+
+        a_task = self.control.send_message(
+            child_a.agent_id,
+            from_agent_id=self.root.agent_id,
+            kind=MessageKind.TASK,
+            body_ref="a-work",
+            idempotency_key="a-work-1",
+        )
         child_a_running = self.control.start_attempt(
             child_a.agent_id, expected_version=child_a.version
+        )
+        for message in (a_task, child_a_mailbox[0]):
+            delivered = self.control.deliver_message(
+                child_a.agent_id, message.message_id, run_id=child_a_running.run_id
+            )
+            self.control.record_message_result(
+                child_a.agent_id,
+                message.message_id,
+                run_id=child_a_running.run_id,
+                expected_delivery_attempt=delivered.delivery_attempt,
+                outcome="ok",
+            )
+            self.control.ack_message(
+                child_a.agent_id, message.message_id, run_id=child_a_running.run_id
+            )
+        current = self.control.graph.load(child_a.agent_id)
+        ref, digest = terminal_result_identity(
+            child_a.agent_id,
+            child_a_running.run_id,
+            AgentState.COMPLETED,
+            None,
+            self.control.mailbox.load(child_a.agent_id),
         )
         self.control.terminal(
             child_a.agent_id,
             run_id=child_a_running.run_id,
+            expected_attempt=current.attempt,
             state=AgentState.COMPLETED,
-            reason="done",
+            reason=None,
+            result_ref=ref,
+            result_digest=digest,
+            source_message_ids=(
+                a_task.message_id,
+                child_a_mailbox[0].message_id,
+            ),
         )
         # Terminal with a wrong run_id is fenced and must not release budget.
         with self.assertRaises(AgentError):
             self.control.terminal(
                 child_a.agent_id,
                 run_id=uuid4(),
+                expected_attempt=current.attempt,
                 state=AgentState.COMPLETED,
-                reason="late",
+                reason=None,
+                result_ref=ref,
+                result_digest=digest,
+                source_message_ids=(a_task.message_id,),
             )
-        self.assertEqual(2, self.control._budget(self.root.agent_id))
+        # After both settlements only child_b's reservation is still active.
+        self.assertEqual(1, self.control._budget(self.root.agent_id))
 
     def test_cycle_spawn_is_rejected(self) -> None:
         child = self._spawn(task="cycle")
@@ -183,12 +275,23 @@ class D11AgentControlTest(unittest.TestCase):
         )
         self.assertEqual(MessageStatus.ACKED, acked.status)
 
+        current = self.control.graph.load(child.agent_id)
+        ref, digest = terminal_result_identity(
+            child.agent_id,
+            running.run_id,
+            AgentState.COMPLETED,
+            None,
+            self.control.mailbox.load(child.agent_id),
+        )
         done = self.control.terminal(
             child.agent_id,
             run_id=running.run_id,
+            expected_attempt=current.attempt,
             state=AgentState.COMPLETED,
-            reason="done",
-            outcome="ok",
+            reason=None,
+            result_ref=ref,
+            result_digest=digest,
+            source_message_ids=(first.message_id,),
         )
         self.assertEqual(AgentState.COMPLETED, done.state)
         with self.assertRaises(AgentError) as raised:
@@ -203,6 +306,13 @@ class D11AgentControlTest(unittest.TestCase):
 
     def test_stale_run_is_fenced_and_orphan_takeover(self) -> None:
         child = self._spawn(task="orphan")
+        task_message = self.control.send_message(
+            child.agent_id,
+            from_agent_id=self.root.agent_id,
+            kind=MessageKind.TASK,
+            body_ref="orphan-work",
+            idempotency_key="orphan-work-1",
+        )
         first_run = self.control.start_attempt(
             child.agent_id, expected_version=child.version, lease_seconds=10
         )
@@ -215,8 +325,12 @@ class D11AgentControlTest(unittest.TestCase):
             self.control.terminal(
                 child.agent_id,
                 run_id=first_run.run_id,
+                expected_attempt=first_run.attempt,
                 state=AgentState.COMPLETED,
-                reason="late",
+                reason=None,
+                result_ref="agent-run-result:x",
+                result_digest="0" * 64,
+                source_message_ids=(),
             )
         self.assertEqual("stale_agent_run_fenced", raised.exception.code)
 
@@ -228,12 +342,36 @@ class D11AgentControlTest(unittest.TestCase):
         )
         self.assertNotEqual(first_run.run_id, second_run.run_id)
         self.assertEqual(2, second_run.attempt)
+        delivered = self.control.deliver_message(
+            child.agent_id, task_message.message_id, run_id=second_run.run_id
+        )
+        self.control.record_message_result(
+            child.agent_id,
+            task_message.message_id,
+            run_id=second_run.run_id,
+            expected_delivery_attempt=delivered.delivery_attempt,
+            outcome="recovered",
+        )
+        self.control.ack_message(
+            child.agent_id, task_message.message_id, run_id=second_run.run_id
+        )
+        current = self.control.graph.load(child.agent_id)
+        ref, digest = terminal_result_identity(
+            child.agent_id,
+            second_run.run_id,
+            AgentState.COMPLETED,
+            None,
+            self.control.mailbox.load(child.agent_id),
+        )
         done = self.control.terminal(
             child.agent_id,
             run_id=second_run.run_id,
+            expected_attempt=current.attempt,
             state=AgentState.COMPLETED,
-            reason="done",
-            outcome="recovered",
+            reason=None,
+            result_ref=ref,
+            result_digest=digest,
+            source_message_ids=(task_message.message_id,),
         )
         self.assertEqual(AgentState.COMPLETED, done.state)
 

@@ -202,8 +202,12 @@ class D11AgentSchedulerTest(unittest.TestCase):
             self.control.terminal(
                 worker.agent_id,
                 run_id=first.run_id,
+                expected_attempt=1,
                 state=AgentState.COMPLETED,
-                reason="late",
+                reason=None,
+                result_ref="agent-run-result:x",
+                result_digest="0" * 64,
+                source_message_ids=(),
             )
 
 
