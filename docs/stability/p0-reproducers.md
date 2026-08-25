@@ -34,7 +34,7 @@
 - Owner I-unit：I3（S2）
 - 现有聚焦命令：`py -3.14 -B -m unittest tests.test_d11_agent_scheduler -v`
 - 确定性 setup：barrier 让两个 spawn 同时到达父 capacity 检查之后；命名 fault point
-  `d11.resources.spawn.before_append`。
+  `d11.spawn.before_append`（与实现文档 §5.8 权威名一致）。
 - 当前可观察反例：parent 状态/深度/每父并发检查不在事务中，两个并发 spawn 可同时通过检查并
   各自提交 child/budget，越过最后一个 slot（容量超卖）。
 - 修复后唯一 oracle：capacity/budget 与 spawn 同 append_batch 原子 committed；loser 零事件；
