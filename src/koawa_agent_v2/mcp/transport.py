@@ -458,6 +458,15 @@ class StdioTransport:
     def stderr_bytes(self) -> int:
         return self._stderr_bytes
 
+    def __del__(self) -> None:
+        """Best-effort temp cleanup when a transport is GC'd without close()."""
+        temporary = getattr(self, "_temp", None)
+        if temporary is not None:
+            try:
+                temporary.cleanup()
+            except Exception:
+                pass
+
     @property
     def send_state(self) -> str:
         """NOT_SENT / SENT / UNKNOWN for the most recent send()."""
