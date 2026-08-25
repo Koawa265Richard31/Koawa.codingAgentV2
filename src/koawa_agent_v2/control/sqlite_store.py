@@ -40,6 +40,18 @@ from .durable_json import (
     validate_json_value,
     validate_runtime_ingress,
 )
+from .schema import (
+    DatabaseSchemaError,
+    ensure_schema,
+    inject_fault,
+)
+from ..recovery.protocol import CheckpointError
+from ..recovery.store import (
+    CacheReceipt,
+    CheckpointCacheRecord,
+    RecoverableTurn,
+    RunLease,
+)
 
 
 class SqliteEventStore:
@@ -73,7 +85,12 @@ class SqliteEventStore:
         path = Path(database_path)
         if str(path) == ":memory:":
             raise ValueError("use a file path; per-operation connections cannot use :memory:")
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # I5: classification/migration happen before any directory creation,
+        # journal-mode change, DDL or ordinary runtime connection.  A legacy,
+        # unknown, too-new or unreadable database raises a stable schema error
+        # with zero writes; a fresh file is bootstrapped through the same
+        # migration registry as real databases.
+        ensure_schema(path, busy_timeout_ms=busy_timeout_ms)
         self._database_path = str(path)
         self._busy_timeout_ms = busy_timeout_ms
         self._durable_limits = validate_runtime_ingress(durable_limits)
@@ -204,6 +221,7 @@ class SqliteEventStore:
             else _require_fingerprint(request_fingerprint)
         )
         request_hash = _fingerprint_hash(fingerprint)
+        inject_fault("s3.event.after_validate_before_begin")
 
         connection = self._connect()
         try:
@@ -268,9 +286,6 @@ class SqliteEventStore:
             # 阶段 5：在持有写锁时校验所有流的精确版本。不存在的流视为 -1。
             # 任意一条不匹配都会抛错并回滚，所以不会只写成功批次的一部分。
             actual_versions: dict[str, int] = {}
-            d6_projection_tables = connection.execute(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('run_leases','recoverable_turns')"
-            ).fetchone()[0] == 2
             for write in normalized_writes:
                 row = connection.execute(
                     "SELECT current_version FROM streams WHERE stream_id = ?",
@@ -348,52 +363,17 @@ class SqliteEventStore:
                         ),
                     )
                     positions.append(int(cursor.lastrowid))
-                    if d6_projection_tables and write.stream_id.category == "turn":
-                        turn_id = str(write.stream_id.aggregate_id)
-                        run_id = event_document["metadata"].get("run_id")
-                        thread_id = event_document["metadata"].get("thread_id")
-                        if event_document["event_type"] == "turn.started.v1" and run_id and thread_id:
-                            db_now = connection.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')").fetchone()[0]
-                            payload = event_document["payload"]
-                            owner_id = payload.get("lease_owner_id") or "__bootstrap__"
-                            ttl_seconds = payload.get("lease_seconds")
-                            if isinstance(ttl_seconds, int) and not isinstance(ttl_seconds, bool) and ttl_seconds > 0:
-                                expires_at = connection.execute(
-                                    "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now',?)",
-                                    (f"+{ttl_seconds} seconds",),
-                                ).fetchone()[0]
-                                initial_generation = 1
-                            else:
-                                expires_at = db_now
-                                initial_generation = 0
-                            connection.execute(
-                                "INSERT INTO run_leases(turn_id,run_id,owner_id,generation,version,expires_at) VALUES(?,?,?,?,0,?) "
-                                "ON CONFLICT(turn_id) DO UPDATE SET run_id=excluded.run_id,owner_id=excluded.owner_id,generation=run_leases.generation+1,version=0,expires_at=excluded.expires_at",
-                                (turn_id, run_id, owner_id, initial_generation, expires_at),
-                            )
-                            connection.execute(
-                                "INSERT INTO recoverable_turns(turn_id,thread_id,run_id,turn_version,phase,automatic,updated_at) VALUES(?,?,?,?, 'ready_for_model',1,?) "
-                                "ON CONFLICT(turn_id) DO UPDATE SET thread_id=excluded.thread_id,run_id=excluded.run_id,turn_version=excluded.turn_version,phase=excluded.phase,automatic=1,updated_at=excluded.updated_at",
-                                (turn_id, thread_id, run_id, stream_version, db_now),
-                            )
-                        elif event_document["event_type"] in (
-                            "turn.waiting-for-input.v1",
-                            "turn.waiting-for-approval.v1",
-                            "turn.paused.v1",
-                        ):
-                            connection.execute("DELETE FROM run_leases WHERE turn_id=?", (turn_id,))
-                            connection.execute("DELETE FROM recoverable_turns WHERE turn_id=?", (turn_id,))
-                        elif event_document["event_type"] == "turn.recovery-queued.v1" and run_id and thread_id:
-                            db_now = connection.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')").fetchone()[0]
-                            connection.execute("DELETE FROM run_leases WHERE turn_id=?", (turn_id,))
-                            connection.execute(
-                                "INSERT INTO recoverable_turns(turn_id,thread_id,run_id,turn_version,phase,automatic,updated_at) VALUES(?,?,?,?, 'ready_for_model',1,?) "
-                                "ON CONFLICT(turn_id) DO UPDATE SET thread_id=excluded.thread_id,run_id=excluded.run_id,turn_version=excluded.turn_version,phase=excluded.phase,automatic=1,updated_at=excluded.updated_at",
-                                (turn_id, thread_id, run_id, stream_version, db_now),
-                            )
-                        elif event_document["event_type"] in ("turn.completed.v1", "turn.failed.v1", "turn.cancelled.v1", "turn.timed-out.v1"):
-                            connection.execute("DELETE FROM run_leases WHERE turn_id=?", (turn_id,))
-                            connection.execute("DELETE FROM recoverable_turns WHERE turn_id=?", (turn_id,))
+                    if write.stream_id.category == "turn":
+                        # I5: the recoverable/lease projection is a typed-event
+                        # projector registered at the control layer; it lives in
+                        # the same SQLite transaction as the append, so a
+                        # projection failure rolls back the events with it.
+                        self._project_typed_event(
+                            connection,
+                            event_document,
+                            stream_version,
+                            str(write.stream_id.aggregate_id),
+                        )
                     commit_index += 1
 
                 last_version = first_version + len(write.events) - 1
@@ -411,6 +391,7 @@ class SqliteEventStore:
                     )
                 )
 
+            inject_fault("s3.event.mid_batch_before_receipt")
             # 阶段 7：把结果回执与业务事件放进同一事务。只有事件和 receipt 都落库
             # 后才 COMMIT；因此重试不会遇到“事件成功但没有幂等证明”的中间状态。
             receipt = AppendReceipt(resolved_key, tuple(receipts))
@@ -590,54 +571,22 @@ class SqliteEventStore:
             connection.close()
 
     def _initialize(self) -> None:
-        """创建 Event Store 所需表、约束和索引，并设置持久化策略。
+        """设置持久化策略（表结构由 I5 schema manager 在打开前保证）。
 
-        WAL（预写日志）让读者与写者更好地并存，但不代表允许多个并行写者；
-        ``synchronous=FULL`` 要求 SQLite 更谨慎地刷盘，优先保证崩溃后的完整性。
-        表定义中的 UNIQUE/CHECK/FOREIGN KEY 是应用校验之外的最后一致性防线。
+        Classification and migrations already ran (ensure_schema); the only
+        DDL this method may touch is the journal-mode switch, which happens
+        strictly after classification.  Per-connection PRAGMAs are re-applied
+        in _connect.
         """
 
-        connection = self._connect()
+        connection = sqlite3.connect(
+            self._database_path,
+            timeout=self._busy_timeout_ms / 1000,
+            isolation_level=None,
+        )
         try:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS streams (
-                    stream_id TEXT PRIMARY KEY,
-                    category TEXT NOT NULL,
-                    aggregate_id TEXT NOT NULL,
-                    current_version INTEGER NOT NULL CHECK (current_version >= -1)
-                );
-
-                CREATE TABLE IF NOT EXISTS events (
-                    global_position INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_id TEXT NOT NULL UNIQUE,
-                    stream_id TEXT NOT NULL REFERENCES streams(stream_id),
-                    stream_version INTEGER NOT NULL CHECK (stream_version >= 0),
-                    commit_id TEXT NOT NULL,
-                    commit_index INTEGER NOT NULL CHECK (commit_index >= 0),
-                    commit_size INTEGER NOT NULL CHECK (commit_size > 0),
-                    event_type TEXT NOT NULL,
-                    schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
-                    occurred_at TEXT NOT NULL,
-                    recorded_at TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    UNIQUE (stream_id, stream_version)
-                );
-
-                CREATE INDEX IF NOT EXISTS ix_events_stream
-                    ON events(stream_id, stream_version);
-
-                CREATE TABLE IF NOT EXISTS idempotency_keys (
-                    idempotency_key TEXT PRIMARY KEY,
-                    request_hash TEXT NOT NULL,
-                    receipt_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                """
-            )
         except sqlite3.Error as exc:
             raise EventStoreError(f"could not initialize SQLite event store: {exc}") from exc
         finally:
@@ -661,6 +610,343 @@ class SqliteEventStore:
         connection.execute("PRAGMA synchronous = FULL")
         connection.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
         return connection
+
+    # ------------------------------------------------------------------
+    # I5 typed-event projector (recoverable/lease projection)
+    # ------------------------------------------------------------------
+
+    def _project_typed_event(
+        self,
+        connection: sqlite3.Connection,
+        event_document: Mapping[str, Any],
+        stream_version: int,
+        turn_id: str,
+    ) -> None:
+        """Update the rebuildable recoverable/lease projection from a typed
+        Turn event, inside the same SQLite transaction as the append."""
+        event_type = event_document["event_type"]
+        metadata = event_document["metadata"]
+        payload = event_document["payload"]
+        run_id = metadata.get("run_id")
+        thread_id = metadata.get("thread_id")
+        run_key = ("run_id", run_id)
+        thread_key = ("thread_id", thread_id)
+        if event_type == "turn.started.v1" and run_id and thread_id:
+            db_now = _db_now_text(connection)
+            owner_id = payload.get("lease_owner_id") or "__bootstrap__"
+            ttl_seconds = payload.get("lease_seconds")
+            if isinstance(ttl_seconds, int) and not isinstance(ttl_seconds, bool) and ttl_seconds > 0:
+                expires_at = _db_modified_text(connection, f"+{ttl_seconds} seconds")
+                initial_generation = 1
+            else:
+                expires_at = db_now
+                initial_generation = 0
+            connection.execute(
+                "INSERT INTO run_leases(turn_id,run_id,owner_id,generation,version,expires_at) VALUES(?,?,?,?,0,?) "
+                "ON CONFLICT(turn_id) DO UPDATE SET run_id=excluded.run_id,owner_id=excluded.owner_id,generation=run_leases.generation+1,version=0,expires_at=excluded.expires_at",
+                (turn_id, run_id, owner_id, initial_generation, expires_at),
+            )
+            connection.execute(
+                "INSERT INTO recoverable_turns(turn_id,thread_id,run_id,turn_version,lease_expires_at,updated_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(turn_id) DO UPDATE SET thread_id=excluded.thread_id,run_id=excluded.run_id,turn_version=excluded.turn_version,lease_expires_at=excluded.lease_expires_at,updated_at=excluded.updated_at",
+                (turn_id, thread_id, run_id, stream_version, expires_at, db_now),
+            )
+            return
+        if event_type in (
+            "turn.waiting-for-input.v1",
+            "turn.waiting-for-approval.v1",
+            "turn.paused.v1",
+        ):
+            connection.execute("DELETE FROM run_leases WHERE turn_id=?", (turn_id,))
+            connection.execute("DELETE FROM recoverable_turns WHERE turn_id=?", (turn_id,))
+            return
+        if event_type == "turn.recovery-queued.v1" and run_id and thread_id:
+            db_now = _db_now_text(connection)
+            connection.execute("DELETE FROM run_leases WHERE turn_id=?", (turn_id,))
+            connection.execute(
+                "INSERT INTO recoverable_turns(turn_id,thread_id,run_id,turn_version,lease_expires_at,updated_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(turn_id) DO UPDATE SET thread_id=excluded.thread_id,run_id=excluded.run_id,turn_version=excluded.turn_version,lease_expires_at=excluded.lease_expires_at,updated_at=excluded.updated_at",
+                (turn_id, thread_id, run_id, stream_version, db_now, db_now),
+            )
+            return
+        if event_type == "turn.stale-run-requeued.v1":
+            db_now = _db_now_text(connection)
+            connection.execute("DELETE FROM run_leases WHERE turn_id=?", (turn_id,))
+            connection.execute(
+                "UPDATE recoverable_turns SET turn_version=?, lease_expires_at=?, updated_at=? WHERE turn_id=?",
+                (stream_version, db_now, db_now, turn_id),
+            )
+            return
+        if event_type in (
+            "turn.completed.v1",
+            "turn.failed.v1",
+            "turn.cancelled.v1",
+            "turn.timed-out.v1",
+        ):
+            connection.execute("DELETE FROM run_leases WHERE turn_id=?", (turn_id,))
+            connection.execute("DELETE FROM recoverable_turns WHERE turn_id=?", (turn_id,))
+            return
+        if event_type == "turn.recovery-lease-claimed.v1":
+            lease_run = payload.get("run_id")
+            owner = payload.get("owner")
+            expires_at = payload.get("lease_expires_at")
+            if not (lease_run and owner and expires_at):
+                return
+            db_now = _db_now_text(connection)
+            connection.execute(
+                "INSERT INTO run_leases(turn_id,run_id,owner_id,generation,version,expires_at) VALUES(?,?,?,1,0,?) "
+                "ON CONFLICT(turn_id) DO UPDATE SET run_id=excluded.run_id,owner_id=excluded.owner_id,generation=run_leases.generation+1,version=0,expires_at=excluded.expires_at",
+                (turn_id, lease_run, owner, expires_at),
+            )
+            if run_id and thread_id:
+                connection.execute(
+                    "INSERT INTO recoverable_turns(turn_id,thread_id,run_id,turn_version,lease_expires_at,updated_at) VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(turn_id) DO UPDATE SET thread_id=excluded.thread_id,run_id=excluded.run_id,turn_version=excluded.turn_version,lease_expires_at=excluded.lease_expires_at,updated_at=excluded.updated_at",
+                    (turn_id, thread_id, run_id, stream_version, expires_at, db_now),
+                )
+            return
+        if event_type == "turn.recovery-lease-heartbeated.v1":
+            lease_run = payload.get("run_id")
+            owner = payload.get("owner")
+            expires_at = payload.get("lease_expires_at")
+            if not (lease_run and owner and expires_at):
+                return
+            db_now = _db_now_text(connection)
+            connection.execute(
+                "UPDATE run_leases SET version=version+1, expires_at=? WHERE turn_id=? AND run_id=? AND owner_id=?",
+                (expires_at, turn_id, lease_run, owner),
+            )
+            connection.execute(
+                "UPDATE recoverable_turns SET lease_expires_at=?, updated_at=? WHERE turn_id=?",
+                (expires_at, db_now, turn_id),
+            )
+            return
+        if event_type == "turn.recovery-lease-released.v1":
+            connection.execute("DELETE FROM run_leases WHERE turn_id=?", (turn_id,))
+            connection.execute("DELETE FROM recoverable_turns WHERE turn_id=?", (turn_id,))
+            return
+
+    # ------------------------------------------------------------------
+    # I5 RecoveryProjectionPort implementation
+    # ------------------------------------------------------------------
+
+    def publish_checkpoint_cache(
+        self,
+        record: CheckpointCacheRecord,
+        *,
+        expected_cache_version: int,
+    ) -> CacheReceipt:
+        """Atomically verify source event + Turn fence and monotonic upsert."""
+        if not isinstance(record, CheckpointCacheRecord):
+            raise TypeError("record must be CheckpointCacheRecord")
+        if (
+            not isinstance(expected_cache_version, int)
+            or isinstance(expected_cache_version, bool)
+            or expected_cache_version != record.cache_version
+        ):
+            raise ValueError("expected_cache_version must equal record.cache_version")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            source = connection.execute(
+                "SELECT s.stream_id, s.category, s.aggregate_id, e.event_id, e.stream_version "
+                "FROM events e JOIN streams s ON s.stream_id = e.stream_id "
+                "WHERE e.global_position = ?",
+                (record.source_global_position,),
+            ).fetchone()
+            if (
+                source is None
+                or source["category"] != "run-execution"
+                or source["aggregate_id"] != str(record.turn_id)
+                or source["event_id"] != str(record.source_event_id)
+                or int(source["stream_version"]) != record.execution_version
+            ):
+                raise CheckpointError("checkpoint_source_mismatch")
+            turn_row = connection.execute(
+                "SELECT s.current_version, e.event_type, e.payload_json "
+                "FROM streams s LEFT JOIN events e ON e.stream_id = s.stream_id "
+                "AND e.stream_version = s.current_version WHERE s.stream_id = ?",
+                (f"turn-{record.turn_id}",),
+            ).fetchone()
+            if turn_row is None or int(turn_row["current_version"]) != record.turn_version:
+                raise CheckpointError("checkpoint_fence_mismatch")
+            if turn_row["event_type"] != "turn.started.v1":
+                raise CheckpointError("checkpoint_terminal_race")
+            payload = json.loads(turn_row["payload_json"])
+            if payload.get("run_id") != str(record.run_id):
+                raise CheckpointError("checkpoint_fence_mismatch")
+            existing = connection.execute(
+                "SELECT cache_version, checkpoint_id FROM checkpoint_cache WHERE turn_id = ?",
+                (str(record.turn_id),),
+            ).fetchone()
+            inject_fault("s3.checkpoint.before_cache_commit")
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO checkpoint_cache "
+                    "(turn_id, cache_version, checkpoint_id, run_id, turn_version, "
+                    "execution_version, reducer_name, reducer_version, source_event_id, "
+                    "source_global_position, projection_digest, checkpoint_json, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(record.turn_id),
+                        record.cache_version,
+                        str(record.checkpoint_id),
+                        str(record.run_id),
+                        record.turn_version,
+                        record.execution_version,
+                        record.reducer_name,
+                        record.reducer_version,
+                        str(record.source_event_id),
+                        record.source_global_position,
+                        record.projection_digest,
+                        bytes(record.checkpoint_json),
+                        _datetime_text(record.updated_at),
+                    ),
+                )
+                changed = True
+            elif int(existing["cache_version"]) == expected_cache_version:
+                if existing["checkpoint_id"] != str(record.checkpoint_id):
+                    raise CheckpointError("checkpoint_stale_publish")
+                changed = False
+            elif int(existing["cache_version"]) > expected_cache_version:
+                raise CheckpointError("checkpoint_stale_publish")
+            else:
+                connection.execute(
+                    "UPDATE checkpoint_cache SET checkpoint_id=?, run_id=?, turn_version=?, "
+                    "execution_version=?, reducer_name=?, reducer_version=?, source_event_id=?, "
+                    "source_global_position=?, projection_digest=?, checkpoint_json=?, updated_at=? "
+                    "WHERE turn_id=? AND cache_version=?",
+                    (
+                        str(record.checkpoint_id),
+                        str(record.run_id),
+                        record.turn_version,
+                        record.execution_version,
+                        record.reducer_name,
+                        record.reducer_version,
+                        str(record.source_event_id),
+                        record.source_global_position,
+                        record.projection_digest,
+                        bytes(record.checkpoint_json),
+                        _datetime_text(record.updated_at),
+                        str(record.turn_id),
+                        int(existing["cache_version"]),
+                    ),
+                )
+                changed = True
+            inject_fault("s3.checkpoint.after_cache_commit")
+            connection.commit()
+            return CacheReceipt(record.turn_id, record.cache_version, record.checkpoint_id, changed)
+        except CheckpointError:
+            connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            connection.rollback()
+            raise EventStoreError(f"SQLite cache write failure: {exc}") from exc
+        finally:
+            connection.close()
+
+    def load_checkpoint_cache(self, turn_id: UUID) -> CheckpointCacheRecord | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_cache WHERE turn_id = ?",
+                (str(turn_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            blob = bytes(row["checkpoint_json"])
+            if len(blob) > 4_194_304:
+                raise EventStoreError("durable read rejected: checkpoint cache exceeds profile")
+            return CheckpointCacheRecord(
+                turn_id=UUID(row["turn_id"]),
+                cache_version=int(row["cache_version"]),
+                checkpoint_id=UUID(row["checkpoint_id"]),
+                run_id=UUID(row["run_id"]),
+                turn_version=int(row["turn_version"]),
+                execution_version=int(row["execution_version"]),
+                reducer_name=row["reducer_name"],
+                reducer_version=int(row["reducer_version"]),
+                source_event_id=UUID(row["source_event_id"]),
+                source_global_position=int(row["source_global_position"]),
+                projection_digest=row["projection_digest"],
+                checkpoint_json=blob,
+                updated_at=_parse_datetime(row["updated_at"]),
+            )
+        except sqlite3.Error as exc:
+            raise EventStoreError(f"SQLite read failure: {exc}") from exc
+        finally:
+            connection.close()
+
+    def list_recoverable(
+        self,
+        *,
+        expired_before: datetime,
+        after_turn_id: UUID | None = None,
+        limit: int = 1_000,
+    ) -> tuple[RecoverableTurn, ...]:
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 10_000
+        ):
+            raise ValueError("limit must be between 1 and 10000")
+        if not isinstance(expired_before, datetime):
+            raise TypeError("expired_before must be a datetime")
+        connection = self._connect()
+        try:
+            statement = (
+                "SELECT turn_id, turn_version, run_id, lease_expires_at "
+                "FROM recoverable_turns WHERE lease_expires_at <= ?"
+                + (" AND turn_id > ?" if after_turn_id is not None else "")
+                + " ORDER BY lease_expires_at, turn_id LIMIT ?"
+            )
+            parameters: list[object] = [_datetime_text(expired_before)]
+            if after_turn_id is not None:
+                parameters.append(str(after_turn_id))
+            parameters.append(limit)
+            rows = connection.execute(statement, parameters).fetchall()
+            return tuple(
+                RecoverableTurn(
+                    turn_id=UUID(row["turn_id"]),
+                    turn_version=int(row["turn_version"]),
+                    run_id=UUID(row["run_id"]),
+                    lease_expires_at=_parse_datetime(row["lease_expires_at"]),
+                )
+                for row in rows
+            )
+        except sqlite3.Error as exc:
+            raise EventStoreError(f"SQLite read failure: {exc}") from exc
+        finally:
+            connection.close()
+
+    def get_active_lease(
+        self,
+        turn_id: UUID,
+        run_id: UUID,
+        owner_id: str,
+    ) -> RunLease | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM run_leases WHERE turn_id=? AND run_id=? AND owner_id=? "
+                "AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                (str(turn_id), str(run_id), owner_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return RunLease(
+                turn_id=turn_id,
+                run_id=run_id,
+                owner_id=owner_id,
+                generation=int(row["generation"]),
+                version=int(row["version"]),
+                expires_at=str(row["expires_at"]),
+            )
+        except sqlite3.Error as exc:
+            raise EventStoreError(f"SQLite read failure: {exc}") from exc
+        finally:
+            connection.close()
+
 
 
 _EVENT_SELECT = """
@@ -913,6 +1199,22 @@ def _fingerprint_hash(value: str) -> str:
     """
 
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _db_now_text(connection: sqlite3.Connection) -> str:
+    """SQLite-authoritative UTC clock text inside the current transaction."""
+    row = connection.execute(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+    ).fetchone()
+    return str(row[0])
+
+
+def _db_modified_text(connection: sqlite3.Connection, modifier: str) -> str:
+    row = connection.execute(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now',?)",
+        (modifier,),
+    ).fetchone()
+    return str(row[0])
 
 
 def _datetime_text(value: datetime) -> str:

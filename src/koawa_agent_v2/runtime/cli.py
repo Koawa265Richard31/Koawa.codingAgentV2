@@ -367,8 +367,9 @@ def main(argv: list[str] | None = None) -> int:
         "approve",
         "deny",
         "interactive",
+        "export-legacy-store",
     }:
-        if "--config" in argv or "--help" in argv or "-h" in argv:
+        if argv[1] in {"export-legacy-store"} or "--config" in argv or "--help" in argv or "-h" in argv:
             return _real_main(argv)
     if len(argv) > 1 and argv[1] in ("--help", "-h"):
         # Top-level help shows the real argparse surface (subcommands + flags).
@@ -434,6 +435,11 @@ def _real_main(argv: list[str]) -> int:
     for name in ("status", "doctor"):
         subparser = subparsers.add_parser(name)
         subparser.add_argument("--config", required=True)
+    export_parser = subparsers.add_parser(
+        "export-legacy-store", help="offline sanitized legacy-store export"
+    )
+    export_parser.add_argument("--source", required=True)
+    export_parser.add_argument("--destination", required=True)
     interactive_parser = subparsers.add_parser(
         "interactive", help="conversational session over one repo"
     )
@@ -445,6 +451,35 @@ def _real_main(argv: list[str]) -> int:
     )
 
     arguments = parser.parse_args(argv[1:])
+    if arguments.command == "export-legacy-store":
+        from .store_migration import (
+            LegacyExportError,
+            export_legacy_store,
+        )
+
+        try:
+            report = export_legacy_store(
+                arguments.source, arguments.destination
+            )
+        except LegacyExportError as exc:
+            print(
+                json.dumps(
+                    {"ok": False, "code": exc.code, "payload": {"detail": exc.detail}},
+                    indent=2,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+            )
+            return 1
+        print(
+            json.dumps(
+                {"ok": True, "payload": report},
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+        )
+        return 0
     # app is closed in the `finally` block below on every exit path (normal,
     # exception and KeyboardInterrupt) for every configured subcommand.
     app = None

@@ -27,8 +27,10 @@ import hashlib
 import json
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from math import isfinite
 from typing import Any, Mapping
+from uuid import UUID
 
 
 # ---------------------------------------------------------------------------
@@ -552,3 +554,54 @@ def validate_runtime_ingress(value: Any) -> dict[str, int]:
             )
         normalized[key] = item
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# canonical identity serializer (section 7.4)
+# ---------------------------------------------------------------------------
+
+
+def _canonical_coerce(value):
+    if isinstance(value, str):
+        return unicodedata.normalize("NFC", value)
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise DurableJsonError("timezone_required", "")
+        return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {
+            unicodedata.normalize("NFC", str(item_key)): _canonical_coerce(item)
+            for item_key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_canonical_coerce(item) for item in value]
+    if isinstance(value, float) and value == 0.0 and str(value).startswith("-"):
+        raise DurableJsonError("negative_zero_float", "")
+    return value
+
+
+def canonical_json_bytes_v1(
+    value: Any,
+    limits: DurableJsonLimits | None = None,
+    *,
+    path: str = "payload",
+) -> bytes:
+    if limits is None:
+        limits = EVENT_PAYLOAD_READ_V1
+    coerced = _canonical_coerce(value)
+    validate_json_value(
+        coerced,
+        limits,
+        path=path,
+        reject_string_controls=True,
+    )
+    text = json.dumps(
+        coerced,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return text.encode("utf-8", "strict")

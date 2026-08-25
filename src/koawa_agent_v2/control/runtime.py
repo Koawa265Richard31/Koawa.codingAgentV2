@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -16,6 +16,7 @@ from .event_store import (
     StreamWrite,
     WrongExpectedVersion,
 )
+from .models import reduce_execution_seed
 from .durable_json import (
     CanonicalText,
     CanonicalTextError,
@@ -24,6 +25,10 @@ from .durable_json import (
 )
 from .models import (
     RESUMABLE_TURN_STATUSES,
+    TURN_RECOVERY_LEASE_CLAIMED,
+    TURN_RECOVERY_LEASE_HEARTBEATED,
+    TURN_RECOVERY_LEASE_RELEASED,
+    TURN_STALE_RUN_REQUEUED,
     THREAD_ARCHIVED,
     THREAD_CREATED,
     THREAD_TURN_ATTACHED,
@@ -245,7 +250,7 @@ class ThreadRuntime:
         expected_version: int,
         *,
         command_id: UUID | str | None = None,
-        execution_seed: Mapping[str, Any] | None = None,
+        execution_seed: ExecutionSeedDTO | None = None,
         execution_expected_version: int | None = None,
         lease_owner_id: str | None = None,
         lease_seconds: int | None = None,
@@ -254,15 +259,19 @@ class ThreadRuntime:
 
         run_id 由本次 command_id 确定性派生：命令重试得到同一 Run，而一次
         真正的新启动命令得到新 Run。后续 Worker 写操作必须携带它作为执行者栅栏。
+        可恢复启动携带 ``ExecutionSeedDTO``，且只有本 Runtime 能填充其中的
+        thread/turn/run/attempt/turn_stream_version 身份字段。
         """
+        # Lazy import avoids the recovery-package init cycle (recovery imports
+        # ThreadRuntime for its coordinator).
+        from ..recovery.execution import ExecutionSeedDTO
+
         resolved_turn_id = _as_uuid(turn_id, "turn_id")
         expected_version = _expected_version(expected_version)
+        if execution_seed is not None and not isinstance(execution_seed, ExecutionSeedDTO):
+            raise TypeError("execution_seed must be ExecutionSeedDTO or None")
         durable_start = execution_seed is not None
         if durable_start:
-            if not isinstance(execution_seed, Mapping):
-                raise TypeError("execution_seed must be a mapping or None")
-            if set(execution_seed).intersection({"thread_id", "turn_id", "run_id"}):
-                raise ValueError("execution_seed contains a reserved identity field")
             if (
                 not isinstance(execution_expected_version, int)
                 or isinstance(execution_expected_version, bool)
@@ -293,7 +302,11 @@ class ThreadRuntime:
                 "turn_id": resolved_turn_id,
                 "expected_version": expected_version,
                 "run_id": resolved_run_id,
-                "execution_seed": execution_seed,
+                "execution_seed": (
+                    None
+                    if execution_seed is None
+                    else execution_seed.to_document_partial()
+                ),
                 "execution_expected_version": execution_expected_version,
                 "lease_owner_id": lease_owner_id,
                 "lease_seconds": lease_seconds,
@@ -336,14 +349,22 @@ class ThreadRuntime:
             turn_id=turn.turn_id,
             run_id=resolved_run_id,
         )
+        assert execution_seed is not None
+        seed_document = execution_seed.with_identity(
+            thread_id=turn.thread_id,
+            turn_id=turn.turn_id,
+            run_id=resolved_run_id,
+            attempt=turn.attempt + 1,
+            turn_stream_version=turn.version + 1,
+        ).to_document()
+        # models.py full seed reducer: the run-execution seed must agree with
+        # the authoritative Turn identity before it is appended.
+        reduce_execution_seed(
+            seed_document, turn=turn, turn_stream_version=turn.version + 1,
+        )
         seeded = self._event(
-            event_type="run.context-seeded.v1",
-            payload={
-                "thread_id": str(turn.thread_id),
-                "turn_id": str(turn.turn_id),
-                "run_id": str(resolved_run_id),
-                **dict(execution_seed),
-            },
+            event_type="run.context-seeded.v2",
+            payload=seed_document,
             occurred_at=occurred_at,
             command_id=resolved_command_id,
             event_slot="run-context-seeded",
@@ -367,6 +388,273 @@ class ThreadRuntime:
         )
         return self._turn_from_receipt(turn.turn_id, receipt)
 
+    def claim_recovery_run(
+        self,
+        turn_id: UUID | str,
+        *,
+        expected_version: int,
+        owner_id: str,
+        lease_seconds: int,
+        command_id: UUID | str | None = None,
+    ) -> TurnState:
+        """Claim a recovery lease overlay on the active run (typed event).
+
+        Writes turn.recovery-lease-claimed.v1 with an exact payload and a fresh
+        claim token; heartbeat/release must reuse the same run and token.
+        """
+        resolved_turn_id = _as_uuid(turn_id, "turn_id")
+        expected_version = _expected_version(expected_version)
+        if not isinstance(owner_id, str) or not owner_id.strip():
+            raise ValueError("owner_id must be non-empty")
+        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
+        resolved_command_id = _optional_uuid(command_id) or uuid4()
+        claimed_run = _derived_id(resolved_command_id, "recovery-claim-run")
+        claim_token = _derived_id(resolved_command_id, "recovery-claim-token")
+        fingerprint = self._fingerprint(
+            "claim_recovery_run",
+            {
+                "turn_id": resolved_turn_id,
+                "expected_version": expected_version,
+                "owner_id": owner_id,
+                "lease_seconds": lease_seconds,
+                "claim_token": claim_token,
+            },
+        )
+        if receipt := self._committed_receipt(
+            resolved_command_id, fingerprint, _turn_stream(resolved_turn_id)
+        ):
+            return self._turn_from_receipt(resolved_turn_id, receipt)
+        turn = self._get_turn_at_version(resolved_turn_id, expected_version)
+        if turn.status is not TurnStatus.RUNNING:
+            raise InvalidTransition(f"cannot claim a lease in {turn.status.value}")
+        if turn.current_run_id is None:
+            raise InvalidTransition("running turn is missing a run id")
+        occurred_at = _now()
+        claim_run_id = turn.current_run_id
+        expires_at = self._store.database_time() + timedelta(seconds=lease_seconds)
+        event = self._event(
+            event_type=TURN_RECOVERY_LEASE_CLAIMED,
+            payload={
+                "thread_id": str(turn.thread_id),
+                "turn_id": str(turn.turn_id),
+                "run_id": str(claim_run_id),
+                "owner": owner_id,
+                "claim_token": str(claim_token),
+                "attempt": turn.attempt,
+                "lease_expires_at": _now_text(expires_at),
+            },
+            occurred_at=occurred_at,
+            command_id=resolved_command_id,
+            event_slot="recovery-lease-claimed",
+            thread_id=turn.thread_id,
+            turn_id=turn.turn_id,
+            run_id=claim_run_id,
+        )
+        receipt = self._append(
+            resolved_command_id,
+            fingerprint,
+            StreamWrite(
+                stream_id=_turn_stream(turn.turn_id),
+                expected_version=turn.version,
+                events=(event,),
+            ),
+        )
+        return self._turn_from_receipt(turn.turn_id, receipt)
+
+    def heartbeat_recovery_run(
+        self,
+        turn_id: UUID | str,
+        *,
+        expected_version: int,
+        run_id: UUID | str,
+        claim_token: UUID | str | None,
+        lease_seconds: int,
+        command_id: UUID | str | None = None,
+        owner_id: str | None = None,
+    ) -> TurnState:
+        """Renew the recovery lease overlay through a typed event."""
+        resolved_turn_id = _as_uuid(turn_id, "turn_id")
+        expected_version = _expected_version(expected_version)
+        resolved_run_id = _as_uuid(run_id, "run_id")
+        resolved_token = (
+            None if claim_token is None else _as_uuid(claim_token, "claim_token")
+        )
+        owner = owner_id if owner_id is not None else self._actor
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("owner_id must be non-empty")
+        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
+        resolved_command_id = _optional_uuid(command_id) or uuid4()
+        fingerprint = self._fingerprint(
+            "heartbeat_recovery_run",
+            {
+                "turn_id": resolved_turn_id,
+                "expected_version": expected_version,
+                "run_id": resolved_run_id,
+                "claim_token": resolved_token,
+                "lease_seconds": lease_seconds,
+                "owner_id": owner,
+            },
+        )
+        if receipt := self._committed_receipt(
+            resolved_command_id, fingerprint, _turn_stream(resolved_turn_id)
+        ):
+            return self._turn_from_receipt(resolved_turn_id, receipt)
+        turn = self._get_turn_at_version(resolved_turn_id, expected_version)
+        if turn.status is not TurnStatus.RUNNING:
+            raise InvalidTransition(f"cannot heartbeat a lease in {turn.status.value}")
+        if turn.recovery_claim_token != resolved_token:
+            raise InvalidTransition("recovery lease heartbeat token mismatch")
+            raise InvalidTransition("recovery lease heartbeat token mismatch")
+        expires_at = self._store.database_time() + timedelta(seconds=lease_seconds)
+        event = self._event(
+            event_type=TURN_RECOVERY_LEASE_HEARTBEATED,
+            payload={
+                "thread_id": str(turn.thread_id),
+                "turn_id": str(turn.turn_id),
+                "run_id": str(resolved_run_id),
+                "owner": owner,
+                "claim_token": (
+                    None if resolved_token is None else str(resolved_token)
+                ),
+                "attempt": turn.attempt,
+                "lease_expires_at": _now_text(expires_at),
+            },
+            occurred_at=_now(),
+            command_id=resolved_command_id,
+            event_slot="recovery-lease-heartbeated",
+            thread_id=turn.thread_id,
+            turn_id=turn.turn_id,
+            run_id=resolved_run_id,
+        )
+        receipt = self._append(
+            resolved_command_id,
+            fingerprint,
+            StreamWrite(
+                stream_id=_turn_stream(turn.turn_id),
+                expected_version=turn.version,
+                events=(event,),
+            ),
+        )
+        return self._turn_from_receipt(turn.turn_id, receipt)
+
+    def release_recovery_run(
+        self,
+        turn_id: UUID | str,
+        *,
+        expected_version: int,
+        run_id: UUID | str,
+        claim_token: UUID | str | None,
+        command_id: UUID | str | None = None,
+        owner_id: str | None = None,
+    ) -> TurnState:
+        """Release the recovery lease overlay (typed event, no expiry field)."""
+        resolved_turn_id = _as_uuid(turn_id, "turn_id")
+        expected_version = _expected_version(expected_version)
+        resolved_run_id = _as_uuid(run_id, "run_id")
+        resolved_token = (
+            None if claim_token is None else _as_uuid(claim_token, "claim_token")
+        )
+        owner = owner_id if owner_id is not None else self._actor
+        resolved_command_id = _optional_uuid(command_id) or uuid4()
+        fingerprint = self._fingerprint(
+            "release_recovery_run",
+            {
+                "turn_id": resolved_turn_id,
+                "expected_version": expected_version,
+                "run_id": resolved_run_id,
+                "claim_token": resolved_token,
+                "owner_id": owner,
+            },
+        )
+        if receipt := self._committed_receipt(
+            resolved_command_id, fingerprint, _turn_stream(resolved_turn_id)
+        ):
+            return self._turn_from_receipt(resolved_turn_id, receipt)
+        turn = self._get_turn_at_version(resolved_turn_id, expected_version)
+        if turn.status is not TurnStatus.RUNNING:
+            raise InvalidTransition(f"cannot release a lease in {turn.status.value}")
+        if turn.recovery_claim_token != resolved_token:
+            raise InvalidTransition("recovery lease release token mismatch")
+            raise InvalidTransition("recovery lease release token mismatch")
+        event = self._event(
+            event_type=TURN_RECOVERY_LEASE_RELEASED,
+            payload={
+                "thread_id": str(turn.thread_id),
+                "turn_id": str(turn.turn_id),
+                "run_id": str(resolved_run_id),
+                "owner": owner,
+                "claim_token": (
+                    None if resolved_token is None else str(resolved_token)
+                ),
+                "attempt": turn.attempt,
+                "released_at": _now_text(self._store.database_time()),
+            },
+            occurred_at=_now(),
+            command_id=resolved_command_id,
+            event_slot="recovery-lease-released",
+            thread_id=turn.thread_id,
+            turn_id=turn.turn_id,
+            run_id=resolved_run_id,
+        )
+        receipt = self._append(
+            resolved_command_id,
+            fingerprint,
+            StreamWrite(
+                stream_id=_turn_stream(turn.turn_id),
+                expected_version=turn.version,
+                events=(event,),
+            ),
+        )
+        return self._turn_from_receipt(turn.turn_id, receipt)
+
+    def requeue_stale_run(
+        self,
+        turn_id: UUID | str,
+        *,
+        expected_version: int,
+        abandoned_run_id: UUID | str,
+        command_id: UUID | str | None = None,
+    ) -> TurnState:
+        """Typed stale-run requeue: appends turn.stale-run-requeued.v1.
+
+        The projection adapter updates the recoverable/lease index in the same
+        append transaction; the coordinator never writes SQL.
+        """
+        resolved_turn_id = _as_uuid(turn_id, "turn_id")
+        expected_version = _expected_version(expected_version)
+        resolved_run_id = _as_uuid(abandoned_run_id, "abandoned_run_id")
+        resolved_command_id = _optional_uuid(command_id) or uuid4()
+        fingerprint = self._fingerprint(
+            "requeue_stale_run",
+            {
+                "turn_id": resolved_turn_id,
+                "expected_version": expected_version,
+                "abandoned_run_id": resolved_run_id,
+            },
+        )
+        if receipt := self._committed_receipt(
+            resolved_command_id, fingerprint, _turn_stream(resolved_turn_id)
+        ):
+            return self._turn_from_receipt(resolved_turn_id, receipt)
+        turn = self._get_turn_at_version(resolved_turn_id, expected_version)
+        if turn.status is not TurnStatus.RUNNING:
+            raise InvalidTransition(f"cannot requeue a turn in {turn.status.value}")
+        if turn.current_run_id != resolved_run_id:
+            raise InvalidTransition("stale requeue run mismatch")
+        return self._append_turn_event(
+            turn,
+            resolved_command_id,
+            fingerprint,
+            TURN_STALE_RUN_REQUEUED,
+            {
+                "abandoned_run_id": str(resolved_run_id),
+                "reason": "lease_expired",
+            },
+            event_slot="turn-stale-run-requeued",
+            run_id=resolved_run_id,
+        )
     def wait_for_input(
         self,
         turn_id: UUID | str,
@@ -1048,7 +1336,6 @@ class ThreadRuntime:
         if not canon.value.strip():
             raise ValueError(f"{name} must be non-empty text")
         return canon
-
     def _committed_receipt(
         self,
         command_id: UUID,
@@ -1129,7 +1416,7 @@ class ThreadRuntime:
         return NewEvent(
             event_id=_derived_id(command_id, f"event:{event_slot}"),
             event_type=event_type,
-            schema_version=1,
+            schema_version=int(event_type.rsplit(".v", 1)[1]),
             occurred_at=occurred_at,
             payload=dict(payload),
             metadata=EventMetadata(
@@ -1269,3 +1556,8 @@ def _non_empty(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be non-empty text")
     return value
+
+
+def _now_text(value: datetime) -> str:
+    # Six-microsecond UTC ISO text for typed lease payloads.
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")

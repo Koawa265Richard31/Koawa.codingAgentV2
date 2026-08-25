@@ -28,6 +28,9 @@ TURN_WAITING_FOR_APPROVAL = "turn.waiting-for-approval.v1"
 TURN_PAUSED = "turn.paused.v1"
 TURN_RECOVERY_QUEUED = "turn.recovery-queued.v1"
 TURN_STALE_RUN_REQUEUED = "turn.stale-run-requeued.v1"
+TURN_RECOVERY_LEASE_CLAIMED = "turn.recovery-lease-claimed.v1"
+TURN_RECOVERY_LEASE_HEARTBEATED = "turn.recovery-lease-heartbeated.v1"
+TURN_RECOVERY_LEASE_RELEASED = "turn.recovery-lease-released.v1"
 TURN_COMPLETED = "turn.completed.v1"
 TURN_FAILED = "turn.failed.v1"
 TURN_CANCELLED = "turn.cancelled.v1"
@@ -164,6 +167,9 @@ class TurnState:
     # Durable approval 不把 bool 混入 response，而是保存独立身份与结论。
     last_resume_approval_request_id: UUID | None = None
     last_resume_approval_decision: str | None = None
+    # recovery run lease overlay: set by turn.recovery-lease-claimed.v1 and
+    # cleared by release/terminal; heartbeat/release must match run+token.
+    recovery_claim_token: UUID | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -316,6 +322,7 @@ def _apply_turn_event(
             last_resume_interrupt_id=None,
             last_resume_approval_request_id=None,
             last_resume_approval_decision=None,
+            recovery_claim_token=None,
             last_resume_version=None,
             outcome=None,
             error=None,
@@ -348,6 +355,7 @@ def _apply_turn_event(
             last_resume_interrupt_id=None,
             last_resume_approval_request_id=None,
             last_resume_approval_decision=None,
+            recovery_claim_token=None,
             last_resume_version=None,
             version=event.stream_version,
             updated_at=event.occurred_at,
@@ -358,8 +366,73 @@ def _apply_turn_event(
         if _require_uuid(event.payload, "abandoned_run_id") != state.current_run_id:
             raise CorruptEventStream("stale requeue run mismatch")
         return replace(state, status=TurnStatus.QUEUED, current_run_id=None,
-                       pending_interrupt=None, version=event.stream_version,
+                       pending_interrupt=None, recovery_claim_token=None,
+                       version=event.stream_version,
                        updated_at=event.occurred_at)
+
+    if event.event_type == TURN_RECOVERY_LEASE_CLAIMED:
+        # Recovery lease overlay on the active run: fresh claim token, same run.
+        _require_status(state, TurnStatus.RUNNING)
+        payload_run = _require_uuid(event.payload, "run_id")
+        if payload_run != state.current_run_id:
+            raise CorruptEventStream("recovery lease claim run mismatch")
+        attempt = _require_int(event.payload, "attempt")
+        if attempt != state.attempt:
+            raise CorruptEventStream("recovery lease claim attempt mismatch")
+        if not isinstance(event.payload.get("owner"), str) or not event.payload.get("owner").strip():
+            raise CorruptEventStream("recovery lease claim owner must be text")
+        _require_lease_time(event.payload.get("lease_expires_at"), "lease_expires_at")
+        token = _require_uuid(event.payload, "claim_token")
+        return replace(
+            state,
+            recovery_claim_token=token,
+            version=event.stream_version,
+            updated_at=event.occurred_at,
+        )
+
+    if event.event_type == TURN_RECOVERY_LEASE_HEARTBEATED:
+        _require_status(state, TurnStatus.RUNNING)
+        payload_run = _require_uuid(event.payload, "run_id")
+        if payload_run != state.current_run_id:
+            raise CorruptEventStream("recovery lease heartbeat run mismatch")
+        attempt = _require_int(event.payload, "attempt")
+        if attempt != state.attempt:
+            raise CorruptEventStream("recovery lease heartbeat attempt mismatch")
+        if not isinstance(event.payload.get("owner"), str) or not event.payload.get("owner").strip():
+            raise CorruptEventStream("recovery lease heartbeat owner must be text")
+        _require_lease_time(event.payload.get("lease_expires_at"), "lease_expires_at")
+        supplied_token = event.payload.get("claim_token")
+        supplied_token = _optional_lease_token(supplied_token)
+        if supplied_token != state.recovery_claim_token:
+            raise CorruptEventStream("recovery lease heartbeat token mismatch")
+        return replace(
+            state,
+            version=event.stream_version,
+            updated_at=event.occurred_at,
+        )
+
+    if event.event_type == TURN_RECOVERY_LEASE_RELEASED:
+        _require_status(state, TurnStatus.RUNNING)
+        payload_run = _require_uuid(event.payload, "run_id")
+        if payload_run != state.current_run_id:
+            raise CorruptEventStream("recovery lease release run mismatch")
+        attempt = _require_int(event.payload, "attempt")
+        if attempt != state.attempt:
+            raise CorruptEventStream("recovery lease release attempt mismatch")
+        if not isinstance(event.payload.get("owner"), str) or not event.payload.get("owner").strip():
+            raise CorruptEventStream("recovery lease release owner must be text")
+        _require_lease_time(event.payload.get("released_at"), "released_at")
+        if event.payload.get("lease_expires_at") is not None:
+            raise CorruptEventStream("recovery lease release carries an expiry")
+        supplied_token = _optional_lease_token(event.payload.get("claim_token"))
+        if supplied_token != state.recovery_claim_token:
+            raise CorruptEventStream("recovery lease release token mismatch")
+        return replace(
+            state,
+            recovery_claim_token=None,
+            version=event.stream_version,
+            updated_at=event.occurred_at,
+        )
 
     if event.event_type in (TURN_WAITING_FOR_INPUT, TURN_WAITING_FOR_APPROVAL):
         # 只有当前正在运行的 Worker 才能把任务挂起为一个持久 interrupt。
@@ -396,6 +469,7 @@ def _apply_turn_event(
             last_resume_interrupt_id=None,
             last_resume_approval_request_id=None,
             last_resume_approval_decision=None,
+            recovery_claim_token=None,
             last_resume_version=None,
             version=event.stream_version,
             updated_at=event.occurred_at,
@@ -413,6 +487,7 @@ def _apply_turn_event(
             last_resume_interrupt_id=None,
             last_resume_approval_request_id=None,
             last_resume_approval_decision=None,
+            recovery_claim_token=None,
             last_resume_version=None,
             version=event.stream_version,
             updated_at=event.occurred_at,
@@ -499,6 +574,7 @@ def _apply_turn_event(
             ),
             last_resume_approval_request_id=approval_request_id,
             last_resume_approval_decision=approval_decision,
+            recovery_claim_token=None,
             last_resume_version=event.stream_version,
             version=event.stream_version,
             updated_at=event.occurred_at,
@@ -562,6 +638,7 @@ def _terminal_state(
         last_resume_interrupt_id=None,
         last_resume_approval_request_id=None,
         last_resume_approval_decision=None,
+        recovery_claim_token=None,
         last_resume_version=None,
         outcome=outcome,
         error=error,
@@ -580,11 +657,25 @@ def _require_next_version(previous: int, current: int) -> None:
 
 
 def _require_schema_version(event: StoredEventLike) -> None:
-    """拒绝当前 reducer 尚不会解释的事件 schema，避免错误兼容。"""
+    """拒绝与 event_type 后缀不符的 schema，避免错误兼容（contract 2.1）。
+    每个事件名携带 schema 大版本（xxx.vN）；任何不匹配都视为损坏，
+    而不是"向前兼容"的未知字段。
+    """
 
-    if event.schema_version != 1:
+    if not isinstance(event.event_type, str) or '.v' not in event.event_type:
         raise CorruptEventStream(
-            f"unsupported schema version {event.schema_version} for {event.event_type}"
+            f"event type {event.event_type!r} has no schema suffix"
+        )
+    suffix = event.event_type.rsplit(".v", 1)[1]
+    if not suffix.isdigit():
+        raise CorruptEventStream(
+            f"event type {event.event_type!r} has an invalid schema suffix"
+        )
+    declared = int(suffix)
+    if event.schema_version != declared:
+        raise CorruptEventStream(
+            f"schema version {event.schema_version} does not match event type "
+            f"suffix {event.event_type!r}"
         )
 
 
@@ -631,6 +722,135 @@ def _require_uuid(
         raise CorruptEventStream(f"event payload {key}={value} does not match {expected}")
     return value
 
+
+
+
+# v2 execution seed wire (section 6.4); the seed lives on the run-execution
+# stream, and this reducer validates it against the authoritative Turn state.
+SEED_SCHEMA_VERSION_2 = 2
+_SEED_KEYS = frozenset(
+    {
+        "seed_schema_version",
+        "thread_id",
+        "turn_id",
+        "run_id",
+        "attempt",
+        "turn_stream_version",
+        "request_semantics",
+        "projection",
+        "resume",
+    }
+)
+_SEED_REQUEST_KEYS = frozenset(
+    {
+        "protocol_version",
+        "provider",
+        "model",
+        "max_output_tokens",
+        "input_items",
+        "tool_definitions",
+        "tool_catalog_digest",
+    }
+)
+_SEED_PROJECTION_KEYS = frozenset(
+    {
+        "context",
+        "final_text",
+        "input_tokens",
+        "model_round",
+        "output_chars",
+        "output_tokens",
+        "pending_tool_calls",
+        "phase",
+        "tool_count",
+    }
+)
+_SEED_RESUME_KEYS = frozenset(
+    {"turn_event_id", "turn_event_type", "context_item", "content_digest"}
+)
+
+
+def reduce_execution_seed(payload: Mapping[str, Any], *, turn: TurnState, turn_stream_version: int) -> dict[str, Any]:
+    """Validate a v2 execution seed against the authoritative Turn state.
+
+    The seed pins thread/turn/run identity, attempt and the Turn stream
+    version at seed time; any mismatch means the run-execution fact references
+    a state that never existed, so it fails closed.
+    """
+    if not isinstance(payload, Mapping):
+        raise CorruptEventStream("execution seed must be a JSON object")
+    if payload.get("seed_schema_version") != SEED_SCHEMA_VERSION_2:
+        raise CorruptEventStream("execution seed schema version unsupported")
+    if set(payload) != _SEED_KEYS:
+        raise CorruptEventStream("execution seed has an unknown key set")
+    attempt = _require_int(payload, "attempt")
+    declared_turn_version = _require_int(payload, "turn_stream_version")
+    if declared_turn_version != turn_stream_version:
+        raise CorruptEventStream("execution seed turn stream version mismatch")
+    thread_id = _require_uuid(payload, "thread_id")
+    if thread_id != turn.thread_id:
+        raise CorruptEventStream("execution seed thread mismatch")
+    if _require_uuid(payload, "turn_id") != turn.turn_id:
+        raise CorruptEventStream("execution seed turn mismatch")
+    run_id = _require_uuid(payload, "run_id")
+    if turn.current_run_id is not None and run_id != turn.current_run_id:
+        raise CorruptEventStream("execution seed run mismatch")
+    request = payload.get("request_semantics")
+    projection = payload.get("projection")
+    if not isinstance(request, Mapping) or set(request) != _SEED_REQUEST_KEYS:
+        raise CorruptEventStream("execution seed request semantics corrupt")
+    if not isinstance(projection, Mapping) or set(projection) != _SEED_PROJECTION_KEYS:
+        raise CorruptEventStream("execution seed projection corrupt")
+    for name in ("model_round", "tool_count", "output_chars", "input_tokens", "output_tokens"):
+        value = projection.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise CorruptEventStream("execution seed projection counter corrupt")
+    resume = payload.get("resume")
+    if resume is not None:
+        if not isinstance(resume, Mapping) or set(resume) != _SEED_RESUME_KEYS:
+            raise CorruptEventStream("execution seed resume corrupt")
+        event_type = resume.get("turn_event_type")
+        if event_type not in ("turn.recovery-queued.v1", "turn.stale-run-requeued.v1", "turn.input-resumed.v1", "turn.approval-resumed.v1"):
+            raise CorruptEventStream("execution seed references an unknown resume event")
+        _require_uuid(resume, "turn_event_id")
+        if not isinstance(resume.get("context_item"), Mapping):
+            raise CorruptEventStream("execution seed resume context item corrupt")
+        digest = resume.get("content_digest")
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise CorruptEventStream("execution seed resume digest corrupt")
+    return {
+        "thread_id": thread_id,
+        "turn_id": turn.turn_id,
+        "run_id": run_id,
+        "attempt": attempt,
+        "turn_stream_version": declared_turn_version,
+        "request_semantics": dict(request),
+        "projection": dict(projection),
+        "resume": None if resume is None else dict(resume),
+    }
+
+
+def _require_lease_time(value, name: str) -> str:
+    """Require a timezone-aware ISO-8601 UTC text for lease events."""
+    if not isinstance(value, str) or not value:
+        raise CorruptEventStream(f"event payload field {name!r} must be UTC text")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise CorruptEventStream(f"event payload field {name!r} must be UTC text") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise CorruptEventStream(f"event payload field {name!r} must be timezone-aware")
+    return value
+
+
+def _optional_lease_token(value):
+    """Normalize an optional claim token; None/non-None UUID only."""
+    if value is None:
+        return None
+    try:
+        return value if isinstance(value, UUID) else UUID(str(value))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise CorruptEventStream("recovery lease claim_token must be a UUID or null") from exc
 
 def _require_enum(
     payload: Mapping[str, Any],

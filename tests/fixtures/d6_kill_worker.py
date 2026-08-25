@@ -9,7 +9,7 @@ from threading import Event
 
 from koawa_agent_v2.execution.loop import AgentLoop, ToolExecutionResult
 from koawa_agent_v2.ledger import LedgerExecutor, READ_ONLY_PROFILE, ToolLedgerStore
-from koawa_agent_v2.recovery import Checkpoint, CheckpointStore, RunPhase
+from koawa_agent_v2.recovery import CheckpointStore, RunPhase
 from koawa_agent_v2.control.sqlite_store import SqliteEventStore
 from koawa_agent_v2.control.runtime import ThreadRuntime
 from koawa_agent_v2.execution.worker import TurnWorker
@@ -27,10 +27,10 @@ MARKER = Path(sys.argv[2])
 POINT = sys.argv[3]
 
 
-def _ready(checkpoint: Checkpoint | None = None) -> None:
+def _ready(phase) -> None:
     document = {
         "point": POINT,
-        "phase": None if checkpoint is None else checkpoint.phase.value,
+        "phase": None if phase is None else phase.value,
     }
     MARKER.write_text(json.dumps(document), encoding="utf-8")
     Event().wait()
@@ -42,23 +42,25 @@ class BlockingCheckpointStore(CheckpointStore):
         event_store: SqliteEventStore,
         *,
         phase: RunPhase,
-        before_save: bool,
+        before_publish: bool,
     ) -> None:
         self._target_phase = phase
-        self._before_save = before_save
+        self._before_publish = before_publish
         super().__init__(event_store)
 
-    def save(self, checkpoint: Checkpoint) -> None:
-        if checkpoint.phase is self._target_phase and self._before_save:
-            _ready(checkpoint)
-        super().save(checkpoint)
-        if checkpoint.phase is self._target_phase and not self._before_save:
-            _ready(checkpoint)
+    def publish_from_source(self, **kwargs):
+        projection = kwargs.get("projection")
+        if projection is not None and projection.phase is self._target_phase and self._before_publish:
+            _ready(projection.phase)
+        receipt = super().publish_from_source(**kwargs)
+        if projection is not None and projection.phase is self._target_phase and not self._before_publish:
+            _ready(projection.phase)
+        return receipt
 
 
 class BlockingModelClient:
     def stream(self, request):
-        _ready()
+        _ready(None)
 
 
 def main() -> None:
@@ -67,31 +69,31 @@ def main() -> None:
         checkpoints = BlockingCheckpointStore(
             store,
             phase=RunPhase.READY_TO_FINALIZE,
-            before_save=True,
+            before_publish=True,
         )
     elif POINT == "checkpoint_saved":
         checkpoints = BlockingCheckpointStore(
             store,
             phase=RunPhase.READY_TO_FINALIZE,
-            before_save=False,
+            before_publish=False,
         )
     elif POINT == "ready_for_tool":
         checkpoints = BlockingCheckpointStore(
             store,
             phase=RunPhase.READY_FOR_TOOL,
-            before_save=False,
+            before_publish=False,
         )
     elif POINT == "tool_in_progress":
         checkpoints = BlockingCheckpointStore(
             store,
-            phase=RunPhase.BLOCKED_UNCERTAIN_SIDE_EFFECT,
-            before_save=False,
+            phase=RunPhase.TOOL_IN_PROGRESS,
+            before_publish=False,
         )
     elif POINT == "tool_result_saved":
         checkpoints = BlockingCheckpointStore(
             store,
             phase=RunPhase.READY_FOR_MODEL,
-            before_save=False,
+            before_publish=False,
         )
     else:
         checkpoints = CheckpointStore(store)

@@ -29,13 +29,17 @@ from ..control.models import TurnState, TurnStatus
 from ..recovery import (
     CheckpointStore,
     DurableExecutionRecorder,
+    LeaseConflict,
     LeaseKeeper,
     RunPhase,
+    context_document,
     context_from_document,
     execution_seed,
     reconstruct_execution,
+    resume_document,
 )
 from ..recovery.execution import (
+    ExecutionSeedDTO,
     resolve_seed_semantics,
     validate_execution_segments,
 )
@@ -82,6 +86,7 @@ class TurnWorker:
         checkpoint_store: CheckpointStore | None = None,
         owner_id: str | None = None,
         lease_seconds: int = 30,
+        tool_definitions: Sequence[object] = (),  # noqa: F821
     ) -> None:
         if not isinstance(runtime, ThreadRuntime):
             raise TypeError("runtime must be ThreadRuntime")
@@ -123,6 +128,8 @@ class TurnWorker:
         self._checkpoint_store = checkpoint_store
         self._owner_id = owner_id or f"turn-worker-{uuid4()}"
         self._lease_seconds = lease_seconds
+        copied_tools = tuple(tool_definitions)
+        self._tool_definitions = copied_tools
 
     def execute(
         self,
@@ -251,8 +258,13 @@ class TurnWorker:
         execution_version = (
             execution_facts[-1].stream_version if execution_facts else -1
         )
-        seed = None
+        seed: ExecutionSeedDTO | None = None
         if self._checkpoint_store is not None:
+            resume_block = None
+            if queued.last_resume_response is not None:
+                # A resume seed references the typed Turn resume event that
+                # requeued the turn and appends exactly one canonical item.
+                resume_block = self._build_resume_block(queued, context)
             seed = execution_seed(
                 context,
                 model_round=0 if resume is None else resume.model_round,
@@ -270,6 +282,8 @@ class TurnWorker:
                 provider=resolved_provider,
                 model=resolved_model,
                 max_output_tokens=resolved_max_output_tokens,
+                tool_definitions=self._tool_definitions,
+                resume=resume_block,
             )
 
         running = self._runtime.start_turn(
@@ -289,11 +303,6 @@ class TurnWorker:
         keeper = None
         if self._checkpoint_store is not None:
             store = self._checkpoint_store.event_store
-            lease = self._checkpoint_store.get_active_lease(
-                running.turn_id,
-                running.current_run_id,
-                self._owner_id,
-            )
             recorder = DurableExecutionRecorder(
                 store,
                 self._checkpoint_store,
@@ -313,21 +322,53 @@ class TurnWorker:
                     else resume.pending_tool_calls
                 ),
                 phase=resume_phase,
+                provider=resolved_provider,
+                model=resolved_model,
+                max_output_tokens=resolved_max_output_tokens,
+                tool_definitions=self._tool_definitions,
+                attempt=running.attempt,
             )
-            keeper = LeaseKeeper(self._checkpoint_store, lease, self._lease_seconds)
+
+            def heartbeater() -> None:
+                # Typed lease renewal: read the fresh Turn version and append
+                # turn.recovery-lease-heartbeated.v1 for this run.
+                current = self._runtime.get_turn(running.turn_id)
+                if (
+                    current.version < running.version
+                    or current.current_run_id != running.current_run_id
+                ):
+                    raise _LeaseOwnershipLost()
+                self._runtime.heartbeat_recovery_run(
+                    running.turn_id,
+                    expected_version=current.version,
+                    run_id=running.current_run_id,
+                    claim_token=None,
+                    lease_seconds=self._lease_seconds,
+                    command_id=_command_id(
+                        resolved_execution_id, "heartbeat"
+                    ),
+                    owner_id=self._owner_id,
+                )
+
+            keeper = LeaseKeeper(
+                heartbeater,
+                ttl_seconds=self._lease_seconds,
+            )
             keeper.start()
 
         def finish_durable() -> None:
             if keeper is not None: keeper.stop()
-            if self._checkpoint_store is not None:
-                self._checkpoint_store.finish_run(running.turn_id, running.current_run_id)
+            # The recoverable/lease projection is cleaned by the terminal typed
+            # event projector; there is no raw-SQL cleanup in recovery.
 
         def assert_run_ownership() -> None:
             """在下一次外部副作用前确认 D1 Run 仍归本 Worker。"""
             if keeper is not None: keeper.assert_owned()
             current = self._runtime.get_turn(running.turn_id)
+            # Typed lease heartbeats advance the Turn stream above the start
+            # version; regressions, run changes and terminal states still fence.
             if (
-                current.version != running.version
+                current.version < running.version
                 or current.status is not TurnStatus.RUNNING
                 or current.current_run_id != running.current_run_id
             ):
@@ -408,8 +449,8 @@ class TurnWorker:
             if keeper is not None: keeper.stop()
             try:
                 current = self._runtime.get_turn(running.turn_id)
-                if current.is_terminal and self._checkpoint_store is not None:
-                    self._checkpoint_store.finish_run(running.turn_id, running.current_run_id)
+                # Terminal events already clean the projection through the
+                # typed-event projector; there is no raw-SQL cleanup here.
             except Exception:
                 pass
             raise
@@ -427,6 +468,40 @@ class TurnWorker:
             raise
         finish_durable()
         return TurnWorkerResult(completed, loop_result)
+
+    def _build_resume_block(
+        self,
+        queued: TurnState,
+        context: Sequence[ModelContextItem],
+    ) -> dict:
+        """Build the v2 seed resume block for a typed resume response."""
+        if queued.last_resume_version is None:
+            raise ContextUnavailable("resume version missing")
+        response_input_id = f"turn:{queued.turn_id}:resume:{queued.last_resume_version}"
+        response_item = None
+        for item in context:
+            if isinstance(item, UserMessage) and item.input_id == response_input_id:
+                response_item = context_document(item)
+                break
+        if response_item is None:
+            raise ContextUnavailable("resume response item missing")
+        page = self._checkpoint_store.event_store.read_stream(
+            StreamId("turn", queued.turn_id),
+            after_version=queued.last_resume_version - 1,
+            limit=1,
+        )
+        if not page:
+            raise ContextUnavailable("resume turn event missing")
+        turn_event = page[0]
+        return resume_document(
+            turn_event.event_id,
+            turn_event.event_type,
+            response_item,
+        )
+
+
+class _LeaseOwnershipLost(LeaseConflict):
+    """The typed heartbeat saw a fenced run; the worker must stop."""
 
 
 def _command_id(execution_id: UUID, slot: str) -> UUID:

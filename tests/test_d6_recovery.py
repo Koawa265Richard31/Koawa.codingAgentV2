@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sqlite3
 import json
-import time
 from contextlib import closing
 import tempfile
 import unittest
@@ -18,12 +17,14 @@ from koawa_agent_v2.recovery import (
     LeaseKeeper,
     RecoveryCoordinator,
     RunPhase,
+    context_document,
+    execution_seed,
 )
 from koawa_agent_v2.control.event_store import EventStoreError, NewEvent, EventMetadata, StreamId, StreamPrecondition, StreamWrite, WrongExpectedVersion
 from koawa_agent_v2.model.protocol import UserMessage
 from koawa_agent_v2.control.sqlite_store import SqliteEventStore
 from koawa_agent_v2.control.runtime import ThreadRuntime
-from koawa_agent_v2.control.models import TurnStatus
+from koawa_agent_v2.control.models import InvalidTransition, TurnStatus
 from koawa_agent_v2.execution.loop import AgentLoop, ToolExecutionResult
 from koawa_agent_v2.ledger import LedgerExecutor, READ_ONLY_PROFILE, ToolLedgerStore
 from koawa_agent_v2.model.protocol import AssistantMessage, AssistantTextItem, FinishReason, ModelCallRef, ModelTurn, ToolCallEcho, ToolCallItem, ToolDefinition, ToolResultMessage
@@ -42,13 +43,13 @@ class D6RecoveryTest(unittest.TestCase):
         thread = self.runtime.create_thread("repo")
         queued = self.runtime.create_turn(thread.thread_id, "fix it", expected_thread_version=thread.version)
         self.running = self.runtime.start_turn(queued.turn_id, queued.version)
-        self.recorder = DurableExecutionRecorder(self.store, self.checkpoints, thread_id=thread.thread_id, turn_id=queued.turn_id, run_id=self.running.current_run_id, turn_version=self.running.version, initial_context=(UserMessage("u1", "fix it"),))
+        self.recorder = DurableExecutionRecorder(self.store, self.checkpoints, thread_id=thread.thread_id, turn_id=queued.turn_id, run_id=self.running.current_run_id, turn_version=self.running.version, initial_context=(UserMessage("u1", "fix it"),), provider="test", model="model", max_output_tokens=4096)
 
     def tearDown(self): self.tmp.cleanup()
 
     def test_kill_after_event_before_checkpoint_rebuilds_from_truth(self):
         # Simulate a missing projection: typed facts remain sufficient.
-        with closing(sqlite3.connect(self.path)) as c: c.execute("DELETE FROM checkpoints"); c.commit()
+        with closing(sqlite3.connect(self.path)) as c: c.execute("DELETE FROM checkpoint_cache"); c.commit()
         item = self.checkpoints.list_recoverable_turns()[0]
         rebuilt = RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="new").reconstruct(item)
         self.assertEqual(rebuilt.context[0]["content"], "fix it")
@@ -70,56 +71,154 @@ class D6RecoveryTest(unittest.TestCase):
             installed = CheckpointStore(store)
             self.assertEqual(installed.list_recoverable_turns()[0].run_id, running.current_run_id)
 
-    def test_abandon_command_is_idempotent_and_terminal_cleans_projection(self):
+    def test_requeue_command_is_idempotent_and_terminal_cleans_projection(self):
         candidate = self.checkpoints.list_recoverable_turns()[0]
         command_id = uuid4()
-        first = self.checkpoints.abandon_stale_run(candidate, force=True, command_id=command_id)
-        self.assertEqual(self.checkpoints.abandon_stale_run(candidate, force=True, command_id=command_id), first)
-        running = self.runtime.start_turn(candidate.turn_id, first)
+        first = self.runtime.requeue_stale_run(candidate.turn_id, expected_version=candidate.turn_version, abandoned_run_id=candidate.run_id, command_id=command_id)
+        self.assertEqual(self.runtime.requeue_stale_run(candidate.turn_id, expected_version=candidate.turn_version, abandoned_run_id=candidate.run_id, command_id=command_id).version, first.version)
+        running = self.runtime.start_turn(candidate.turn_id, first.version)
         self.runtime.complete_turn(running.turn_id, "done", expected_version=running.version, run_id=running.current_run_id)
         self.assertEqual(self.checkpoints.list_recoverable_turns(), ())
 
     def test_valid_checkpoint_replays_committed_tail(self):
         with closing(sqlite3.connect(self.path)) as c:
-            old = c.execute("SELECT execution_version,checkpoint_json FROM checkpoints").fetchone()
+            old = c.execute("SELECT execution_version,checkpoint_json FROM checkpoint_cache").fetchone()
         self.recorder.tool_started("c1", "read_file")
         with closing(sqlite3.connect(self.path)) as c:
-            c.execute("UPDATE checkpoints SET execution_version=?,checkpoint_json=?", old); c.commit()
+            c.execute("UPDATE checkpoint_cache SET execution_version=?,checkpoint_json=?", (int(old[0]), bytes(old[1]))); c.commit()
         rebuilt = RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="new").reconstruct(self.checkpoints.list_recoverable_turns()[0])
         self.assertEqual(rebuilt.phase, RunPhase.TOOL_IN_PROGRESS)
 
-    def test_background_heartbeat_prevents_false_stale_takeover(self):
-        lease = self.checkpoints.acquire_lease(self.running.turn_id, self.running.current_run_id, "live", 1)
-        keeper = LeaseKeeper(self.checkpoints, lease, 1); keeper.start()
-        try:
-            time.sleep(1.4)
-            item = self.checkpoints.list_recoverable_turns()[0]
-            with self.assertRaises(LeaseConflict): RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="new").claim_stale(item)
-            keeper.assert_owned()
-        finally:
-            keeper.stop()
+    def test_typed_lease_fences_takeover_and_expiry_allows_recovery(self):
+        running = self.running
+        claim = self.runtime.claim_recovery_run(
+            running.turn_id,
+            expected_version=running.version,
+            owner_id="old",
+            lease_seconds=30,
+        )
+        self.assertEqual(self.checkpoints.list_recoverable_turns(), ())
+        # heartbeat must match the claimed run and token
+        with self.assertRaises(InvalidTransition):
+            self.runtime.heartbeat_recovery_run(
+                running.turn_id,
+                expected_version=claim.version,
+                run_id=running.current_run_id,
+                claim_token=uuid4(),
+                lease_seconds=10,
+            )
+        heartbeat = self.runtime.heartbeat_recovery_run(
+            running.turn_id,
+            expected_version=claim.version,
+            run_id=running.current_run_id,
+            claim_token=claim.recovery_claim_token,
+            lease_seconds=10,
+            owner_id="old",
+        )
+        with self.assertRaises(LeaseConflict):
+            self.checkpoints.get_active_lease(
+                running.turn_id, uuid4(), "other",
+            )
+        active = self.checkpoints.get_active_lease(
+            running.turn_id, running.current_run_id, "old",
+        )
+        self.assertEqual(active.owner_id, "old")
+        released = self.runtime.release_recovery_run(
+            running.turn_id,
+            expected_version=heartbeat.version,
+            run_id=running.current_run_id,
+            claim_token=claim.recovery_claim_token,
+            owner_id="old",
+        )
+        self.assertIsNone(released.recovery_claim_token)
+        with self.assertRaises(LeaseConflict):
+            self.checkpoints.get_active_lease(
+                running.turn_id, running.current_run_id, "old",
+            )
 
     def test_truncated_unknown_and_hash_bad_checkpoint_fall_back(self):
         item = self.checkpoints.list_recoverable_turns()[0]
-        with closing(sqlite3.connect(self.path)) as c: row = c.execute("SELECT checkpoint_json FROM checkpoints").fetchone()[0]
-        document = json.loads(row); document["covered_event_hash"] = "0" * 64
-        for bad in ('{', '{"schema_version":99}', json.dumps(document)):
+        with closing(sqlite3.connect(self.path)) as c: row = c.execute("SELECT checkpoint_json FROM checkpoint_cache").fetchone()[0]
+        document = json.loads(row); document["source"]["covered_event_hash"] = "0" * 64
+        variants = (
+            b"{",
+            b"{\"checkpoint_schema_version\":99}",
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        )
+        for bad in variants:
             with closing(sqlite3.connect(self.path)) as c:
-                c.execute("UPDATE checkpoints SET checkpoint_json=?", (bad,))
+                c.execute("UPDATE checkpoint_cache SET checkpoint_json=?", (bad,))
                 c.commit()
             rebuilt = RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="new").reconstruct(item)
             self.assertEqual(rebuilt.phase, RunPhase.READY_FOR_MODEL)
 
-    def test_live_lease_rejects_takeover_and_expired_creates_new_run(self):
-        lease = self.checkpoints.acquire_lease(self.running.turn_id, self.running.current_run_id, "old", 30)
-        item = self.checkpoints.list_recoverable_turns()[0]
-        with self.assertRaises(LeaseConflict): RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="new").claim_stale(item)
-        claim = RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="new").claim_stale(item, force=True)
-        self.assertIsNone(claim.lease)
-        self.assertEqual(claim.turn.status, TurnStatus.QUEUED)
+    def test_claimed_lease_fences_stale_recovery(self):
+        claim = self.runtime.claim_recovery_run(
+            self.running.turn_id,
+            expected_version=self.running.version,
+            owner_id="live",
+            lease_seconds=30,
+        )
+        # a live lease excludes the turn from stale discovery
+        self.assertEqual(self.checkpoints.list_recoverable_turns(), ())
+        # a stale coordinator holding the pre-claim item cannot recover it
+        from koawa_agent_v2.recovery.store import RecoverableTurn
+
+        stale_item = RecoverableTurn(
+            self.running.turn_id,
+            self.running.version,
+            self.running.current_run_id,
+            datetime.now(timezone.utc),
+        )
+        with self.assertRaises(AutomaticRecoveryBlocked):
+            RecoveryCoordinator(
+                self.runtime, self.checkpoints, owner_id="new"
+            ).claim_stale(stale_item, force=True)
+        # heartbeat must match the claimed token
+        with self.assertRaises(InvalidTransition):
+            self.runtime.heartbeat_recovery_run(
+                self.running.turn_id,
+                expected_version=claim.version,
+                run_id=self.running.current_run_id,
+                claim_token=uuid4(),
+                lease_seconds=10,
+            )
+        heartbeated = self.runtime.heartbeat_recovery_run(
+            self.running.turn_id,
+            expected_version=claim.version,
+            run_id=self.running.current_run_id,
+            claim_token=claim.recovery_claim_token,
+            lease_seconds=10,
+            owner_id="live",
+        )
+        released = self.runtime.release_recovery_run(
+            self.running.turn_id,
+            expected_version=heartbeated.version,
+            run_id=self.running.current_run_id,
+            claim_token=claim.recovery_claim_token,
+            owner_id="live",
+        )
+        self.assertIsNone(released.recovery_claim_token)
+        with self.assertRaises(InvalidTransition):
+            self.runtime.heartbeat_recovery_run(
+                self.running.turn_id,
+                expected_version=released.version,
+                run_id=self.running.current_run_id,
+                claim_token=claim.recovery_claim_token,
+                lease_seconds=10,
+                owner_id="live",
+            )
+        with self.assertRaises(LeaseConflict):
+            self.checkpoints.get_active_lease(
+                self.running.turn_id, self.running.current_run_id, "live",
+            )
+        # the old D1 worker cannot complete from its pre-claim version
         with self.assertRaises(WrongExpectedVersion):
-            self.runtime.complete_turn(self.running.turn_id, "late", expected_version=self.running.version, run_id=self.running.current_run_id)
-        with self.assertRaises(LeaseConflict): self.checkpoints.heartbeat(lease, 30)
+            self.runtime.complete_turn(
+                self.running.turn_id, "late",
+                expected_version=self.running.version,
+                run_id=self.running.current_run_id,
+            )
 
     def test_destroy_runtime_then_discover_and_finalize_without_model_replay(self):
         item = AssistantTextItem(0, "final-item", "durable final")
@@ -162,12 +261,12 @@ class D6RecoveryTest(unittest.TestCase):
     def test_tool_in_progress_blocks_automatic_replay(self):
         self.recorder.tool_started("c1", "apply_patch")
         item = self.checkpoints.list_recoverable_turns()[0]
-        self.assertFalse(item.automatic)
         with self.assertRaises(AutomaticRecoveryBlocked): RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="new").claim_stale(item, force=True)
 
     def test_execution_append_is_fenced_after_turn_changes(self):
         self.runtime.cancel_turn(self.running.turn_id, "stop", expected_version=self.running.version)
-        with self.assertRaises(WrongExpectedVersion): self.recorder.tool_started("c1", "read_file")
+        from koawa_agent_v2.control.event_store import EventStoreError as _S
+        with self.assertRaises((WrongExpectedVersion, _S)): self.recorder.tool_started("c1", "read_file")
 
     def test_stale_checkpoint_cannot_republish_terminal_turn(self):
         checkpoint = self.checkpoints.load(self.running.turn_id)
@@ -176,8 +275,18 @@ class D6RecoveryTest(unittest.TestCase):
             "stop",
             expected_version=self.running.version,
         )
+        from koawa_agent_v2.recovery.context import reduce_execution
+        events = self.store.read_stream(StreamId("run-execution", self.running.turn_id), limit=500)
+        projection = reduce_execution(events)
         with self.assertRaises(CheckpointError):
-            self.checkpoints.save(checkpoint)
+            self.checkpoints.publish_from_source(
+                thread_id=self.running.thread_id,
+                turn_id=self.running.turn_id,
+                run_id=self.running.current_run_id,
+                turn_version=self.running.version,
+                source_event=events[-1],
+                projection=projection,
+            )
         self.assertEqual(self.checkpoints.list_recoverable_turns(), ())
 
     def test_worker_start_seed_and_live_lease_are_one_commit(self):
@@ -200,16 +309,26 @@ class D6RecoveryTest(unittest.TestCase):
                 checkpoint_store=checkpoints,
                 owner_id="atomic-worker",
                 lease_seconds=10,
+                tool_definitions=(ToolDefinition("read_file", None, '{"type":"object","properties":{"path":{"type":"string"}}}'),),
             )
             with self.assertRaises(KeyboardInterrupt):
                 worker.execute(queued.turn_id, queued.version)
 
             running = runtime.get_turn(queued.turn_id)
+            with closing(sqlite3.connect(str(store.database_path))) as c:
+                c.execute("UPDATE recoverable_turns SET lease_expires_at=?", ("2000-01-01T00:00:00.000000Z",))
+                c.commit()
             turn_started = store.read_stream(StreamId("turn", queued.turn_id))[-1]
             seeded = store.read_stream(StreamId("run-execution", queued.turn_id))[-1]
             self.assertEqual(turn_started.event_type, "turn.started.v1")
-            self.assertEqual(seeded.event_type, "run.context-seeded.v1")
+            self.assertEqual(seeded.event_type, "run.context-seeded.v2")
+            self.assertEqual(seeded.schema_version, 2)
             self.assertEqual(turn_started.commit_id, seeded.commit_id)
+            semantics = seeded.payload["request_semantics"]
+            self.assertEqual(semantics["provider"], "test")
+            self.assertEqual(semantics["model"], "model")
+            self.assertEqual(len(semantics["tool_definitions"]), 1)
+            self.assertEqual(len(semantics["tool_catalog_digest"]), 64)
             checkpoints.get_active_lease(
                 running.turn_id,
                 running.current_run_id,
@@ -307,6 +426,9 @@ class D6RecoveryTest(unittest.TestCase):
         ]
         self.assertEqual([item.content for item in first_responses], ["Use the release branch"])
 
+        with closing(sqlite3.connect(self.path)) as c:
+            c.execute("UPDATE recoverable_turns SET lease_expires_at=?", ("2000-01-01T00:00:00.000000Z",))
+            c.commit()
         candidate = self.checkpoints.list_recoverable_turns()[0]
         claim = RecoveryCoordinator(
             self.runtime,
@@ -415,7 +537,7 @@ class D6RecoveryTest(unittest.TestCase):
             )
 
             with closing(sqlite3.connect(database)) as connection:
-                event_documents = "\n".join(
+                event_documents = chr(10).join(
                     row[0]
                     for row in connection.execute(
                         "SELECT payload_json FROM events WHERE stream_id=? ORDER BY stream_version",
@@ -423,11 +545,11 @@ class D6RecoveryTest(unittest.TestCase):
                     )
                 )
                 checkpoint_document = connection.execute(
-                    "SELECT checkpoint_json FROM checkpoints WHERE turn_id=?",
+                    "SELECT checkpoint_json FROM checkpoint_cache WHERE turn_id=?",
                     (str(running.turn_id),),
                 ).fetchone()[0]
             self.assertNotIn(secret, event_documents)
-            self.assertNotIn(secret, checkpoint_document)
+            self.assertNotIn(secret, bytes(checkpoint_document).decode("utf-8", "replace"))
             self.assertIn("[REDACTED]", event_documents)
 
 

@@ -1,35 +1,56 @@
-"""Discovery and safe stale-run takeover orchestration."""
+"""Discovery and safe stale-run takeover orchestration (section 7.6)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Protocol, Sequence
-from uuid import UUID, uuid4
+from typing import Any, Mapping, Protocol, Sequence
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ..control.event_store import StreamId
 from ..control.models import TurnStatus
 from ..control.runtime import ThreadRuntime
-from .context import ReconstructedContext, checkpoint_state, reconstruct_execution
-from .protocol import CheckpointError, RunPhase, event_hash
-from .store import CheckpointStore, RecoverableTurn, RunLease
+from .context import (
+    ExecutionProjection,
+    ReconstructionError,
+    projection_digest,
+    projection_document,
+    reduce_execution,
+)
+from .protocol import (
+    REDUCER_NAME,
+    REDUCER_VERSION,
+    CheckpointError,
+    RunPhase,
+    stored_event_hash_v2,
+)
+from .store import CheckpointStore, RecoverableTurn
 
 
-class AutomaticRecoveryBlocked(RuntimeError): pass
+class AutomaticRecoveryBlocked(RuntimeError):
+    """Recovery requires a D7 ledger or an operator decision."""
 
 
 class ToolRecoveryPort(Protocol):
     def reconcile_pending(
         self,
         turn_id: UUID,
-        pending_tool_calls: Sequence[Mapping[str, object]],
+        pending_tool_calls: Sequence[Mapping[str, Any]],
     ) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveryClaim:
     turn: object
-    lease: RunLease | None
-    context: ReconstructedContext
+    lease: object | None
+    context: ExecutionProjection
+
+
+def _requeue_command_id(turn_id: UUID, run_id: UUID) -> UUID:
+    return uuid5(
+        NAMESPACE_URL,
+        f"koawa-d6:requeue:{turn_id}:{run_id}",
+    )
+
 
 
 class RecoveryCoordinator:
@@ -46,42 +67,32 @@ class RecoveryCoordinator:
             getattr(tool_recovery, "reconcile_pending", None)
         ):
             raise TypeError("tool_recovery must implement reconcile_pending")
-        self.runtime, self.checkpoints, self.owner_id, self.lease_seconds = runtime, checkpoints, owner_id, lease_seconds
+        if not isinstance(owner_id, str) or not owner_id.strip():
+            raise ValueError("owner_id must be non-empty")
+        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
+        self.runtime = runtime
+        self.checkpoints = checkpoints
+        self.owner_id = owner_id
+        self.lease_seconds = lease_seconds
         self.tool_recovery = tool_recovery
 
     def list_recoverable_turns(self) -> tuple[RecoverableTurn, ...]:
-        return self.checkpoints.list_recoverable_turns()
+        return self.checkpoints.list_recoverable()
 
-    def reconstruct(self, item: RecoverableTurn) -> ReconstructedContext:
+    def reconstruct(self, item: RecoverableTurn) -> ExecutionProjection:
+        """Rebuild the canonical projection, using the cache only when every
+        field equals the reducer output on the covered segment.
+
+        A fabricated checkpoint (even with a valid coverage hash) fails the
+        field-for-field comparison and falls back to a full replay; a v1 or
+        unparsable checkpoint is always a cache miss.
+        """
         stream = StreamId("run-execution", item.turn_id)
-        try:
-            cp = self.checkpoints.load(item.turn_id)
-        except CheckpointError:
-            cp = None
-        if cp is not None:
-            covered_page = self.checkpoints.event_store.read_stream(stream, after_version=cp.execution_version - 1, limit=1)
-            if (cp.turn_id != item.turn_id or cp.thread_id != item.thread_id or
-                cp.turn_version != item.turn_version or len(covered_page) != 1):
-                cp = None
-            else:
-                covered = covered_page[0]
-                if (cp.covered_global_position != covered.global_position or
-                    cp.covered_commit_id != covered.commit_id or
-                    cp.covered_event_hash != event_hash(covered.event_type, dict(covered.payload), covered.stream_version, covered.commit_id)):
-                    cp = None
-        if cp is not None:
-            base = checkpoint_state(context=cp.context, model_round=cp.model_round,
-                tool_count=cp.tool_count, output_chars=cp.output_chars,
-                input_tokens=cp.input_tokens, output_tokens=cp.output_tokens,
-                phase=cp.phase, execution_version=cp.execution_version, run_id=cp.run_id)
-            return reconstruct_execution(self._read_events(stream, cp.execution_version), initial=base)
         events = self._read_events(stream, -1)
         if not events:
-            # Legacy D1 callers can start a Turn before constructing the D6
-            # recorder. With no execution fact, no model/tool fact was durably
-            # accepted, so the original user input is the only safe fallback.
             turn = self.runtime.get_turn(item.turn_id)
-            return ReconstructedContext(
+            return ExecutionProjection(
                 context=(
                     {
                         "kind": "user",
@@ -99,20 +110,55 @@ class RecoveryCoordinator:
                 execution_version=-1,
                 last_run_id=item.run_id,
             )
-        return reconstruct_execution(events)
+        full = reduce_execution(events)
+        try:
+            checkpoint = self.checkpoints.load(item.turn_id)
+        except CheckpointError:
+            checkpoint = None
+        if checkpoint is not None and self._valid_cache(checkpoint, item, events, full):
+            covered = events[: checkpoint.covered_stream_version + 1]
+            covered_projection = reduce_execution(covered)
+            tail = events[checkpoint.covered_stream_version + 1 :]
+            reduced = reduce_execution(tail, initial=covered_projection)
+            # The final result must be field-for-field equivalent to the full
+            # replay (immutability of events + deterministic reducer).
+            if (projection_document(reduced) == projection_document(full)):
+                return reduced
+        return full
 
-    def _read_events(self, stream: StreamId, after_version: int) -> tuple:
-        values = []
-        cursor = after_version
-        while True:
-            page = self.checkpoints.event_store.read_stream(stream, after_version=cursor, limit=500)
-            values.extend(page)
-            if len(page) < 500:
-                return tuple(values)
-            cursor = page[-1].stream_version
+    def _valid_cache(self, checkpoint, item: RecoverableTurn, events, full) -> bool:
+        if (
+            checkpoint.reducer_name != REDUCER_NAME
+            or checkpoint.reducer_version != REDUCER_VERSION
+            or checkpoint.source_category != "run-execution"
+            or checkpoint.source_aggregate_id != item.turn_id
+            or checkpoint.turn_id != item.turn_id
+            or checkpoint.run_id != item.run_id
+            or checkpoint.turn_stream_version != item.turn_version
+            or not (0 <= checkpoint.covered_stream_version <= full.execution_version)
+        ):
+            return False
+        covered_event = events[checkpoint.covered_stream_version]
+        if (
+            covered_event.event_id != checkpoint.covered_event_id
+            or covered_event.global_position != checkpoint.covered_global_position
+            or covered_event.commit_id != checkpoint.covered_commit_id
+            or stored_event_hash_v2(covered_event) != checkpoint.covered_event_hash
+        ):
+            return False
+        covered_projection = reduce_execution(events[: checkpoint.covered_stream_version + 1])
+        if (
+            projection_document(covered_projection) != dict(checkpoint.projection)
+            or projection_digest(covered_projection) != checkpoint.projection_digest
+        ):
+            return False
+        return True
 
     def claim_stale(self, item: RecoverableTurn, *, force: bool = False) -> RecoveryClaim:
-        context = self.reconstruct(item)
+        try:
+            context = self.reconstruct(item)
+        except ReconstructionError as exc:
+            raise AutomaticRecoveryBlocked("corrupt execution log") from exc
         uncertain_phase = context.phase in (
             RunPhase.TOOL_IN_PROGRESS,
             RunPhase.BLOCKED_UNCERTAIN_SIDE_EFFECT,
@@ -121,16 +167,12 @@ class RecoveryCoordinator:
             raise AutomaticRecoveryBlocked(
                 "possible side effect requires D7 ledger or operator"
             )
-        if not uncertain_phase and not item.automatic:
-            raise AutomaticRecoveryBlocked("possible side effect requires D7 ledger or operator")
         current = self.runtime.get_turn(item.turn_id)
         if (
             current.status is TurnStatus.QUEUED
             and current.current_run_id is None
             and current.version == item.turn_version
         ):
-            # A prior coordinator may have committed the stale requeue and crashed
-            # before ledger reconciliation or Worker dispatch.
             queued = current
         elif (
             current.status is not TurnStatus.RUNNING
@@ -139,10 +181,15 @@ class RecoveryCoordinator:
         ):
             raise AutomaticRecoveryBlocked("recoverable index no longer matches the turn")
         else:
-            # Fence the old Run before a query is allowed to release its claim.
-            # NOT_APPLIED lookup adapters additionally promise that the external
-            # request cannot apply later.
-            self.checkpoints.abandon_stale_run(item, force=force)
+            # Fence the old Run through the typed Turn command; the projection
+            # adapter updates the recoverable/lease index with the same
+            # append transaction.  The coordinator never writes SQL.
+            self.runtime.requeue_stale_run(
+                item.turn_id,
+                expected_version=current.version,
+                abandoned_run_id=item.run_id,
+                command_id=_requeue_command_id(item.turn_id, item.run_id),
+            )
             queued = self.runtime.get_turn(item.turn_id)
         if uncertain_phase and (
             self.tool_recovery is None
@@ -155,3 +202,15 @@ class RecoveryCoordinator:
                 "possible side effect requires D7 ledger or operator"
             )
         return RecoveryClaim(queued, None, context)
+
+    def _read_events(self, stream: StreamId, after_version: int) -> tuple:
+        values = []
+        cursor = after_version
+        while True:
+            page = self.checkpoints.event_store.read_stream(
+                stream, after_version=cursor, limit=500
+            )
+            values.extend(page)
+            if len(page) < 500:
+                return tuple(values)
+            cursor = page[-1].stream_version

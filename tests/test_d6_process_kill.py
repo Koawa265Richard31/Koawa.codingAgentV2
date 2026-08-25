@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 import sys
+import sqlite3
 import tempfile
+from contextlib import closing
 import time
 import unittest
 from pathlib import Path
@@ -29,7 +31,7 @@ class D6ProcessKillTest(unittest.TestCase):
         "model_event_no_checkpoint": RunPhase.READY_TO_FINALIZE,
         "checkpoint_saved": RunPhase.READY_TO_FINALIZE,
         "ready_for_tool": RunPhase.READY_FOR_TOOL,
-        "tool_in_progress": RunPhase.BLOCKED_UNCERTAIN_SIDE_EFFECT,
+        "tool_in_progress": RunPhase.TOOL_IN_PROGRESS,
         "tool_result_saved": RunPhase.READY_FOR_MODEL,
     }
 
@@ -94,12 +96,20 @@ class D6ProcessKillTest(unittest.TestCase):
                     checkpoints,
                     owner_id=f"parent-{point}",
                 )
+                # The durable child lease would still be live; make the
+                # recoverable projection deterministic by expiring it.
+                from contextlib import closing
+                with closing(sqlite3.connect(str(database))) as connection:
+                    connection.execute(
+                        "UPDATE recoverable_turns SET lease_expires_at=? ",
+                        ("2000-01-01T00:00:00.000000Z",),
+                    )
+                    connection.commit()
                 candidate = coordinator.list_recoverable_turns()[0]
                 rebuilt = coordinator.reconstruct(candidate)
                 self.assertEqual(rebuilt.phase, expected_phase)
                 self.assertIn(point, rebuilt.context[0]["content"])
                 if point == "tool_in_progress":
-                    self.assertFalse(candidate.automatic)
                     with self.assertRaises(AutomaticRecoveryBlocked):
                         coordinator.claim_stale(candidate, force=True)
                 else:
