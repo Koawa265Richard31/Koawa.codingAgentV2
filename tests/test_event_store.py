@@ -472,6 +472,330 @@ class SqliteEventStoreTest(unittest.TestCase):
         self.assertEqual(1, len(self.store.read_stream(stream)))
 
 
+class DurableJsonLimitsTest(unittest.TestCase):
+    """I4 6.2: hard durable-JSON boundaries on write and fail-closed reads."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.database_path = Path(temporary.name) / "durable-limits.sqlite3"
+        self.store = SqliteEventStore(self.database_path)
+        self.now = datetime(2026, 8, 12, 10, 0, tzinfo=timezone.utc)
+
+    def event(
+        self,
+        command_id: UUID,
+        payload: dict[str, object] | None = None,
+        *,
+        event_id: UUID | None = None,
+        event_type: str = "test.recorded.v1",
+    ) -> NewEvent:
+        return NewEvent(
+            event_id=event_id or uuid4(),
+            event_type=event_type,
+            schema_version=1,
+            occurred_at=self.now,
+            payload=payload or {"message": "durable limits"},
+            metadata=EventMetadata(
+                command_id=command_id,
+                correlation_id=command_id,
+                actor="test",
+            ),
+        )
+
+    def ingress(self, **overrides: int) -> dict[str, int]:
+        from koawa_agent_v2.control.durable_json import INGRESS_DEFAULTS
+
+        values = dict(INGRESS_DEFAULTS)
+        values.update(overrides)
+        return values
+
+    def test_payload_depth_plus_one_rejected_at_construction(self) -> None:
+        """root depth=1; nesting to the limit is accepted, limit+1 is not."""
+        from koawa_agent_v2.control.durable_json import (
+            DurableJsonLimitExceeded,
+            EVENT_PAYLOAD_READ_V1,
+        )
+
+        def chain(target_depth: int) -> dict[str, object]:
+            """A document whose deepest VALUE sits exactly at target_depth."""
+            value: object = 1
+            for _ in range(target_depth - 2):
+                value = {"next": value}
+            return {"root": value}
+
+        at_limit = chain(EVENT_PAYLOAD_READ_V1.max_depth)
+        key = uuid4()
+        self.store.append_batch(
+            (StreamWrite(StreamId("turn", uuid4()), -1, (self.event(key, at_limit),)),),
+            idempotency_key=key,
+        )
+        over_limit = chain(EVENT_PAYLOAD_READ_V1.max_depth + 1)
+        with self.assertRaises(DurableJsonLimitExceeded) as raised:
+            self.event(uuid4(), over_limit)
+        self.assertEqual("depth", raised.exception.code)
+
+    def test_cycle_nan_surrogate_and_non_string_key_never_escape_bare(self) -> None:
+        """Malformed payloads fail closed with domain errors, not RecursionError."""
+        from koawa_agent_v2.control.durable_json import DurableJsonError
+        from koawa_agent_v2.control.event_store import InvalidEvent
+
+        cyclic: dict[str, object] = {}
+        cyclic["self"] = cyclic
+        with self.assertRaises(InvalidEvent):
+            self.event(uuid4(), cyclic)
+        with self.assertRaises(InvalidEvent):
+            self.event(uuid4(), {"value": float("nan")})
+        with self.assertRaises(DurableJsonError):
+            self.event(uuid4(), {"value": "\ud800 lone surrogate"})
+        with self.assertRaises(InvalidEvent):
+            self.event(uuid4(), {1: "non-string key"})
+
+    def test_ingress_node_boundary_accepted_and_plus_one_atomic_rejection(self) -> None:
+        """limit succeeds; limit+1 rejects before any stream/head/receipt writes."""
+        from koawa_agent_v2.control.durable_json import DurableJsonLimitExceeded
+
+        store = SqliteEventStore(
+            self.database_path,
+            durable_limits=self.ingress(event_payload_max_nodes=64),
+        )
+        stream = StreamId("turn", uuid4())
+        # root object + values array + 62 ints = 64 nodes -> boundary accepted.
+        at_limit = {"values": list(range(62))}
+        key = uuid4()
+        store.append_batch(
+            (StreamWrite(stream, -1, (self.event(key, at_limit),)),),
+            idempotency_key=key,
+        )
+        self.assertEqual(1, len(store.read_stream(stream)))
+        # root object + values array + 63 ints = 65 nodes -> limit+1 rejected.
+        over_limit = {"values": list(range(63))}
+        rejected_key = uuid4()
+        with self.assertRaises(DurableJsonLimitExceeded):
+            store.append_batch(
+                (StreamWrite(stream, 0, (self.event(rejected_key, over_limit),)),),
+                idempotency_key=rejected_key,
+            )
+        self.assertEqual(1, len(store.read_stream(stream)))
+        self.assertIsNone(
+            store.read_idempotency(rejected_key, request_fingerprint="fp"),
+        )
+
+    def test_multi_stream_batch_with_any_over_limit_payload_is_atomic(self) -> None:
+        """One over-limit payload rolls back the whole batch: 0 events/heads."""
+        from koawa_agent_v2.control.durable_json import DurableJsonLimitExceeded
+
+        store = SqliteEventStore(
+            self.database_path,
+            durable_limits=self.ingress(event_payload_max_nodes=64),
+        )
+        fine = StreamId("mailbox", uuid4())
+        bad = StreamId("agent", uuid4())
+        key = uuid4()
+        with self.assertRaises(DurableJsonLimitExceeded):
+            store.append_batch(
+                (
+                    StreamWrite(fine, -1, (self.event(key, {"ok": True}),)),
+                    StreamWrite(
+                        bad,
+                        -1,
+                        (self.event(key, {"values": list(range(63))}),),
+                    ),
+                ),
+                idempotency_key=key,
+            )
+        self.assertEqual((), store.read_stream(fine))
+        self.assertEqual((), store.read_stream(bad))
+        self.assertIsNone(store.read_idempotency(key, request_fingerprint="fp"))
+
+    def test_member_item_and_key_limits_boundary_and_plus_one(self) -> None:
+        """Object members, array items, key bytes and string bytes caps."""
+        from koawa_agent_v2.control.durable_json import DurableJsonLimitExceeded
+
+        store = SqliteEventStore(
+            self.database_path,
+            durable_limits=self.ingress(
+                event_payload_max_object_members=16,
+                event_payload_max_array_items=16,
+                event_payload_max_key_utf8_bytes=32,
+                event_payload_max_string_utf8_bytes=256,
+            ),
+        )
+        key = uuid4()
+        store.append_batch(
+            (StreamWrite(StreamId("turn", uuid4()), -1, (self.event(key, {f"k{i}": i for i in range(16)}),)),),
+            idempotency_key=key,
+        )
+        with self.assertRaises(DurableJsonLimitExceeded):
+            over_key = uuid4()
+            store.append_batch(
+                (
+                    StreamWrite(
+                        StreamId("turn", uuid4()),
+                        -1,
+                        (self.event(over_key, {f"k{i}": i for i in range(17)}),),
+                    ),
+                ),
+                idempotency_key=over_key,
+            )
+        key = uuid4()
+        store.append_batch(
+            (StreamWrite(StreamId("turn", uuid4()), -1, (self.event(key, {"a": list(range(16))}),)),),
+            idempotency_key=key,
+        )
+        with self.assertRaises(DurableJsonLimitExceeded):
+            over_key = uuid4()
+            store.append_batch(
+                (
+                    StreamWrite(
+                        StreamId("turn", uuid4()),
+                        -1,
+                        (self.event(over_key, {"a": list(range(17))}),),
+                    ),
+                ),
+                idempotency_key=over_key,
+            )
+        with self.assertRaises(DurableJsonLimitExceeded):
+            over_key = uuid4()
+            store.append_batch(
+                (
+                    StreamWrite(
+                        StreamId("turn", uuid4()),
+                        -1,
+                        (self.event(over_key, {"a" * 33: 1}),),
+                    ),
+                ),
+                idempotency_key=over_key,
+            )
+        with self.assertRaises(DurableJsonLimitExceeded):
+            self.event(uuid4(), {"text": "x" * 2_097_153})
+
+    def test_event_store_never_rewrites_business_payload(self) -> None:
+        """The store validates and rejects; credential-shaped text stays as-is."""
+        stream = StreamId("turn", uuid4())
+        original = {
+            "secret": "sk-abc1234567890xyz",
+            "nested": {"key": "Bearer abcdefghijklmnop"},
+        }
+        key = uuid4()
+        self.store.append_batch(
+            (StreamWrite(stream, -1, (self.event(key, original),)),),
+            idempotency_key=key,
+        )
+        stored = self.store.read_stream(stream)[0].payload
+        self.assertEqual(original, dict(stored))
+
+    def test_corrupt_oversized_payload_fails_whole_page_closed(self) -> None:
+        """An oversized stored payload fails the page before decoding."""
+        stream = StreamId("turn", uuid4())
+        for index in range(2):
+            key = uuid4()
+            self.store.append_batch(
+                (StreamWrite(stream, index - 1, (self.event(key, {"i": index}),)),),
+                idempotency_key=key,
+            )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE events SET payload_json = ? WHERE global_position = 1",
+                ("x" * 5_000_000,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(EventStoreError):
+            self.store.read_stream(stream)
+        with self.assertRaises(EventStoreError):
+            self.store.read_all()
+
+    def test_corrupt_bad_utf8_and_nested_duplicate_payload_fail_closed(self) -> None:
+        """Bad UTF-8 and nested duplicate keys are rejected before decode/parse."""
+        stream = StreamId("turn", uuid4())
+        key = uuid4()
+        self.store.append_batch(
+            (StreamWrite(stream, -1, (self.event(key, {"i": 0}),)),),
+            idempotency_key=key,
+        )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE events SET payload_json = ? WHERE global_position = 1",
+                (b"\xff\xfe\x00\x01 not utf8",),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(EventStoreError):
+            self.store.read_stream(stream)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE events SET payload_json = ? WHERE global_position = 1",
+                ('{"a": {"b": 1, "b": 2}}',),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(EventStoreError):
+            self.store.read_stream(stream)
+
+    def test_corrupt_metadata_and_receipt_fail_closed(self) -> None:
+        """Oversized metadata/receipt fail before decoding."""
+        stream = StreamId("turn", uuid4())
+        key = uuid4()
+        self.store.append_batch(
+            (StreamWrite(stream, -1, (self.event(key, {"i": 0}),)),),
+            idempotency_key=key,
+            request_fingerprint="fp",
+        )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE events SET metadata_json = ? WHERE global_position = 1",
+                ("y" * 20_000,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(EventStoreError):
+            self.store.read_stream(stream)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE idempotency_keys SET receipt_json = ?",
+                ("z" * 2_000_000,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(EventStoreError):
+            self.store.read_idempotency(key, request_fingerprint="fp")
+
+    def test_ingress_shrink_old_events_replay_new_writes_rejected(self) -> None:
+        """Smaller runtime ingress keeps reading old events, rejects new ones."""
+        from koawa_agent_v2.control.durable_json import DurableJsonLimitExceeded
+
+        stream = StreamId("turn", uuid4())
+        key = uuid4()
+        self.store.append_batch(
+            (StreamWrite(stream, -1, (self.event(key, {"values": list(range(100))}),)),),
+            idempotency_key=key,
+        )
+        restarted = SqliteEventStore(
+            self.database_path,
+            durable_limits=self.ingress(event_payload_max_nodes=64),
+        )
+        replayed = restarted.read_stream(stream)
+        self.assertEqual(1, len(replayed))
+        self.assertEqual(tuple(range(100)), replayed[0].payload["values"])
+        with self.assertRaises(DurableJsonLimitExceeded):
+            over_key = uuid4()
+            restarted.append_batch(
+                (StreamWrite(stream, 0, (self.event(over_key, {"values": list(range(63))}),)),),
+                idempotency_key=over_key,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
 

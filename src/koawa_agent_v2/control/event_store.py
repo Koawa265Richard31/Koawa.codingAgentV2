@@ -16,6 +16,12 @@ from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
 from uuid import UUID
 
+from .durable_json import (
+    DurableJsonError,
+    EVENT_PAYLOAD_READ_V1,
+    validate_json_value,
+)
+
 
 # category 会进入持久化 stream key，稳定的小写格式可避免跨语言命名歧义。
 _CATEGORY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -180,7 +186,16 @@ class NewEvent:
             raise InvalidEvent("payload must be a JSON object")
         # frozen dataclass 只禁止重新绑定字段，原始 dict/list 仍可能被外部修改；
         # 因此这里必须深复制并冻结，避免“算指纹时”和“落库时”看到不同内容。
-        object.__setattr__(self, "payload", _freeze_json_object(self.payload))
+        frozen_payload = _freeze_json_object(self.payload)
+        # I4: EventStore validates and rejects; it never silently rewrites the
+        # business payload.  The immutable EVENT_PAYLOAD_READ_V1 profile bounds
+        # every newly constructed event; a smaller runtime ingress is applied
+        # again at write time by the concrete store.
+        try:
+            validate_json_value(frozen_payload, EVENT_PAYLOAD_READ_V1, path="payload")
+        except DurableJsonError:
+            raise
+        object.__setattr__(self, "payload", frozen_payload)
         if not isinstance(self.metadata, EventMetadata):
             raise TypeError("metadata must be EventMetadata")
 
@@ -375,13 +390,13 @@ def _require_aware(value: datetime, name: str) -> None:
 def _freeze_json_object(value: Mapping[str, Any]) -> Mapping[str, Any]:
     """冻结事件 payload，并额外保证最外层保持 JSON object 结构。"""
 
-    frozen = _freeze_json(value, path="payload")
+    frozen = _freeze_json(value, path="payload", _seen=frozenset())
     if not isinstance(frozen, Mapping):
         raise InvalidEvent("payload must be a JSON object")
     return frozen
 
 
-def _freeze_json(value: Any, *, path: str) -> Any:
+def _freeze_json(value: Any, *, path: str, _seen: frozenset[int]) -> Any:
     """递归复制并冻结 JSON 值，在错误中保留精确字段路径。
 
     Mapping 转为只读 ``MappingProxyType``，list/tuple 统一转为 tuple；
@@ -396,15 +411,21 @@ def _freeze_json(value: Any, *, path: str) -> Any:
             raise InvalidEvent(f"{path} contains a non-finite number")
         return value
     if isinstance(value, Mapping):
+        if id(value) in _seen:
+            raise InvalidEvent(f"{path} contains a cyclic reference")
         copied: dict[str, Any] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise InvalidEvent(f"{path} contains a non-string key")
-            copied[key] = _freeze_json(item, path=f"{path}.{key}")
+            copied[key] = _freeze_json(
+                item, path=f"{path}.{key}", _seen=_seen | {id(value)}
+            )
         return MappingProxyType(copied)
     if isinstance(value, (list, tuple)):
+        if id(value) in _seen:
+            raise InvalidEvent(f"{path} contains a cyclic reference")
         return tuple(
-            _freeze_json(item, path=f"{path}[{index}]")
+            _freeze_json(item, path=f"{path}[{index}]", _seen=_seen | {id(value)})
             for index, item in enumerate(value)
         )
     raise InvalidEvent(f"{path} contains non-JSON value {type(value).__name__}")

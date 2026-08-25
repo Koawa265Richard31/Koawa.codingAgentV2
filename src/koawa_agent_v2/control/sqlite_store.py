@@ -30,6 +30,16 @@ from .event_store import (
     StreamWrite,
     WrongExpectedVersion,
 )
+from .durable_json import (
+    DurableJsonError,
+    EVENT_METADATA_READ_V1,
+    EVENT_PAYLOAD_READ_V1,
+    IDEMPOTENCY_RECEIPT_READ_V1,
+    effective_payload_limits,
+    strict_json_loads_bytes,
+    validate_json_value,
+    validate_runtime_ingress,
+)
 
 
 class SqliteEventStore:
@@ -45,8 +55,14 @@ class SqliteEventStore:
         database_path: str | Path,
         *,
         busy_timeout_ms: int = 10_000,
+        durable_limits: Mapping[str, int] | None = None,
     ) -> None:
         """绑定数据库文件并初始化表结构。
+
+        durable_limits is the I4 exact-key runtime ingress policy: absent means
+        section 6.2 defaults, an object must contain all eleven keys.  Writes
+        are rejected at min(EVENT_PAYLOAD_READ_V1, ingress); historical reads
+        always use the immutable protocol profile.
 
         这里禁止 ``:memory:``，因为本实现每个操作使用独立连接；SQLite 的普通
         内存库属于单个连接，换连接后数据就不再是同一个库，也无法验证重启恢复。
@@ -60,7 +76,14 @@ class SqliteEventStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._database_path = str(path)
         self._busy_timeout_ms = busy_timeout_ms
+        self._durable_limits = validate_runtime_ingress(durable_limits)
+        self._payload_write_limits = effective_payload_limits(self._durable_limits)
         self._initialize()
+
+    @property
+    def durable_limits(self) -> dict[str, int]:
+        """Return the normalized exact-key runtime ingress policy."""
+        return dict(self._durable_limits)
 
     @property
     def database_path(self) -> Path:
@@ -149,6 +172,23 @@ class SqliteEventStore:
         # 阶段 2：把调用者拥有的 Mapping/Sequence 快照一次。默认幂等指纹和实际
         # 入库都使用同一份规范文档，避免调用者在两者之间修改可变 payload。
         write_documents = [_write_document(write) for write in normalized_writes]
+        # I4: EventStore validates and rejects; it never rewrites business data.
+        # Payload limits are min(EVENT_PAYLOAD_READ_V1, runtime ingress); metadata
+        # uses the fixed EVENT_METADATA_READ_V1 profile.  Any limit+1 must fail
+        # BEFORE the write transaction opens, so no stream, head or receipt can
+        # be partially committed.
+        for write_document in write_documents:
+            for event_document in write_document["events"]:
+                validate_json_value(
+                    event_document["payload"],
+                    self._payload_write_limits,
+                    path="payload",
+                )
+                validate_json_value(
+                    event_document["metadata"],
+                    EVENT_METADATA_READ_V1,
+                    path="metadata",
+                )
         request_document = {
             "writes": write_documents,
             "preconditions": [
@@ -176,14 +216,30 @@ class SqliteEventStore:
             # 阶段 4：幂等检查必须先于版本检查。若首次提交已经成功、响应却丢失，
             # 重试时流版本早已改变；先返回持久化回执才能把它识别为成功重试。
             existing = connection.execute(
-                "SELECT request_hash, receipt_json FROM idempotency_keys "
-                "WHERE idempotency_key = ?",
+                "SELECT request_hash, receipt_json, "
+                "length(CAST(receipt_json AS BLOB)) AS receipt_blob_bytes, "
+                "CAST(receipt_json AS BLOB) AS receipt_blob "
+                "FROM idempotency_keys WHERE idempotency_key = ?",
                 (str(resolved_key),),
             ).fetchone()
             if existing is not None:
                 if existing["request_hash"] != request_hash:
                     raise IdempotencyConflict(resolved_key)
-                receipt = _receipt_from_document(json.loads(existing["receipt_json"]))
+                if existing["receipt_blob_bytes"] > IDEMPOTENCY_RECEIPT_READ_V1.max_utf8_bytes:
+                    raise EventStoreError(
+                        "durable read rejected: idempotency receipt exceeds profile"
+                    )
+                try:
+                    receipt_document = strict_json_loads_bytes(
+                        existing["receipt_blob"],
+                        IDEMPOTENCY_RECEIPT_READ_V1,
+                        path="receipt",
+                    )
+                except DurableJsonError as exc:
+                    raise EventStoreError(
+                        "durable read rejected: " + exc.code
+                    ) from exc
+                receipt = _receipt_from_document(receipt_document)
                 connection.commit()
                 return receipt
 
@@ -408,15 +464,31 @@ class SqliteEventStore:
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT request_hash, receipt_json FROM idempotency_keys "
-                "WHERE idempotency_key = ?",
+                "SELECT request_hash, receipt_json, "
+                "length(CAST(receipt_json AS BLOB)) AS receipt_blob_bytes, "
+                "CAST(receipt_json AS BLOB) AS receipt_blob "
+                "FROM idempotency_keys WHERE idempotency_key = ?",
                 (str(resolved_key),),
             ).fetchone()
             if row is None:
                 return None
             if row["request_hash"] != request_hash:
                 raise IdempotencyConflict(resolved_key)
-            return _receipt_from_document(json.loads(row["receipt_json"]))
+            if row["receipt_blob_bytes"] > IDEMPOTENCY_RECEIPT_READ_V1.max_utf8_bytes:
+                raise EventStoreError(
+                    "durable read rejected: idempotency receipt exceeds profile"
+                )
+            try:
+                document = strict_json_loads_bytes(
+                    row["receipt_blob"],
+                    IDEMPOTENCY_RECEIPT_READ_V1,
+                    path="receipt",
+                )
+            except DurableJsonError as exc:
+                raise EventStoreError(
+                    "durable read rejected: " + exc.code
+                ) from exc
+            return _receipt_from_document(document)
         except EventStoreError:
             raise
         except sqlite3.Error as exc:
@@ -596,6 +668,10 @@ SELECT events.global_position, events.event_id, events.stream_version,
        events.commit_id, events.commit_index, events.commit_size,
        events.event_type, events.schema_version, events.occurred_at,
        events.recorded_at, events.payload_json, events.metadata_json,
+       length(CAST(events.payload_json AS BLOB)) AS payload_blob_bytes,
+       CAST(events.payload_json AS BLOB) AS payload_blob,
+       length(CAST(events.metadata_json AS BLOB)) AS metadata_blob_bytes,
+       CAST(events.metadata_json AS BLOB) AS metadata_blob,
        streams.category, streams.aggregate_id
 FROM events
 JOIN streams ON streams.stream_id = events.stream_id
@@ -609,6 +685,28 @@ def _stored_event(row: sqlite3.Row) -> StoredEvent:
     ``StoredEvent`` 时还会再次执行其自身不变量校验，避免静默接受坏数据。
     """
 
+    if row["payload_blob_bytes"] > EVENT_PAYLOAD_READ_V1.max_utf8_bytes:
+        raise EventStoreError(
+            "durable read rejected: event payload exceeds the read profile"
+        )
+    if row["metadata_blob_bytes"] > EVENT_METADATA_READ_V1.max_utf8_bytes:
+        raise EventStoreError(
+            "durable read rejected: event metadata exceeds the read profile"
+        )
+    try:
+        payload = strict_json_loads_bytes(
+            row["payload_blob"], EVENT_PAYLOAD_READ_V1, path="payload"
+        )
+        metadata_document = strict_json_loads_bytes(
+            row["metadata_blob"], EVENT_METADATA_READ_V1, path="metadata"
+        )
+    except DurableJsonError as exc:
+        # The whole page fails closed with the domain error type; partial,
+        # partially-trusted projection is never returned.
+        raise EventStoreError(
+            "durable read rejected: " + exc.code
+        ) from exc
+    _require_read_invariants(row)
     return StoredEvent(
         event_id=UUID(row["event_id"]),
         stream_id=StreamId(row["category"], UUID(row["aggregate_id"])),
@@ -621,9 +719,33 @@ def _stored_event(row: sqlite3.Row) -> StoredEvent:
         schema_version=int(row["schema_version"]),
         occurred_at=_parse_datetime(row["occurred_at"]),
         recorded_at=_parse_datetime(row["recorded_at"]),
-        payload=json.loads(row["payload_json"]),
-        metadata=_metadata_from_document(json.loads(row["metadata_json"])),
+        payload=payload,
+        metadata=_metadata_from_document(metadata_document),
     )
+
+
+def _require_read_invariants(row: sqlite3.Row) -> None:
+    """Verify the stored-event invariants (section 6.2) before trusting the row.
+
+    Checks the event_type schema suffix against schema_version and the commit
+    boundary fields; any mismatch means the event log itself is corrupt.
+    """
+    event_type = row["event_type"]
+    suffix = event_type.rsplit(".v", 1)
+    if (
+        len(suffix) != 2
+        or not suffix[1].isdigit()
+        or int(suffix[1]) != int(row["schema_version"])
+    ):
+        raise EventStoreError(
+            "durable read rejected: event_type schema suffix mismatch"
+        )
+    commit_index = int(row["commit_index"])
+    commit_size = int(row["commit_size"])
+    if commit_size < 1 or not 0 <= commit_index < commit_size:
+        raise EventStoreError(
+            "durable read rejected: event commit boundary is corrupt"
+        )
 
 
 def _write_document(write: StreamWrite) -> dict[str, Any]:

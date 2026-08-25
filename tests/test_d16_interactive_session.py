@@ -476,6 +476,73 @@ class InteractiveSessionTest(unittest.TestCase):
                 expected_thread_version=stale,
             )
 
+    def test_in_process_history_matches_restart_from_thread(self) -> None:
+        """Same-process second-turn history equals a restart from_thread (I4)."""
+        from koawa_agent_v2.runtime.session import SessionTurn
+
+        canary = "sk-abc1234567890xyz"
+        model = _ChatModel()
+        app = AppRuntime(_runtime_config(self.repo), model_client=model)
+        history = SessionHistory(provider=app.config.provider.provider)
+        first = app.chat("please handle " + canary, history=history)
+        self.assertTrue(first.ok, first.payload)
+        thread_id = UUID(first.payload["thread_id"])
+        turn_id = UUID(first.payload["turn_id"])
+        history.append(
+            SessionTurn(
+                user_input="please handle " + canary,
+                final_text=first.payload["final_text"],
+                turn_id=turn_id,
+                status=first.payload["status"],
+            )
+        )
+        # The in-process history already holds the canonical (redacted) input;
+        # a restarted app rebuilding the same thread must be byte-identical.
+        restarted_app = AppRuntime(_runtime_config(self.repo), model_client=_ChatModel())
+        from_thread = SessionHistory.from_thread(
+            restarted_app.assembled.store,
+            restarted_app.assembled.runtime,
+            thread_id,
+            provider=restarted_app.config.provider.provider,
+        )
+        def projected(items: tuple) -> tuple:
+            # model_turn_id is a fresh uuid for every in-memory projection, so
+            # the durable identity compare is the content projection only.
+            return tuple(
+                (type(item).__name__, getattr(item, "content", None))
+                for item in items
+            )
+
+        self.assertEqual(
+            len(history.context_items()),
+            len(from_thread.context_items()),
+        )
+        self.assertEqual(
+            projected(history.context_items()),
+            projected(from_thread.context_items()),
+        )
+        # The raw canary must never appear in the rebuilt context items.
+        for item in from_thread.context_items():
+            if isinstance(item, UserMessage):
+                self.assertNotIn(canary, item.content)
+
+    def test_chat_persists_canonical_user_input_across_restart(self) -> None:
+        """A credential-shaped chat message is canonical before first model call."""
+        canary = "sk-abc1234567890xyz"
+        model = _ChatModel()
+        app = AppRuntime(_runtime_config(self.repo), model_client=model)
+        outcome = app.chat("please fix " + canary)
+        self.assertTrue(outcome.ok, outcome.payload)
+        turn_id = UUID(outcome.payload["turn_id"])
+        state = app.assembled.runtime.get_turn(turn_id)
+        self.assertNotIn(canary, state.user_input)
+        self.assertIn("[REDACTED]", state.user_input)
+        # The scripted model saw the canonical text as its first user message.
+        request = model.requests[0]
+        content = request.input_items[-1].content
+        self.assertNotIn(canary, content)
+        self.assertIn("[REDACTED]", content)
+
     def test_repo_override_applies_before_assembly(self) -> None:
         other = self.root / "other-repo"
         other.mkdir()

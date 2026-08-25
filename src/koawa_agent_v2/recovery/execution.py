@@ -6,12 +6,26 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from ..control.event_store import EventMetadata, NewEvent, StreamId, StreamPrecondition, StreamWrite
+from ..control.event_store import (
+    EventMetadata,
+    NewEvent,
+    StoredEvent,
+    StreamId,
+    StreamPrecondition,
+    StreamWrite,
+)
 from ..model.protocol import AssistantMessage, AssistantTextItem, BlockedItem, InstructionMessage, InstructionRole, ModelCallRef, ModelContextItem, ModelTurn, PublicReasoningSummaryItem, ReasoningSummaryEcho, ToolCallEcho, ToolCallItem, ToolResultMessage, UserMessage
 from ..control.sqlite_store import SqliteEventStore
+from .context import ReconstructionError
 from .protocol import Checkpoint, RunPhase, event_hash
 from .redaction import redact_arguments_json, redact_json_value, redact_text
 from .store import CheckpointStore
+
+# I4: seeds written by the current process pin their request semantics
+# (provider/model/max tokens) so a resumed worker ignores later RuntimeConfig
+# values for those fields (contract §6.4).
+SEED_EVENT_TYPE = "run.context-seeded.v1"
+SEED_SEMANTICS_VERSION = 2
 
 
 def context_document(item: ModelContextItem) -> dict[str, Any]:
@@ -114,10 +128,13 @@ def execution_seed(
     phase: RunPhase = RunPhase.READY_FOR_MODEL,
     pending_calls: Sequence[Mapping[str, Any]] = (),
     final_text: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Build the complete replay seed committed atomically with ``turn.started``."""
 
-    return {
+    document: dict[str, Any] = {
         "context": [context_document(item) for item in initial_context],
         "model_round": model_round,
         "tool_count": tool_count,
@@ -128,6 +145,59 @@ def execution_seed(
         "pending_tool_calls": redact_json_value(list(pending_calls)),
         "final_text": None if final_text is None else redact_text(final_text),
     }
+    if provider is not None:
+        document["seed_semantics_version"] = SEED_SEMANTICS_VERSION
+        if model is not None:
+            document["model"] = model
+        document["provider"] = provider
+        if max_output_tokens is not None:
+            document["max_output_tokens"] = int(max_output_tokens)
+    return document
+
+
+def resolve_seed_semantics(events: Sequence[StoredEvent]) -> dict[str, Any]:
+    """Recover request semantics pinned by the latest seed in the facts.
+
+    Returns an empty dict for legacy seeds (no pinning); the caller then keeps
+    the current RuntimeConfig values for provider/model/max_output_tokens.
+    """
+    for event in reversed(tuple(events)):
+        if event.event_type != SEED_EVENT_TYPE:
+            continue
+        payload = event.payload
+        if payload.get("seed_semantics_version") != SEED_SEMANTICS_VERSION:
+            return {}
+        return {
+            "provider": payload.get("provider"),
+            "model": payload.get("model"),
+            "max_output_tokens": payload.get("max_output_tokens"),
+        }
+    return {}
+
+
+def validate_execution_segments(events: Sequence[StoredEvent]) -> None:
+    """Verify per-run segment integrity of the execution fact stream (I4).
+
+    Every segment must begin with exactly one seed (run.context-seeded.v1);
+    each non-seed fact must carry the same run_id as its segment seed.  A
+    forged second seed inside one segment, a fact stream without a leading
+    seed, or a non-seed event referencing a foreign run fails closed with a
+    content-free ReconstructionError instead of being replayed as trusted
+    projection (contract §6.4, §2.1).
+    """
+    active_run: Any = None
+    seeded_runs: set[Any] = set()
+    for event in events:
+        payload = event.payload
+        run_id = payload.get("run_id")
+        if event.event_type == SEED_EVENT_TYPE:
+            if run_id in seeded_runs:
+                raise ReconstructionError("forged second seed for a run segment")
+            seeded_runs.add(run_id)
+            active_run = run_id
+            continue
+        if active_run is None or run_id != active_run or run_id not in seeded_runs:
+            raise ReconstructionError("execution fact outside a seeded run segment")
 
 
 class DurableExecutionRecorder:

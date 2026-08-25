@@ -33,6 +33,13 @@ from koawa_agent_v2.control.models import ThreadStatus, TurnStatus
 from koawa_agent_v2.control.sqlite_store import SqliteEventStore
 from koawa_agent_v2.control.runtime import ThreadRuntime
 from koawa_agent_v2.execution.worker import ContextUnavailable, TurnWorker
+from koawa_agent_v2.ledger import (
+    READ_ONLY_PROFILE,
+    LedgerExecutor,
+    ToolLedgerStore,
+)
+from koawa_agent_v2.recovery import CheckpointStore
+from koawa_agent_v2.recovery.coordinator import RecoveryCoordinator
 
 
 StreamScript: TypeAlias = Callable[[ModelRequest], Iterable[ModelStreamEvent]]
@@ -386,6 +393,314 @@ class TurnWorkerTest(unittest.TestCase):
         self.assertEqual(1, len(client.requests))
         self.assert_thread_detached(thread.thread_id)
 
+
+class CanonicalSeedWorkerTest(unittest.TestCase):
+    """I4 6.3/6.4: canonical text before the first model request and seed integrity."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.database_path = Path(temporary.name) / "canonical-worker.sqlite3"
+        self.store = SqliteEventStore(self.database_path)
+        self.runtime = ThreadRuntime(self.store, actor="canonical-worker")
+        self.checkpoints = CheckpointStore(self.store)
+
+    def create_queued(self, text: str = "investigate the failing test"):
+        thread = self.runtime.create_thread("D:/work/repository")
+        queued = self.runtime.create_turn(
+            thread.thread_id,
+            text,
+            expected_thread_version=thread.version,
+        )
+        return thread, queued
+
+    def durable_worker(
+        self,
+        client,
+        *,
+        provider: str = "test-provider",
+        model: str = "test-model",
+        max_output_tokens: int = 4096,
+        owner_id: str = "durable-worker",
+    ) -> TurnWorker:
+        return TurnWorker(
+            self.runtime,
+            AgentLoop(client),
+            provider=provider,
+            model=model,
+            max_output_tokens=max_output_tokens,
+            checkpoint_store=self.checkpoints,
+            owner_id=owner_id,
+            lease_seconds=10,
+        )
+
+    def requeue_waiting_turn(self, running, interrupt_id):
+        """wait_for_input + request_resume bringing the turn back to QUEUED."""
+        waiting = self.runtime.wait_for_input(
+            running.turn_id,
+            "please continue",
+            expected_version=running.version,
+            run_id=running.current_run_id,
+            interrupt_id=interrupt_id,
+        )
+        return self.runtime.request_resume(
+            running.turn_id,
+            expected_version=waiting.version,
+            interrupt_id=interrupt_id,
+            response="continue",
+        )
+
+    def test_credential_shaped_user_input_is_canonical_before_first_model_request(self) -> None:
+        """The first ModelRequest already sees the canonical, redacted value."""
+        _, queued = self.create_queued("please fix sk-abc1234567890xyz now")
+        client = ScriptedClient(_final_script("done", "final-a"))
+        result = self.durable_worker(client).execute(queued.turn_id, queued.version)
+        self.assertEqual(TurnStatus.COMPLETED, result.turn.status)
+        request = client.requests[0]
+        content = request.input_items[-1].content
+        self.assertNotIn("sk-abc1234567890xyz", content)
+        self.assertIn("[REDACTED]", content)
+        self.assertEqual(queued.user_input, content)
+
+    def test_uninterrupted_and_kill_resume_model_requests_are_identical(self) -> None:
+        """Kill/resume produces exactly the same input_items as an uninterrupted run."""
+        _, queued = self.create_queued("resume this exact task")
+        killed_client = ScriptedClient(KeyboardInterrupt())
+        killed_worker = self.durable_worker(killed_client, owner_id="killer")
+        with self.assertRaises(KeyboardInterrupt):
+            killed_worker.execute(queued.turn_id, queued.version)
+        self.assertEqual(1, len(killed_client.requests))
+        interrupted_client = ScriptedClient(_final_script("recovered", "resume-final"))
+        uninterrupted_client = ScriptedClient(_final_script("plain", "plain-final"))
+        uninterrupted_worker = self.durable_worker(uninterrupted_client, owner_id="plain")
+        fresh_thread, fresh_queued = self.create_queued("resume this exact task")
+        uninterrupted_worker.execute(fresh_queued.turn_id, fresh_queued.version)
+        del fresh_thread
+        coordinator = RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="recovery")
+        candidate = coordinator.list_recoverable_turns()[0]
+        claim = coordinator.claim_stale(candidate, force=True)
+        resumed = self.durable_worker(interrupted_client, owner_id="resumer")
+        result = resumed.execute(claim.turn.turn_id, claim.turn.version)
+        self.assertEqual(TurnStatus.COMPLETED, result.turn.status)
+        self.assertEqual(1, len(interrupted_client.requests))
+        first_items = killed_client.requests[0].input_items
+        resumed_items = interrupted_client.requests[0].input_items
+        self.assertEqual(len(first_items), len(resumed_items))
+        self.assertEqual(first_items, resumed_items)
+
+    def test_forged_second_seed_cannot_change_context_and_fails_closed(self) -> None:
+        """A second seed in the same run segment is rejected before the provider."""
+        from datetime import datetime, timezone
+        from koawa_agent_v2.control.event_store import (
+            EventMetadata,
+            NewEvent,
+            StreamId,
+            StreamWrite,
+        )
+
+        thread, queued = self.create_queued("atomic task")
+        seed_one = {
+            "context": [
+                {
+                    "kind": "user",
+                    "input_id": f"turn:{queued.turn_id}:original",
+                    "content": "atomic task",
+                    "source_interrupt_id": None,
+                }
+            ],
+            "model_round": 0,
+            "tool_count": 0,
+            "output_chars": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "phase": "ready_for_model",
+            "pending_tool_calls": [],
+            "final_text": None,
+        }
+        running = self.runtime.start_turn(
+            queued.turn_id,
+            queued.version,
+            execution_seed=seed_one,
+            execution_expected_version=-1,
+            lease_owner_id="owner",
+            lease_seconds=10,
+        )
+        forged = {
+            "thread_id": str(thread.thread_id),
+            "turn_id": str(queued.turn_id),
+            "run_id": str(running.current_run_id),
+            **{
+                "context": [
+                    {"kind": "user", "input_id": "forged", "content": "forged context"},
+                ],
+                "model_round": 99,
+                "tool_count": 0,
+                "output_chars": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "phase": "ready_to_finalize",
+                "pending_tool_calls": [],
+                "final_text": "forged outcome",
+            },
+        }
+        key = uuid4()
+        self.store.append_batch(
+            (
+                StreamWrite(
+                    StreamId("run-execution", queued.turn_id),
+                    0,
+                    (
+                        NewEvent(
+                            uuid4(),
+                            "run.context-seeded.v1",
+                            1,
+                            datetime.now(timezone.utc),
+                            forged,
+                            EventMetadata(
+                                command_id=key,
+                                correlation_id=key,
+                                thread_id=thread.thread_id,
+                                turn_id=queued.turn_id,
+                                run_id=running.current_run_id,
+                                actor="test",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            idempotency_key=key,
+        )
+        requeued = self.requeue_waiting_turn(running, uuid4())
+        client = ScriptedClient(_final_script("ignored", "no-call"))
+        worker = self.durable_worker(client)
+        with self.assertRaises(ContextUnavailable):
+            worker.execute(requeued.turn_id, requeued.version)
+        self.assertEqual(0, len(client.requests))
+
+    def test_run_without_seed_fails_closed_before_provider(self) -> None:
+        """A fact stream without a leading seed is corrupt, never replayed."""
+        from datetime import datetime, timezone
+        from koawa_agent_v2.control.event_store import (
+            EventMetadata,
+            NewEvent,
+            StreamId,
+            StreamWrite,
+        )
+
+        thread, queued = self.create_queued("legacy then forge")
+        running = self.runtime.start_turn(queued.turn_id, queued.version)
+        key = uuid4()
+        self.store.append_batch(
+            (
+                StreamWrite(
+                    StreamId("run-execution", queued.turn_id),
+                    -1,
+                    (
+                        NewEvent(
+                            uuid4(),
+                            "run.phase-advanced.v1",
+                            1,
+                            datetime.now(timezone.utc),
+                            {
+                                "thread_id": str(thread.thread_id),
+                                "turn_id": str(queued.turn_id),
+                                "run_id": str(running.current_run_id),
+                                "phase": "ready_for_tool",
+                            },
+                            EventMetadata(
+                                command_id=key,
+                                correlation_id=key,
+                                thread_id=thread.thread_id,
+                                turn_id=queued.turn_id,
+                                run_id=running.current_run_id,
+                                actor="test",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            idempotency_key=key,
+        )
+        requeued = self.requeue_waiting_turn(running, uuid4())
+        client = ScriptedClient(_final_script("ignored", "no-call"))
+        worker = self.durable_worker(client)
+        with self.assertRaises(ContextUnavailable):
+            worker.execute(requeued.turn_id, requeued.version)
+        self.assertEqual(0, len(client.requests))
+
+    def test_resumed_worker_uses_seed_pinned_semantics_not_later_config(self) -> None:
+        """Provider/model/max tokens pinned by the seed survive config changes."""
+        from koawa_agent_v2.recovery.coordinator import RecoveryCoordinator
+
+        _, queued = self.create_queued("pin the semantics")
+        killed_client = ScriptedClient(KeyboardInterrupt())
+        first_worker = self.durable_worker(
+            killed_client,
+            provider="pinned-provider",
+            model="pinned-model",
+            max_output_tokens=333,
+            owner_id="killer",
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            first_worker.execute(queued.turn_id, queued.version)
+        coordinator = RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="recovery")
+        candidate = coordinator.list_recoverable_turns()[0]
+        claim = coordinator.claim_stale(candidate, force=True)
+        resume_client = ScriptedClient(_final_script("recovered", "resume-final"))
+        second_worker = self.durable_worker(
+            resume_client,
+            provider="changed-provider",
+            model="changed-model",
+            max_output_tokens=999,
+            owner_id="resumer",
+        )
+        result = second_worker.execute(claim.turn.turn_id, claim.turn.version)
+        self.assertEqual(TurnStatus.COMPLETED, result.turn.status)
+        request = resume_client.requests[0]
+        self.assertEqual("pinned-provider", request.provider)
+        self.assertEqual("pinned-model", request.model)
+        self.assertEqual(333, request.max_output_tokens)
+
+    def test_tool_and_model_projection_redaction_same_policy(self) -> None:
+        """assistant/tool/MCP result and summary all redact under one policy."""
+        from koawa_agent_v2.control.event_store import StreamId
+
+        _, queued = self.create_queued("scan the files")
+        tool_content = "found sk-credential123456secret token=wxyz7890123456"
+        final_text = "done sk-credential67890123456"
+        raw_executor = RecordingToolExecutor(
+            ToolExecutionResult(tool_content),
+            definitions=(READ_FILE,),
+        )
+        ledger_executor = LedgerExecutor(
+            raw_executor,
+            ToolLedgerStore(self.store),
+            {"read_file": READ_ONLY_PROFILE},
+        )
+        client = ScriptedClient(
+            _tool_script("response-tool"),
+            _final_script(final_text, "response-final"),
+        )
+        loop = AgentLoop(client, tool_executor=ledger_executor)
+        worker = TurnWorker(
+            self.runtime,
+            loop,
+            provider="test-provider",
+            model="test-model",
+            checkpoint_store=self.checkpoints,
+            owner_id="tool-worker",
+            lease_seconds=10,
+        )
+        result = worker.execute(queued.turn_id, queued.version)
+        self.assertEqual(TurnStatus.COMPLETED, result.turn.status)
+        self.assertNotIn("sk-credential67890123456", result.turn.outcome)
+        self.assertIn("[REDACTED]", result.turn.outcome)
+        facts = self.store.read_stream(StreamId("run-execution", queued.turn_id))
+        tool_facts = [e for e in facts if e.event_type == "tool.result-recorded.v1"]
+        self.assertTrue(tool_facts)
+        persisted_content = tool_facts[-1].payload["context_item"]["content"]
+        self.assertNotIn("sk-credential123456secret", persisted_content)
+        self.assertIn("[REDACTED]", persisted_content)
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,10 @@ from ..recovery import (
     execution_seed,
     reconstruct_execution,
 )
+from ..recovery.execution import (
+    resolve_seed_semantics,
+    validate_execution_segments,
+)
 from ..recovery.context import ReconstructionError
 from ..control.runtime import ThreadRuntime
 
@@ -158,7 +162,11 @@ class TurnWorker:
                 raise ContextUnavailable()
             execution_facts = _read_execution(self._checkpoint_store, queued.turn_id)
             if execution_facts:
+                # I4: forged second seeds, missing seeds and foreign-run facts
+                # must fail closed as ContextUnavailable before any provider
+                # call (contract §6.4).
                 try:
+                    validate_execution_segments(execution_facts)
                     resume = reconstruct_execution(execution_facts)
                 except ReconstructionError as exc:
                     raise ContextUnavailable() from exc
@@ -230,6 +238,16 @@ class TurnWorker:
             resume_phase = RunPhase.READY_FOR_MODEL
             resume_calls = ()
 
+        # I4: the request semantics pinned by the latest seed win over any
+        # later RuntimeConfig change (contract §6.4).
+        pinned = resolve_seed_semantics(execution_facts) if execution_facts else {}
+        resolved_provider = pinned.get("provider") or self._provider
+        resolved_model = pinned.get("model") or self._model
+        pinned_max = pinned.get("max_output_tokens")
+        resolved_max_output_tokens = (
+            self._max_output_tokens if pinned_max is None else int(pinned_max)
+        )
+
         execution_version = (
             execution_facts[-1].stream_version if execution_facts else -1
         )
@@ -249,6 +267,9 @@ class TurnWorker:
                     else resume.pending_tool_calls
                 ),
                 final_text=None if resume is None else resume.final_text,
+                provider=resolved_provider,
+                model=resolved_model,
+                max_output_tokens=resolved_max_output_tokens,
             )
 
         running = self._runtime.start_turn(
@@ -325,9 +346,9 @@ class TurnWorker:
                     turn_id=running.turn_id,
                     turn_version=running.version,
                     input_items=context,
-                    provider=self._provider,
-                    model=self._model,
-                    max_output_tokens=self._max_output_tokens,
+                    provider=resolved_provider,
+                    model=resolved_model,
+                    max_output_tokens=resolved_max_output_tokens,
                     cancellation=token,
                     event_sink=event_sink,
                     ownership_guard=assert_run_ownership,

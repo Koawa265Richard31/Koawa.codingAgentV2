@@ -89,11 +89,13 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual("invalid_provider_options", raised.exception.code)
 
     def test_provider_options_reject_nan_value(self) -> None:
+        # I4 strict loader: json.dumps writes NaN; the strict parser rejects
+        # the non-finite token before provider_options are even interpreted.
         document = self._base_document()
         document["provider"]["provider_options"] = {"thinking": float("nan")}
         with self.assertRaises(RuntimeConfigError) as raised:
             load_runtime_config(_write_config(self.root, document))
-        self.assertEqual("invalid_provider_options", raised.exception.code)
+        self.assertEqual("config_non_finite_number", raised.exception.code)
 
     def test_reasoning_effort_parsed_for_known_family(self) -> None:
         document = self._base_document()
@@ -496,6 +498,250 @@ class McpServerDeadlinesConfigTest(unittest.TestCase):
         self.assertEqual(0.25, server.io_poll_timeout_seconds)
         self.assertEqual(15.0, server.tool_call_timeout_seconds)
 
+
+class StrictConfigLoaderTest(unittest.TestCase):
+    """I4 6.5: bounded file bytes, strict parse, exact keys, secret rejection."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / "repo").mkdir()
+
+    def write_bytes(self, data: bytes) -> Path:
+        path = self.root / "config.json"
+        path.write_bytes(data)
+        return path
+
+    def base_document(self) -> dict:
+        return {
+            "config_schema_version": 2,
+            "repo": "repo",
+            "db": "agent.sqlite3",
+            "provider": {
+                "base_url": "https://api.siliconflow.cn/v1",
+                "api_key_env": "SF_CodingAgentTestKey",
+                "model": "Qwen/Qwen3-8B",
+            },
+            "sandbox": {
+                "runner": "host",
+                "host_trust": "builtin_fixture",
+            },
+            "policy": {"patch_decision": "allow"},
+            "test_profiles": [
+                {"profile_id": "unit", "argv": ["/usr/local/bin/python", "-m", "unittest"]},
+            ],
+        }
+
+    def load(self, document: dict):
+        path = self.write_bytes(json.dumps(document).encode("utf-8"))
+        return load_runtime_config(path)
+
+    def test_config_file_too_large_is_rejected(self) -> None:
+        from koawa_agent_v2.runtime.config import CONFIG_MAX_BYTES
+
+        path = self.write_bytes(b" " * (CONFIG_MAX_BYTES + 1))
+        with self.assertRaises(RuntimeConfigError) as raised:
+            load_runtime_config(path)
+        self.assertEqual("config_file_too_large", raised.exception.code)
+
+    def test_nested_duplicate_key_is_rejected(self) -> None:
+        """A duplicate key at ANY depth is rejected before JSON folding."""
+        path = self.write_bytes(
+            '{"config_schema_version":2,"provider":{"base_url":"https://x","api_key_env":"K","model":"m",'
+            '"provider_options":{"temperature":0.7,"temperature":0.8}},"repo":"repo","db":"d.sqlite3",'
+            '"sandbox":{"runner":"host"},"test_profiles":[{"profile_id":"u","argv":["p"]}]}'.encode("utf-8"),
+        )
+        with self.assertRaises(RuntimeConfigError) as raised:
+            load_runtime_config(path)
+        self.assertEqual("config_duplicate_key", raised.exception.code)
+
+    def test_non_finite_number_token_is_rejected(self) -> None:
+        """NaN/Infinity tokens never silently round-trip into a config."""
+        path = self.write_bytes(b'{"config_schema_version":2,"temperature":NaN}')
+        with self.assertRaises(RuntimeConfigError) as raised:
+            load_runtime_config(path)
+        self.assertEqual("config_non_finite_number", raised.exception.code)
+
+    def test_bad_utf8_file_is_rejected(self) -> None:
+        path = self.write_bytes(b"{\xff\xfe\x00 invalid utf8 }")
+        with self.assertRaises(RuntimeConfigError) as raised:
+            load_runtime_config(path)
+        self.assertEqual("config_file_invalid", raised.exception.code)
+
+    def test_config_json_limit_plus_one_is_rejected(self) -> None:
+        """CONFIG_READ_V1 depth cap: a deeply nested document is rejected."""
+        deep = {"nested": 1}
+        for _ in range(30):
+            deep = {"nested": deep}
+        document = self.base_document()
+        document["provider"]["provider_options"] = deep
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("config_json_limit_exceeded", raised.exception.code)
+
+    def test_config_schema_version_present_but_not_two_is_rejected(self) -> None:
+        for wrong in (1, 3, "2", True):
+            document = self.base_document()
+            document["config_schema_version"] = wrong
+            with self.assertRaises(RuntimeConfigError) as raised:
+                self.load(document)
+            self.assertEqual("config_unsupported_schema_version", raised.exception.code)
+
+    def test_legacy_v1_config_loads_with_deprecation(self) -> None:
+        """Missing config_schema_version follows the single v1 translator."""
+        import warnings
+
+        document = self.base_document()
+        del document["config_schema_version"]
+        document["provider"]["provider_options"] = {"thinking": {"type": "disabled"}}
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            config = self.load(document)
+        self.assertEqual(1, config.config_schema_version)
+        self.assertGreaterEqual(len(caught), 1)
+        self.assertIsInstance(caught[0].message, DeprecationWarning)
+        self.assertEqual(
+            {"type": "disabled"},
+            dict(config.provider.provider_options)["thinking"],
+        )
+
+    def test_v2_provider_options_allowlist_and_secret_key_rejection(self) -> None:
+        """v2 enforces the positive allowlist and rejects secret-shaped keys."""
+        document = self.base_document()
+        document["provider"]["provider_options"] = {"thinking": {"type": "disabled"}}
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("invalid_provider_options", raised.exception.code)
+        document = self.base_document()
+        document["provider"]["provider_options"] = {"api_key": "sk-abc1234567890"}
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("config_secret_in_generic_field", raised.exception.code)
+        document = self.base_document()
+        document["provider"]["provider_options"] = {
+            "temperature": 0.7,
+            "parallel_tool_calls": True,
+            "stop": ["END", "STOP"],
+            "response_format": {"type": "json_object"},
+        }
+        config = self.load(document)
+        self.assertEqual(0.7, dict(config.provider.provider_options)["temperature"])
+
+    def test_v2_provider_option_value_semantics_are_enforced(self) -> None:
+        """temp out of -2..2 and wrong-typed options are rejected."""
+        document = self.base_document()
+        document["provider"]["provider_options"] = {"temperature": 3.5}
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("invalid_provider_options", raised.exception.code)
+        document = self.base_document()
+        document["provider"]["provider_options"] = {"seed": "not-an-int"}
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("invalid_provider_options", raised.exception.code)
+
+    def test_credential_literals_in_argv_and_env_are_rejected(self) -> None:
+        """Executable args and env entries never carry credential literals."""
+        document = self.base_document()
+        document["mcp_servers"] = [
+            {"server_id": "echo", "command": ["python", "sk-abc1234567890xyz"]},
+        ]
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("config_secret_in_generic_field", raised.exception.code)
+        document = self.base_document()
+        document["test_profiles"][0]["environment"] = [["API_KEY", "whatever"]]
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("config_secret_in_generic_field", raised.exception.code)
+        document = self.base_document()
+        document["test_profiles"][0]["environment"] = [["PLAIN", "bearer abcdefghijklmnop"]]
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("config_secret_in_generic_field", raised.exception.code)
+
+    def test_durable_limits_ingress_exact_keys_and_bounds(self) -> None:
+        """All eleven keys required; partial policies never merge implicitly."""
+        from koawa_agent_v2.control.durable_json import INGRESS_DEFAULTS
+
+        document = self.base_document()
+        document["durable_limits"] = dict(INGRESS_DEFAULTS)
+        config = self.load(document)
+        self.assertEqual(
+            INGRESS_DEFAULTS["user_input_max_utf8_bytes"],
+            config.durable_limits["user_input_max_utf8_bytes"],
+        )
+        partial = dict(INGRESS_DEFAULTS)
+        del partial["user_input_max_utf8_bytes"]
+        document = self.base_document()
+        document["durable_limits"] = partial
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("invalid_durable_limits", raised.exception.code)
+        out_of_range = dict(INGRESS_DEFAULTS)
+        out_of_range["event_payload_max_depth"] = 33
+        document = self.base_document()
+        document["durable_limits"] = out_of_range
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("invalid_durable_limits", raised.exception.code)
+
+    def test_system_prompt_canonicalized_and_bounded(self) -> None:
+        """system_prompt goes through CanonicalText and is bounded."""
+        document = self.base_document()
+        document["system_prompt"] = "You are safe. sk-abc1234567890xyz now."
+        config = self.load(document)
+        self.assertNotIn("sk-abc1234567890xyz", config.system_prompt)
+        self.assertIn("[REDACTED]", config.system_prompt)
+        document = self.base_document()
+        document["system_prompt"] = "x" * 200_000
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("config_text_limit_exceeded", raised.exception.code)
+
+    def test_section_limits_round_robin(self) -> None:
+        """§6.5 collection/number caps reject out-of-range values stably."""
+        document = self.base_document()
+        document["model_rounds"] = 257
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("invalid_model_rounds", raised.exception.code)
+        document = self.base_document()
+        document["lease_seconds"] = 2
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("invalid_lease_seconds", raised.exception.code)
+        document = self.base_document()
+        document["history_max_chars"] = 5_000_000
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("invalid_history_max_chars", raised.exception.code)
+        document = self.base_document()
+        document["compact_min_turns"] = 2
+        document["history_max_turns"] = 1
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("invalid_compact_min_turns", raised.exception.code)
+        document = self.base_document()
+        document["provider"]["max_output_tokens"] = 2_000_000
+        with self.assertRaises(RuntimeConfigError) as raised:
+            self.load(document)
+        self.assertEqual("invalid_max_output_tokens", raised.exception.code)
+
+    def test_config_failure_creates_no_db_and_no_mcp_process(self) -> None:
+        """A rejected config never creates the DB file or spawns anything."""
+        import subprocess
+
+        document = self.base_document()
+        document["provider"]["provider_options"] = {"api_key": "sk-abc1234567890"}
+        path = self.write_bytes(json.dumps(document).encode("utf-8"))
+        with patch.object(subprocess, "Popen") as popen:
+            with self.assertRaises(RuntimeConfigError):
+                load_runtime_config(path)
+            popen.assert_not_called()
+        database = (self.root / "agent.sqlite3").resolve()
+        self.assertFalse(database.exists())
 
 if __name__ == "__main__":
     unittest.main()

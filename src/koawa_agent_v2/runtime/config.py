@@ -11,11 +11,23 @@ import json
 import math
 import os
 import re
+import warnings
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
+from ..control.durable_json import (
+    CONFIG_READ_V1,
+    INSTRUCTION_MAX_UTF8_BYTES,
+    CanonicalTextError,
+    DurableJsonError,
+    canonicalize_text,
+    strict_json_loads_text,
+    validate_runtime_ingress,
+)
+from ..recovery.redaction import _ASSIGNMENT, _BEARER, _OPENAI_KEY, _SENSITIVE_KEY
 from ..model.openai_client import ReasoningEffort, reasoning_family
 from ..policy import Decision
 
@@ -23,6 +35,28 @@ _CONFIG_ERROR = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _PROFILE_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
 _MCP_SERVER_ID = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+# §6.5: the config file is bounded before parsing (bytes, not characters).
+CONFIG_MAX_BYTES = 1_048_576
+
+# I4 顶层 schema：显式值必须为 2；缺失视为 legacy v1（经过单一兼容 translator +
+# deprecation）。I6 会用下一个 schema 区分旧 MCP profile。
+CONFIG_SCHEMA_VERSION = 2
+
+# provider_options 的正向 allowlist（§6.5）：运行时拥有的 key 一律禁止。
+_PROVIDER_OPTION_ALLOWLIST = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "seed",
+        "parallel_tool_calls",
+        "service_tier",
+        "stop",
+        "response_format",
+    }
+)
 
 
 class RuntimeConfigError(RuntimeError):
@@ -77,29 +111,33 @@ class ProviderConfig:
         object.__setattr__(
             self, "provider", _provider_name(self.provider, "provider")
         )
-        for name, value in (
-            ("timeout_seconds", self.timeout_seconds),
-            ("max_stream_seconds", self.max_stream_seconds),
+        # §6.5 fixed ranges: provider deadline 0.1..600s, max stream 1..3600s.
+        for name, minimum, maximum in (
+            ("timeout_seconds", 0.1, 600.0),
+            ("max_stream_seconds", 1.0, 3_600.0),
         ):
+            value = getattr(self, name)
             if (
                 not isinstance(value, (int, float))
                 or isinstance(value, bool)
-                or float(value) <= 0
-                or float(value) > 86_400
+                or not math.isfinite(float(value))
+                or float(value) < minimum
+                or float(value) > maximum
             ):
                 raise RuntimeConfigError(f"invalid_{name}")
             object.__setattr__(self, name, float(value))
-        for name, value in (
-            ("max_output_tokens", self.max_output_tokens),
-            ("max_request_bytes", self.max_request_bytes),
-            ("max_response_bytes", self.max_response_bytes),
-            ("max_sse_event_bytes", self.max_sse_event_bytes),
+        # §6.5 fixed ranges: request/response/SSE byte budgets and output tokens.
+        for name, minimum, maximum in (
+            ("max_output_tokens", 1, 1_048_576),
+            ("max_request_bytes", 1_024, 4 * 1024 * 1024),
+            ("max_response_bytes", 1_024, 32 * 1024 * 1024),
+            ("max_sse_event_bytes", 1_024, 4 * 1024 * 1024),
         ):
+            value = getattr(self, name)
             if (
                 not isinstance(value, int)
                 or isinstance(value, bool)
-                or value <= 0
-                or value > 128 * 1024 * 1024
+                or not minimum <= value <= maximum
             ):
                 raise RuntimeConfigError(f"invalid_{name}")
         if not isinstance(self.provider_options, tuple) or any(
@@ -150,14 +188,16 @@ class TestProfileConfig:
             raise RuntimeConfigError("invalid_test_profile")
         if not isinstance(self.argv, tuple) or not 1 <= len(self.argv) <= 128:
             raise RuntimeConfigError("invalid_test_profile")
+        total_argv_bytes = 0
         for value in self.argv:
-            if (
-                not isinstance(value, str)
-                or not value
-                or "\x00" in value
-                or len(value) > 16_384
-            ):
+            if not isinstance(value, str) or not value or "\x00" in value:
                 raise RuntimeConfigError("invalid_test_profile")
+            entry_bytes = len(value.encode("utf-8"))
+            if entry_bytes > 4_096:
+                raise RuntimeConfigError("invalid_test_profile")
+            total_argv_bytes += entry_bytes
+        if total_argv_bytes > 65_536:
+            raise RuntimeConfigError("invalid_test_profile")
         if (
             not isinstance(self.timeout_seconds, (int, float))
             or isinstance(self.timeout_seconds, bool)
@@ -173,10 +213,11 @@ class TestProfileConfig:
                 or value > 16 * 1024 * 1024
             ):
                 raise RuntimeConfigError("invalid_test_profile")
-        if not isinstance(self.environment, tuple):
+        if not isinstance(self.environment, tuple) or len(self.environment) > 128:
             raise RuntimeConfigError("invalid_test_profile")
         seen: set[str] = set()
         normalized: list[tuple[str, str]] = []
+        total_env_bytes = 0
         for item in self.environment:
             if not isinstance(item, tuple) or len(item) != 2:
                 raise RuntimeConfigError("invalid_test_profile")
@@ -186,11 +227,15 @@ class TestProfileConfig:
                 or name in seen
                 or not isinstance(value, str)
                 or "\x00" in value
-                or len(value) > 16_384
+                or len(name.encode("utf-8")) > 128
+                or len(value.encode("utf-8")) > 4_096
             ):
                 raise RuntimeConfigError("invalid_test_profile")
+            total_env_bytes += len(name.encode("utf-8")) + len(value.encode("utf-8"))
             seen.add(name)
             normalized.append((name, value))
+        if total_env_bytes > 65_536:
+            raise RuntimeConfigError("invalid_test_profile")
         object.__setattr__(self, "environment", tuple(normalized))
 
     def __repr__(self) -> str:
@@ -237,19 +282,22 @@ class McpServerConfig:
         object.__setattr__(self, "server_id", self.server_id)
         if not isinstance(self.command, tuple) or not 1 <= len(self.command) <= 128:
             raise RuntimeConfigError("invalid_mcp_server")
+        total_command_bytes = 0
         for value in self.command:
-            if (
-                not isinstance(value, str)
-                or not value
-                or "\x00" in value
-                or len(value) > 16_384
-            ):
+            if not isinstance(value, str) or not value or "\x00" in value:
                 raise RuntimeConfigError("invalid_mcp_server")
+            entry_bytes = len(value.encode("utf-8"))
+            if entry_bytes > 4_096:
+                raise RuntimeConfigError("invalid_mcp_server")
+            total_command_bytes += entry_bytes
+        if total_command_bytes > 65_536:
+            raise RuntimeConfigError("invalid_mcp_server")
         if self.cwd is not None and not isinstance(self.cwd, Path):
             raise RuntimeConfigError("invalid_mcp_server")
-        if not isinstance(self.environment, tuple):
+        if not isinstance(self.environment, tuple) or len(self.environment) > 128:
             raise RuntimeConfigError("invalid_mcp_server")
         normalized_environment: list[tuple[str, str]] = []
+        total_env_bytes = 0
         for item in self.environment:
             if not isinstance(item, tuple) or len(item) != 2:
                 raise RuntimeConfigError("invalid_mcp_server")
@@ -259,10 +307,14 @@ class McpServerConfig:
                 or not name
                 or not isinstance(value, str)
                 or "\x00" in value
-                or len(value) > 16_384
+                or len(name.encode("utf-8")) > 128
+                or len(value.encode("utf-8")) > 4_096
             ):
                 raise RuntimeConfigError("invalid_mcp_server")
+            total_env_bytes += len(name.encode("utf-8")) + len(value.encode("utf-8"))
             normalized_environment.append((name, value))
+        if total_env_bytes > 65_536:
+            raise RuntimeConfigError("invalid_mcp_server")
         object.__setattr__(self, "environment", tuple(normalized_environment))
         if (
             not isinstance(self.request_timeout_seconds, (int, float))
@@ -429,6 +481,13 @@ class RuntimeConfig:
     # pairs; the interactive default is tight so small models cannot burn the
     # whole turn on repeated failed attempts.
     budget_action_limits: tuple[tuple[str, int], ...] = (("root", 20),)
+    # I4 exact-key runtime ingress policy; None = section 6.2 defaults.  When
+    # an object is supplied it must contain all eleven documented keys — no
+    # partial implicit merging of policies.
+    durable_limits: Mapping[str, int] | None = None
+    # I4 top-level config schema: 2 when the file explicitly declares it,
+    # 1 for legacy v1 input (single compatible translator + deprecation).
+    config_schema_version: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.repo, Path) or not self.repo.is_absolute():
@@ -452,6 +511,8 @@ class RuntimeConfig:
                 raise RuntimeConfigError("invalid_runtime_config")
         if not isinstance(self.test_profiles, tuple) or not self.test_profiles:
             raise RuntimeConfigError("test_profiles_required")
+        if len(self.test_profiles) > 64:
+            raise RuntimeConfigError("invalid_test_profiles")
         if any(not isinstance(value, TestProfileConfig) for value in self.test_profiles):
             raise RuntimeConfigError("invalid_test_profile")
         if len({value.profile_id for value in self.test_profiles}) != len(
@@ -462,10 +523,25 @@ class RuntimeConfig:
             not isinstance(value, McpServerConfig) for value in self.mcp_servers
         ):
             raise RuntimeConfigError("invalid_mcp_server")
+        if len(self.mcp_servers) > 32:
+            raise RuntimeConfigError("invalid_mcp_server")
         if len({value.server_id for value in self.mcp_servers}) != len(
             self.mcp_servers
         ):
             raise RuntimeConfigError("duplicate_mcp_server")
+        if not isinstance(self.config_schema_version, int) or isinstance(
+            self.config_schema_version, bool
+        ):
+            raise RuntimeConfigError("config_unsupported_schema_version")
+        if self.config_schema_version not in (1, 2):
+            raise RuntimeConfigError("config_unsupported_schema_version")
+        try:
+            normalized_limits = validate_runtime_ingress(self.durable_limits)
+        except ValueError:
+            raise RuntimeConfigError("invalid_durable_limits") from None
+        object.__setattr__(
+            self, "durable_limits", MappingProxyType(normalized_limits)
+        )
         object.__setattr__(
             self, "system_prompt", _non_empty_text(self.system_prompt, "system_prompt")
         )
@@ -481,29 +557,43 @@ class RuntimeConfig:
         object.__setattr__(
             self, "owner_id", _provider_name(self.owner_id, "owner_id")
         )
-        for name, value in (("lease_seconds", self.lease_seconds),):
-            if (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value <= 0
-                or value > 3_600
-            ):
-                raise RuntimeConfigError(f"invalid_{name}")
-        for name, value in (
-            ("model_rounds", self.model_rounds),
-            ("max_tool_calls", self.max_tool_calls),
-            ("history_max_turns", self.history_max_turns),
-            ("compact_min_turns", self.compact_min_turns),
+        # section 6.5 fixed ranges.
+        if (
+            not isinstance(self.lease_seconds, int)
+            or isinstance(self.lease_seconds, bool)
+            or not 3 <= self.lease_seconds <= 3_600
         ):
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise RuntimeConfigError(f"invalid_{name}")
+            raise RuntimeConfigError("invalid_lease_seconds")
+        if (
+            not isinstance(self.model_rounds, int)
+            or isinstance(self.model_rounds, bool)
+            or not 1 <= self.model_rounds <= 256
+        ):
+            raise RuntimeConfigError("invalid_model_rounds")
+        if (
+            not isinstance(self.max_tool_calls, int)
+            or isinstance(self.max_tool_calls, bool)
+            or not 1 <= self.max_tool_calls <= 1_024
+        ):
+            raise RuntimeConfigError("invalid_max_tool_calls")
+        if (
+            not isinstance(self.history_max_turns, int)
+            or isinstance(self.history_max_turns, bool)
+            or not 1 <= self.history_max_turns <= 1_024
+        ):
+            raise RuntimeConfigError("invalid_history_max_turns")
         if (
             not isinstance(self.history_max_chars, int)
             or isinstance(self.history_max_chars, bool)
-            or self.history_max_chars <= 0
-            or self.history_max_chars > 2_000_000
+            or not 1 <= self.history_max_chars <= 4_194_304
         ):
             raise RuntimeConfigError("invalid_history_max_chars")
+        if (
+            not isinstance(self.compact_min_turns, int)
+            or isinstance(self.compact_min_turns, bool)
+            or not 1 <= self.compact_min_turns <= max(1, self.history_max_turns)
+        ):
+            raise RuntimeConfigError("invalid_compact_min_turns")
         if not isinstance(self.budget_action_limits, tuple) or any(
             not isinstance(pair, tuple)
             or len(pair) != 2
@@ -514,6 +604,8 @@ class RuntimeConfig:
             or pair[1] <= 0
             for pair in self.budget_action_limits
         ):
+            raise RuntimeConfigError("invalid_budget_action_limits")
+        if len(self.budget_action_limits) > 1_024:
             raise RuntimeConfigError("invalid_budget_action_limits")
         if len({pair[0] for pair in self.budget_action_limits}) != len(
             self.budget_action_limits
@@ -554,14 +646,40 @@ Final answer must summarize changed files, test evidence, and any residual risks
 
 
 def load_runtime_config(path: str | Path) -> RuntimeConfig:
-    """Load and strictly validate a P0 runtime JSON config."""
+    """Load and strictly validate a P0 runtime JSON config (I4 strict loader).
+
+    Step order (section 6.5): bound the file bytes, strict UTF-8 decode,
+    reject duplicate keys and non-finite numbers during parsing, apply the
+    immutable CONFIG_READ_V1 profile, accept only exact top-level key sets,
+    preflight every DTO/path, canonicalize free text, validate the optional
+    durable-limits ingress policy.  Only after the complete config validates
+    may a DB, client or MCP process be created (assembly does that, not this).
+    Config errors carry only a stable code and field path — never the secret
+    value that triggered them.
+    """
     config_path = Path(path)
     try:
-        document = json.loads(config_path.read_text(encoding="utf-8"))
+        with open(config_path, "rb") as handle:
+            raw = handle.read(CONFIG_MAX_BYTES + 1)
     except FileNotFoundError:
         raise RuntimeConfigError("config_file_not_found") from None
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except OSError:
         raise RuntimeConfigError("config_file_invalid") from None
+    if len(raw) > CONFIG_MAX_BYTES:
+        raise RuntimeConfigError("config_file_too_large")
+    try:
+        text = raw.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        raise RuntimeConfigError("config_file_invalid") from None
+    try:
+        document = strict_json_loads_text(
+            text,
+            CONFIG_READ_V1,
+            path="config",
+            reject_string_controls=False,
+        )
+    except DurableJsonError as exc:
+        raise _config_json_error(exc) from exc
     if not isinstance(document, dict):
         raise RuntimeConfigError("config_file_invalid")
     allowed = {
@@ -582,19 +700,60 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         "compact_min_turns",
         "budget_action_limits",
         "fallback_summary_model",
+        "durable_limits",
+        "config_schema_version",
     }
     unknown = set(document) - allowed
     if unknown:
         raise RuntimeConfigError("config_unknown_field")
+
+    # config_schema_version: explicit must be exactly 2; missing means legacy
+    # v1 which passes through one compatible translator plus a deprecation.
+    raw_version = document.get("config_schema_version")
+    if raw_version is None:
+        schema_version = 1
+        warnings.warn(
+            "runtime config without config_schema_version is legacy v1 and "
+            "deprecated; add \"config_schema_version\": 2",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    elif not isinstance(raw_version, int) or isinstance(raw_version, bool) or raw_version != CONFIG_SCHEMA_VERSION:
+        raise RuntimeConfigError("config_unsupported_schema_version")
+    else:
+        schema_version = CONFIG_SCHEMA_VERSION
+
+    strict_v2 = schema_version == CONFIG_SCHEMA_VERSION
+    _reject_secret_config_literals(document)
+    if "durable_limits" in document:
+        try:
+            durable_limits = validate_runtime_ingress(document["durable_limits"])
+        except ValueError:
+            raise RuntimeConfigError("invalid_durable_limits") from None
+    else:
+        durable_limits = None
+
     base = config_path.parent
     repo = _absolute_path(document.get("repo"), base, "repo")
     db = _absolute_path(document.get("db"), base, "db")
-    provider = _parse_provider(document.get("provider"))
+    provider = _parse_provider(document.get("provider"), strict_options=strict_v2)
     sandbox = _parse_sandbox(document.get("sandbox"))
     test_profiles = _parse_test_profiles(document.get("test_profiles"))
     policy = _parse_policy(document.get("policy"))
     mcp_servers = _parse_mcp_servers(document.get("mcp_servers", []), base)
     system_prompt = document.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+    if isinstance(system_prompt, str):
+        try:
+            canonical_prompt = canonicalize_text(
+                system_prompt,
+                INSTRUCTION_MAX_UTF8_BYTES,
+                name="system_prompt",
+            )
+        except CanonicalTextError as exc:
+            if exc.code == "text_too_large":
+                raise RuntimeConfigError("config_text_limit_exceeded") from None
+            raise RuntimeConfigError("invalid_system_prompt") from None
+        system_prompt = canonical_prompt.value
     owner_id = document.get("owner_id", "runtime-cli")
     lease_seconds = document.get("lease_seconds", 30)
     model_rounds = document.get("model_rounds", 32)
@@ -627,7 +786,139 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         compact_min_turns=compact_min_turns,
         budget_action_limits=budget_action_limits,
         fallback_summary_model=fallback_summary_model,
+        durable_limits=durable_limits,
+        config_schema_version=schema_version,
     )
+
+
+def _config_json_error(exc: DurableJsonError) -> RuntimeConfigError:
+    """Map strict-parse failures to stable, content-free config error codes."""
+    if exc.code == "duplicate_key":
+        return RuntimeConfigError("config_duplicate_key")
+    if exc.code == "non_finite_number":
+        return RuntimeConfigError("config_non_finite_number")
+    if exc.code in ("invalid_json", "invalid_utf8", "invalid_value_type"):
+        return RuntimeConfigError("config_file_invalid")
+    return RuntimeConfigError("config_json_limit_exceeded")
+
+
+def _credential_shape(value: str) -> bool:
+    """True when a free-text value carries a credential-like literal shape."""
+    return bool(
+        _BEARER.search(value) or _OPENAI_KEY.search(value) or _ASSIGNMENT.search(value)
+    )
+
+
+def _reject_secret_config_literals(document: Mapping[str, Any]) -> None:
+    """Reject credential-like literals in generic config fields.
+
+    provider_options secret-shaped keys, executable argv entries and
+    environment entries containing credential literals, and secret-like
+    environment names are all rejected with the stable
+    config_secret_in_generic_field code (plan §9.3, §6.5).  The error never
+    echoes the offending value.
+    """
+    # provider_options KEYS are checked in _validate_provider_options: legacy
+    # v1 keeps the I1-released general map (runtime-owned keys such as
+    # max_tokens remain legal for old configurations), while v2 enforces the
+    # positive allowlist and secret-shaped key rejection.  Credential-shaped
+    # VALUES are always rejected here because they would reach the provider.
+    provider = document.get("provider")
+    if isinstance(provider, dict):
+        raw_options = provider.get("provider_options")
+        if isinstance(raw_options, dict):
+            for option_value in raw_options.values():
+                if isinstance(option_value, str) and _credential_shape(option_value):
+                    raise RuntimeConfigError("config_secret_in_generic_field")
+    for section, argv_key, env_key in (
+        ("test_profiles", "argv", "environment"),
+        ("mcp_servers", "command", "environment"),
+    ):
+        entries = document.get(section)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            argv = entry.get(argv_key)
+            if isinstance(argv, list):
+                for argument in argv:
+                    if isinstance(argument, str) and _credential_shape(argument):
+                        raise RuntimeConfigError("config_secret_in_generic_field")
+            environment = entry.get(env_key)
+            if isinstance(environment, list):
+                for pair in environment:
+                    if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                        continue
+                    name, value = pair
+                    if isinstance(name, str) and _SENSITIVE_KEY.search(name):
+                        raise RuntimeConfigError("config_secret_in_generic_field")
+                    if isinstance(value, str) and _credential_shape(value):
+                        raise RuntimeConfigError("config_secret_in_generic_field")
+
+
+def _validate_provider_options(
+    raw: Mapping[str, Any],
+    *,
+    strict: bool,
+) -> None:
+    """Validate the provider_options container.
+
+    Secret-shaped keys are always forbidden (config_secret_in_generic_field).
+    In v2 (config_schema_version 2) the positive allowlist and value
+    semantics from §6.5 apply; legacy v1 keeps the I1-released general
+    JSON-safe map so existing configurations continue to load.
+    """
+    if not strict:
+        return
+    for option_key in raw:
+        if _SENSITIVE_KEY.search(str(option_key)):
+            raise RuntimeConfigError("config_secret_in_generic_field")
+        if option_key not in _PROVIDER_OPTION_ALLOWLIST:
+            raise RuntimeConfigError("invalid_provider_options")
+        value = raw[option_key]
+        if option_key in ("temperature", "top_p", "frequency_penalty", "presence_penalty"):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or not -2.0 <= float(value) <= 2.0
+            ):
+                raise RuntimeConfigError("invalid_provider_options")
+        elif option_key == "seed":
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not (-(2**63) <= value <= 2**63 - 1)
+            ):
+                raise RuntimeConfigError("invalid_provider_options")
+        elif option_key == "parallel_tool_calls":
+            if not isinstance(value, bool):
+                raise RuntimeConfigError("invalid_provider_options")
+        elif option_key == "service_tier":
+            if (
+                not isinstance(value, str)
+                or not 1 <= len(value.encode("utf-8")) <= 64
+            ):
+                raise RuntimeConfigError("invalid_provider_options")
+        elif option_key == "stop":
+            if (
+                not isinstance(value, list)
+                or len(value) > 16
+                or any(
+                    not isinstance(item, str)
+                    or not 1 <= len(item.encode("utf-8")) <= 256
+                    for item in value
+                )
+            ):
+                raise RuntimeConfigError("invalid_provider_options")
+        elif option_key == "response_format":
+            if (
+                not isinstance(value, dict)
+                or set(value) != {"type"}
+                or value.get("type") not in ("text", "json_object")
+            ):
+                raise RuntimeConfigError("invalid_provider_options")
 
 
 def resolve_api_key(provider: ProviderConfig) -> str:
@@ -640,7 +931,7 @@ def resolve_api_key(provider: ProviderConfig) -> str:
     return value
 
 
-def _parse_provider(value: Any) -> ProviderConfig:
+def _parse_provider(value: Any, *, strict_options: bool = False) -> ProviderConfig:
     if not isinstance(value, dict):
         raise RuntimeConfigError("invalid_provider_config")
     allowed = {
@@ -664,6 +955,7 @@ def _parse_provider(value: Any) -> ProviderConfig:
         if raw_options is not None:
             if not isinstance(raw_options, dict):
                 raise RuntimeConfigError("invalid_provider_options")
+            _validate_provider_options(raw_options, strict=strict_options)
             options = tuple((str(key), item) for key, item in raw_options.items())
         return ProviderConfig(
             base_url=value.get("base_url", ""),

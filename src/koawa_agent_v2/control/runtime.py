@@ -16,6 +16,12 @@ from .event_store import (
     StreamWrite,
     WrongExpectedVersion,
 )
+from .durable_json import (
+    CanonicalText,
+    CanonicalTextError,
+    CanonicalTextPolicy,
+    canonicalize_text,
+)
 from .models import (
     RESUMABLE_TURN_STATUSES,
     THREAD_ARCHIVED,
@@ -49,12 +55,29 @@ class ThreadRuntime:
     生成新事件。这样进程退出后，只要 EventStore 仍在，就能恢复 Thread/Turn。
     """
 
-    def __init__(self, store: EventStore, *, actor: str = "runtime") -> None:
-        """注入事件存储，并设置写入事件元数据的审计主体。"""
+    def __init__(
+        self,
+        store: EventStore,
+        *,
+        actor: str = "runtime",
+        text_policy: CanonicalTextPolicy | None = None,
+    ) -> None:
+        """注入事件存储，并设置写入事件元数据的审计主体。
+
+        text_policy (I4) carries the per-kind byte ceilings used to build the
+        canonical user text.  Every free-text entry point (user input, wait
+        prompt, pause/cancel/timeout reason, resume response, summary/error)
+        is canonicalized BEFORE the request fingerprint and event payload are
+        formed, so the first model request, idempotency identity, persisted
+        event and any later resume all share the same canonical value.
+        """
         if not isinstance(actor, str) or not actor.strip():
             raise ValueError("actor must be non-empty")
+        if text_policy is not None and not isinstance(text_policy, CanonicalTextPolicy):
+            raise TypeError("text_policy must be CanonicalTextPolicy or None")
         self._store = store
         self._actor = actor
+        self._text_policy = text_policy or CanonicalTextPolicy()
 
     def create_thread(
         self,
@@ -129,7 +152,11 @@ class ThreadRuntime:
         ``thread.turn-attached`` 与 ``turn.created``，避免只完成一半的悬空状态。
         """
         resolved_thread_id = _as_uuid(thread_id, "thread_id")
-        user_input = _non_empty(user_input, "user_input")
+        canonical_input = self._canonical_required(
+            user_input,
+            self._text_policy.user_input_max_utf8_bytes,
+            "user_input",
+        )
         expected_thread_version = _expected_version(
             expected_thread_version,
             "expected_thread_version",
@@ -144,8 +171,9 @@ class ThreadRuntime:
             {
                 "thread_id": resolved_thread_id,
                 "turn_id": resolved_turn_id,
-                "user_input": user_input,
+                "user_input": canonical_input.value,
                 "expected_thread_version": expected_thread_version,
+                **_canonical_args(canonical_input),
             },
         )
         # command_id 是语义命令的幂等键；同键同参数返回原 receipt，同键异参
@@ -188,7 +216,7 @@ class ThreadRuntime:
             payload={
                 "turn_id": str(resolved_turn_id),
                 "thread_id": str(resolved_thread_id),
-                "user_input": user_input,
+                "user_input": canonical_input.value,
             },
             event_slot="turn-created",
             **metadata_args,
@@ -396,7 +424,11 @@ class ThreadRuntime:
         """暂停 QUEUED/RUNNING Turn；暂停运行中 Turn 时必须通过 run fencing。"""
         resolved_turn_id = _as_uuid(turn_id, "turn_id")
         expected_version = _expected_version(expected_version)
-        reason = _non_empty(reason, "reason")
+        canonical_reason = self._canonical_required(
+            reason,
+            self._text_policy.terminal_text_max_utf8_bytes,
+            "reason",
+        )
         resolved_run_id = _optional_uuid(run_id)
         resolved_command_id = _optional_uuid(command_id) or uuid4()
         fingerprint = self._fingerprint(
@@ -405,7 +437,8 @@ class ThreadRuntime:
                 "turn_id": resolved_turn_id,
                 "expected_version": expected_version,
                 "run_id": resolved_run_id,
-                "reason": reason,
+                "reason": canonical_reason.value,
+                **_canonical_args(canonical_reason),
             },
         )
         if receipt := self._committed_receipt(
@@ -429,7 +462,7 @@ class ThreadRuntime:
             resolved_command_id,
             fingerprint,
             TURN_PAUSED,
-            {"reason": reason},
+            {"reason": canonical_reason.value},
             event_slot="turn-paused",
             run_id=resolved_run_id,
         )
@@ -453,13 +486,29 @@ class ThreadRuntime:
         expected_version = _expected_version(expected_version)
         resolved_interrupt_id = _optional_uuid(interrupt_id)
         resolved_command_id = _optional_uuid(command_id) or uuid4()
+        canonical_response: CanonicalText | None = None
+        if isinstance(response, str):
+            canonical_response = self._canonical_required(
+                response,
+                self._text_policy.resume_interrupt_max_utf8_bytes,
+                "response",
+            )
         fingerprint = self._fingerprint(
             "request_resume",
             {
                 "turn_id": resolved_turn_id,
                 "expected_version": expected_version,
                 "interrupt_id": resolved_interrupt_id,
-                "response": response,
+                "response": (
+                    canonical_response.value
+                    if canonical_response is not None
+                    else response
+                ),
+                **(  # type: ignore[misc]
+                    _canonical_args(canonical_response)
+                    if canonical_response is not None
+                    else {}
+                ),
             },
         )
         if receipt := self._committed_receipt(
@@ -509,7 +558,11 @@ class ThreadRuntime:
                     if resolved_interrupt_id is not None
                     else None
                 ),
-                "response": response,
+                "response": (
+                    canonical_response.value
+                    if canonical_response is not None
+                    else response
+                ),
             },
             event_slot="turn-recovery-queued",
             run_id=turn.current_run_id,
@@ -707,7 +760,11 @@ class ThreadRuntime:
         """实现两种等待命令的共享流程，并持久化 interrupt 身份与提示。"""
         resolved_turn_id = _as_uuid(turn_id, "turn_id")
         expected_version = _expected_version(expected_version)
-        prompt = _non_empty(prompt, "prompt")
+        canonical_prompt = self._canonical_required(
+            prompt,
+            self._text_policy.terminal_text_max_utf8_bytes,
+            "prompt",
+        )
         resolved_run_id = _as_uuid(run_id, "run_id")
         resolved_command_id = _optional_uuid(command_id) or uuid4()
         resolved_interrupt_id = _optional_uuid(interrupt_id) or _derived_id(
@@ -729,11 +786,12 @@ class ThreadRuntime:
             "expected_version": expected_version,
             "run_id": resolved_run_id,
             "interrupt_id": resolved_interrupt_id,
-            "prompt": prompt,
+            "prompt": canonical_prompt.value,
+            **_canonical_args(canonical_prompt),
         }
         event_payload = {
             "interrupt_id": str(resolved_interrupt_id),
-            "prompt": prompt,
+            "prompt": canonical_prompt.value,
         }
         # None 时保持 D1 的原始指纹与 payload，升级后重试 legacy command_id
         # 仍会命中原有幂等回执；只有 durable approval 才增加新字段。
@@ -780,7 +838,11 @@ class ThreadRuntime:
         resolved_turn_id = _as_uuid(turn_id, "turn_id")
         expected_version = _expected_version(expected_version)
         resolved_run_id = _as_uuid(run_id, "run_id")
-        value = _non_empty(value, value_name)
+        canonical_value = self._canonical_required(
+            value,
+            self._text_policy.terminal_text_max_utf8_bytes,
+            value_name,
+        )
         resolved_command_id = _optional_uuid(command_id) or uuid4()
         action = f"{terminal_status.value}_turn"
         fingerprint = self._fingerprint(
@@ -789,7 +851,8 @@ class ThreadRuntime:
                 "turn_id": resolved_turn_id,
                 "expected_version": expected_version,
                 "run_id": resolved_run_id,
-                value_name: value,
+                value_name: canonical_value.value,
+                **_canonical_args(canonical_value),
             },
         )
         if receipt := self._committed_receipt(
@@ -811,7 +874,7 @@ class ThreadRuntime:
             fingerprint,
             terminal_status,
             event_type,
-            {value_name: value},
+            {value_name: canonical_value.value},
             event_run_id=resolved_run_id,
         )
 
@@ -828,14 +891,19 @@ class ThreadRuntime:
         """操作方终止路径：可结束任意非终态 Turn，不冒充某个 Worker Run。"""
         resolved_turn_id = _as_uuid(turn_id, "turn_id")
         expected_version = _expected_version(expected_version)
-        reason = _non_empty(reason, "reason")
+        canonical_reason = self._canonical_required(
+            reason,
+            self._text_policy.terminal_text_max_utf8_bytes,
+            "reason",
+        )
         resolved_command_id = _optional_uuid(command_id) or uuid4()
         fingerprint = self._fingerprint(
             f"{terminal_status.value}_turn",
             {
                 "turn_id": resolved_turn_id,
                 "expected_version": expected_version,
-                "reason": reason,
+                "reason": canonical_reason.value,
+                **_canonical_args(canonical_reason),
             },
         )
         if receipt := self._committed_receipt(
@@ -856,7 +924,7 @@ class ThreadRuntime:
             fingerprint,
             terminal_status,
             event_type,
-            {"reason": reason},
+            {"reason": canonical_reason.value},
             event_run_id=None,
         )
 
@@ -961,6 +1029,25 @@ class ThreadRuntime:
         turn = self.get_turn(turn_id)
         _check_version(_turn_stream(turn_id), expected_version, turn.version)
         return turn
+
+    def _canonical_required(
+        self,
+        value: Any,
+        max_utf8_bytes: int,
+        name: str,
+    ) -> CanonicalText:
+        """Canonicalize one free-text entry before fingerprint/event formation.
+
+        Emptiness is decided by strip() only; the canonical value itself keeps
+        its surrounding whitespace (contract §6.3).
+        """
+        try:
+            canon = canonicalize_text(value, max_utf8_bytes, name=name)
+        except CanonicalTextError:
+            raise
+        if not canon.value.strip():
+            raise ValueError(f"{name} must be non-empty text")
+        return canon
 
     def _committed_receipt(
         self,
@@ -1160,6 +1247,21 @@ def _semantic_json(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return [_semantic_json(item) for item in value]
     raise TypeError(f"unsupported command argument type: {type(value).__name__}")
+
+
+def _canonical_args(canon: CanonicalText) -> dict[str, object]:
+    """Canonical text metadata for the request fingerprint.
+
+    The fingerprint carries the canonical (redacted) value plus digest/byte/
+    policy/count metadata — never the pre-canonical raw text (contract §2.5,
+    §6.3).
+    """
+    return {
+        "utf8_bytes": canon.utf8_bytes,
+        "digest": canon.digest,
+        "redaction_policy_version": canon.redaction_policy_version,
+        "redaction_count": canon.redaction_count,
+    }
 
 
 def _non_empty(value: str, name: str) -> str:

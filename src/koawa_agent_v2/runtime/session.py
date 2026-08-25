@@ -14,11 +14,16 @@ restart by re-reading the thread.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Sequence
 from uuid import UUID, uuid4
 
+from ..control.durable_json import (
+    USER_INPUT_MAX_UTF8_BYTES,
+    CanonicalTextError,
+    canonicalize_text,
+)
 from ..model.protocol import (
     AssistantMessage,
     AssistantTextItem,
@@ -162,8 +167,27 @@ class SessionHistory:
         return tuple(self._turns)
 
     def append(self, turn: SessionTurn) -> None:
+        """Append one turn whose user text is canonicalized at the entry point.
+
+        The in-process history therefore stores the same canonical
+        (redacted/NFC/LF) user_input that the durable turn event carries, so a
+        same-process second turn and a restart via SessionHistory.from_thread
+        produce identical model context (contract §6.4).
+        """
         if not isinstance(turn, SessionTurn):
             raise TypeError("turn must be SessionTurn")
+        try:
+            canon = canonicalize_text(
+                turn.user_input,
+                USER_INPUT_MAX_UTF8_BYTES,
+                name="user_input",
+            )
+        except CanonicalTextError as exc:
+            raise SessionHistoryError("invalid_session_user_input") from exc
+        if not canon.value.strip():
+            raise ValueError("user_input must be non-empty text")
+        if canon.value != turn.user_input:
+            turn = replace(turn, user_input=canon.value)
         self._turns.append(turn)
 
     def _bounded_recent(self) -> list[SessionTurn]:

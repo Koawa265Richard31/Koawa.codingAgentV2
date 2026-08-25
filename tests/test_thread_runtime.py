@@ -490,5 +490,171 @@ class ThreadRuntimeTest(unittest.TestCase):
             rebuild_turn(turn.turn_id, (replace(event, schema_version=2),))
 
 
+class CanonicalTextRuntimeTest(unittest.TestCase):
+    """I4 6.3/6.4: ThreadRuntime canonicalizes free text before fingerprint/event."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.database_path = Path(temporary.name) / "canonical-runtime.sqlite3"
+        self.store = SqliteEventStore(self.database_path)
+        self.runtime = ThreadRuntime(self.store)
+
+    def create_thread_and_turn(self, text: str):
+        thread = self.runtime.create_thread("D:/work/repository")
+        turn = self.runtime.create_turn(
+            thread.thread_id,
+            text,
+            expected_thread_version=thread.version,
+        )
+        return thread, turn
+
+    def test_user_input_is_canonical_before_persist_and_idempotent(self) -> None:
+        """Credential/user text is canonical in the event, never the raw form."""
+        from koawa_agent_v2.control.durable_json import canonicalize_text
+
+        raw = "please commit now\r\nsk-abc1234567890xyz"
+        expected = canonicalize_text(
+            raw, 65_536, name="user_input"
+        ).value
+        _, turn = self.create_thread_and_turn(raw)
+        self.assertEqual(expected, turn.user_input)
+        event = self.store.read_stream(StreamId("turn", turn.turn_id))[0]
+        self.assertEqual(expected, event.payload["user_input"])
+        self.assertNotIn("sk-abc1234567890xyz", turn.user_input)
+
+    def test_canonicalization_is_deterministic_across_retry(self) -> None:
+        """Same command + same raw input returns the canonical receipt result."""
+        from koawa_agent_v2.control.durable_json import canonicalize_text
+
+        raw = "run tests now sk-abc1234567890xyz"
+        thread = self.runtime.create_thread("repo")
+        command_id = uuid4()
+        turn_id = uuid4()
+        first = self.runtime.create_turn(
+            thread.thread_id,
+            raw,
+            expected_thread_version=thread.version,
+            turn_id=turn_id,
+            command_id=command_id,
+        )
+        second = self.runtime.create_turn(
+            thread.thread_id,
+            raw,
+            expected_thread_version=thread.version,
+            turn_id=turn_id,
+            command_id=command_id,
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(
+            canonicalize_text(raw, 65_536, name="user_input").value,
+            first.user_input,
+        )
+
+    def test_crlf_nfc_multibyte_and_no_text_trimming(self) -> None:
+        """CRLF->LF, NFC, multibyte counting; surrounding whitespace preserved."""
+        from koawa_agent_v2.control.durable_json import canonicalize_text
+
+        raw = "  cafe\u0301 fix\r\n\u4e2d\u6587 ok  "
+        canon = canonicalize_text(raw, 65_536, name="user_input")
+        self.assertIn("caf\u00e9", canon.value)
+        self.assertIn("fix\n", canon.value)
+        self.assertTrue(canon.value.startswith("  "))
+        self.assertTrue(canon.value.endswith("  "))
+        _, turn = self.create_thread_and_turn(raw)
+        self.assertEqual(canon.value, turn.user_input)
+
+    def test_wait_resume_pause_complete_fail_reasons_are_canonical(self) -> None:
+        """Every free-text entry point canonicalizes before persist (idempotent)."""
+        from koawa_agent_v2.control.durable_json import canonicalize_text
+
+        _, turn = self.create_thread_and_turn("do the task")
+        running = self.runtime.start_turn(turn.turn_id, turn.version)
+        interrupt_id = uuid4()
+        waiting = self.runtime.wait_for_input(
+            turn.turn_id,
+            "please paste sk-abc1234567890xyz here",
+            expected_version=running.version,
+            run_id=running.current_run_id,
+            interrupt_id=interrupt_id,
+        )
+        self.assertNotIn("sk-abc1234567890xyz", waiting.pending_interrupt.prompt)
+        self.assertIn("[REDACTED]", waiting.pending_interrupt.prompt)
+        queued = self.runtime.request_resume(
+            turn.turn_id,
+            expected_version=waiting.version,
+            interrupt_id=interrupt_id,
+            response="resume sk-abc1234567890xyz now",
+        )
+        self.assertNotIn("sk-abc1234567890xyz", queued.last_resume_response)
+        running = self.runtime.start_turn(turn.turn_id, queued.version)
+        completed = self.runtime.complete_turn(
+            turn.turn_id,
+            "done sk-abc1234567890xyz summary",
+            expected_version=running.version,
+            run_id=running.current_run_id,
+        )
+        self.assertNotIn("sk-abc1234567890xyz", completed.outcome)
+        self.assertIn("[REDACTED]", completed.outcome)
+        # terminal error path and operator reasons use the same policy.
+        _, failed_turn = self.create_thread_and_turn("task two")
+        running = self.runtime.start_turn(failed_turn.turn_id, failed_turn.version)
+        failed = self.runtime.fail_turn(
+            failed_turn.turn_id,
+            "failed with sk-abc1234567890xyz",
+            expected_version=running.version,
+            run_id=running.current_run_id,
+        )
+        self.assertIn("[REDACTED]", failed.error)
+        _, paused_turn = self.create_thread_and_turn("task three")
+        running = self.runtime.start_turn(paused_turn.turn_id, paused_turn.version)
+        paused = self.runtime.pause_turn(
+            paused_turn.turn_id,
+            expected_version=running.version,
+            reason="pause sk-abc1234567890xyz",
+            run_id=running.current_run_id,
+        )
+        pause_event = self.store.read_stream(StreamId("turn", paused_turn.turn_id))[-1]
+
+    def test_user_input_over_canonical_limit_is_rejected_content_free(self) -> None:
+        """A too-large user input never becomes an event."""
+        from koawa_agent_v2.control.durable_json import (
+            CanonicalTextError,
+            CanonicalTextPolicy,
+        )
+
+        runtime = ThreadRuntime(
+            self.store,
+            text_policy=CanonicalTextPolicy(user_input_max_utf8_bytes=1_024),
+        )
+        thread = runtime.create_thread("repo")
+        with self.assertRaises(CanonicalTextError):
+            runtime.create_turn(
+                thread.thread_id,
+                "x" * 2_048,
+                expected_thread_version=thread.version,
+            )
+        self.assertNotIn("turn.created.v1", {e.event_type for e in self.store.read_all()})
+
+    def test_idempotency_sqlite_canary_contains_no_original_user_text(self) -> None:
+        """The SQLite file holds canonical/redacted text, never the raw canary."""
+        canary = "sk-abc1234567890xyz"
+        thread = self.runtime.create_thread("repo")
+        queued = self.runtime.create_turn(
+            thread.thread_id,
+            "handle " + canary + " please",
+            expected_thread_version=thread.version,
+        )
+        running = self.runtime.start_turn(queued.turn_id, queued.version)
+        self.runtime.wait_for_input(
+            queued.turn_id,
+            "wait: " + canary,
+            expected_version=running.version,
+            run_id=running.current_run_id,
+        )
+        payload = self.database_path.read_bytes()
+        self.assertNotIn(canary.encode("utf-8"), payload)
+        self.assertIn(b"[REDACTED]", payload)
+
 if __name__ == "__main__":
     unittest.main()

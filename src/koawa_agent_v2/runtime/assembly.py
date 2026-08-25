@@ -17,6 +17,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..approval_service import ApprovalService
+from ..control.durable_json import CanonicalTextPolicy
 from ..control.runtime import ThreadRuntime
 from ..control.sqlite_store import SqliteEventStore
 from ..execution.loop import (
@@ -215,8 +216,12 @@ def assemble_runtime(
     if not config.repo.is_dir():
         raise RuntimeAssemblyError("repo_not_found")
     try:
-        store = SqliteEventStore(config.db)
-        runtime = ThreadRuntime(store, actor="p0-runtime")
+        store = SqliteEventStore(config.db, durable_limits=config.durable_limits)
+        runtime = ThreadRuntime(
+            store,
+            actor="p0-runtime",
+            text_policy=CanonicalTextPolicy.from_ingress(config.durable_limits),
+        )
         ledger = ToolLedgerStore(store)
         approvals = ApprovalService(
             store,
