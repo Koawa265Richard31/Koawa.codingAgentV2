@@ -349,10 +349,23 @@ class McpSession:
             self._notify_thread.join(timeout=self._shutdown_timeout_seconds)
 
     def _shutdown_transport(self) -> None:
+        """Terminal teardown for connect-failure paths.
+
+        Marks the session closed so the notification loop (which reads via
+        transport.read) exits: with a queue-backed transport the loop would
+        block harmlessly, but a fail-fast transport would otherwise spin at
+        full CPU for the rest of the process lifetime (observed in I1-D).
+        """
+        self._closed = True
         try:
             self._transport.close()
         except TransportError:
             pass
+        with self._pending_lock:
+            for pending in self._pending.values():
+                pending.error = McpSessionError("mcp_session_closed")
+                pending.event.set()
+            self._pending.clear()
         if self._notify_thread is not None:
             self._notify_thread.join(timeout=self._shutdown_timeout_seconds)
 
