@@ -1,7 +1,9 @@
 """Thread/Turn 的同步应用服务：校验命令，并把状态变化持久化为事件。"""
 
 from __future__ import annotations
+from koawa_agent_v2.telemetry.faults import FaultPoint
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
@@ -13,10 +15,12 @@ from .event_store import (
     EventStore,
     NewEvent,
     StreamId,
+    StreamPrecondition,
     StreamWrite,
     WrongExpectedVersion,
 )
 from .models import reduce_execution_seed
+from .run_effects import RunEffectIndex
 from .durable_json import (
     CanonicalText,
     CanonicalTextError,
@@ -24,7 +28,16 @@ from .durable_json import (
     canonicalize_text,
 )
 from .models import (
+    RUN_ABANDONED,
+    RUN_CANCELLED,
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RUN_INTERRUPTED,
+    RUN_OUTCOME_UNKNOWN,
+    RUN_STARTED,
+    RUN_TIMED_OUT,
     RESUMABLE_TURN_STATUSES,
+    CompletionEvidenceRef,
     TURN_RECOVERY_LEASE_CLAIMED,
     TURN_RECOVERY_LEASE_HEARTBEATED,
     TURN_RECOVERY_LEASE_RELEASED,
@@ -39,16 +52,22 @@ from .models import (
     TURN_FAILED,
     TURN_PAUSED,
     TURN_RECOVERY_QUEUED,
+    TURN_RUNTIME_OUTCOME_RESOLVED,
     TURN_STARTED,
     TURN_TIMED_OUT,
     TURN_WAITING_FOR_APPROVAL,
     TURN_WAITING_FOR_INPUT,
+    AggregateNotFound,
     InvalidTransition,
+    LegacyRunState,
+    RunState,
+    RunStatus,
     ThreadState,
     ThreadStatus,
     TurnState,
     TurnStatus,
     rebuild_thread,
+    rebuild_run,
     rebuild_turn,
 )
 
@@ -66,6 +85,7 @@ class ThreadRuntime:
         *,
         actor: str = "runtime",
         text_policy: CanonicalTextPolicy | None = None,
+        fault_port: object | None = None,
     ) -> None:
         """注入事件存储，并设置写入事件元数据的审计主体。
 
@@ -82,6 +102,13 @@ class ThreadRuntime:
             raise TypeError("text_policy must be CanonicalTextPolicy or None")
         self._store = store
         self._actor = actor
+        if fault_port is None:
+            from ..telemetry.faults import NO_OP_FAULT_PORT
+
+            fault_port = NO_OP_FAULT_PORT
+        if not callable(getattr(fault_port, "hit", None)):
+            raise TypeError("fault_port must implement FaultPort")
+        self._fault_port = fault_port
         self._text_policy = text_policy or CanonicalTextPolicy()
 
     def create_thread(
@@ -322,17 +349,6 @@ class ThreadRuntime:
         turn = self._get_turn_at_version(resolved_turn_id, expected_version)
         if turn.status is not TurnStatus.QUEUED:
             raise InvalidTransition(f"cannot start a turn in {turn.status.value}")
-        if not durable_start:
-            return self._append_turn_event(
-                turn,
-                resolved_command_id,
-                fingerprint,
-                TURN_STARTED,
-                {"run_id": str(resolved_run_id), "attempt": turn.attempt + 1},
-                event_slot="turn-started",
-                run_id=resolved_run_id,
-            )
-
         occurred_at = _now()
         started = self._event(
             event_type=TURN_STARTED,
@@ -349,6 +365,38 @@ class ThreadRuntime:
             turn_id=turn.turn_id,
             run_id=resolved_run_id,
         )
+        run_started = self._event(
+            event_type=RUN_STARTED,
+            payload={
+                "run_id": str(resolved_run_id),
+                "thread_id": str(turn.thread_id),
+                "turn_id": str(turn.turn_id),
+                "attempt": turn.attempt + 1,
+                "turn_stream_version": turn.version + 1,
+            },
+            occurred_at=occurred_at,
+            command_id=resolved_command_id,
+            event_slot="run-started",
+            thread_id=turn.thread_id,
+            turn_id=turn.turn_id,
+            run_id=resolved_run_id,
+        )
+        writes = [
+            StreamWrite(
+                stream_id=_turn_stream(turn.turn_id),
+                expected_version=turn.version,
+                events=(started,),
+            ),
+            StreamWrite(
+                stream_id=_run_stream(resolved_run_id),
+                expected_version=-1,
+                events=(run_started,),
+            ),
+        ]
+        if not durable_start:
+            receipt = self._append(resolved_command_id, fingerprint, *writes)
+            return self._turn_from_receipt(turn.turn_id, receipt)
+
         assert execution_seed is not None
         seed_document = execution_seed.with_identity(
             thread_id=turn.thread_id,
@@ -372,20 +420,14 @@ class ThreadRuntime:
             turn_id=turn.turn_id,
             run_id=resolved_run_id,
         )
-        receipt = self._append(
-            resolved_command_id,
-            fingerprint,
-            StreamWrite(
-                stream_id=_turn_stream(turn.turn_id),
-                expected_version=turn.version,
-                events=(started,),
-            ),
+        writes.append(
             StreamWrite(
                 stream_id=_execution_stream(turn.turn_id),
                 expected_version=execution_expected_version,
                 events=(seeded,),
-            ),
+            )
         )
+        receipt = self._append(resolved_command_id, fingerprint, *writes)
         return self._turn_from_receipt(turn.turn_id, receipt)
 
     def claim_recovery_run(
@@ -422,9 +464,12 @@ class ThreadRuntime:
             },
         )
         if receipt := self._committed_receipt(
-            resolved_command_id, fingerprint, _turn_stream(resolved_turn_id)
+            resolved_command_id, fingerprint, _lease_stream(resolved_turn_id)
         ):
-            return self._turn_from_receipt(resolved_turn_id, receipt)
+            return self._get_turn_at_version(resolved_turn_id, expected_version)
+        head = self._lease_head(resolved_turn_id)
+        if head is not None and head[1] != "turn.recovery-lease-released.v1":
+            raise InvalidTransition("recovery run lease is still active")
         turn = self._get_turn_at_version(resolved_turn_id, expected_version)
         if turn.status is not TurnStatus.RUNNING:
             raise InvalidTransition(f"cannot claim a lease in {turn.status.value}")
@@ -451,16 +496,18 @@ class ThreadRuntime:
             turn_id=turn.turn_id,
             run_id=claim_run_id,
         )
-        receipt = self._append(
+        lease_version = self._lease_head(resolved_turn_id)[0] if self._lease_head(resolved_turn_id) is not None else -1
+        self._append(
             resolved_command_id,
             fingerprint,
             StreamWrite(
-                stream_id=_turn_stream(turn.turn_id),
-                expected_version=turn.version,
+                stream_id=_lease_stream(turn.turn_id),
+                expected_version=lease_version,
                 events=(event,),
             ),
         )
-        return self._turn_from_receipt(turn.turn_id, receipt)
+        # The typed-lease command leaves the Turn stream unchanged.
+        return self._get_turn_at_version(resolved_turn_id, expected_version)
 
     def heartbeat_recovery_run(
         self,
@@ -498,15 +545,13 @@ class ThreadRuntime:
             },
         )
         if receipt := self._committed_receipt(
-            resolved_command_id, fingerprint, _turn_stream(resolved_turn_id)
+            resolved_command_id, fingerprint, _lease_stream(resolved_turn_id)
         ):
             return self._turn_from_receipt(resolved_turn_id, receipt)
+        self._require_lease_fence(resolved_turn_id, resolved_run_id, resolved_token)
         turn = self._get_turn_at_version(resolved_turn_id, expected_version)
         if turn.status is not TurnStatus.RUNNING:
             raise InvalidTransition(f"cannot heartbeat a lease in {turn.status.value}")
-        if turn.recovery_claim_token != resolved_token:
-            raise InvalidTransition("recovery lease heartbeat token mismatch")
-            raise InvalidTransition("recovery lease heartbeat token mismatch")
         expires_at = self._store.database_time() + timedelta(seconds=lease_seconds)
         event = self._event(
             event_type=TURN_RECOVERY_LEASE_HEARTBEATED,
@@ -532,12 +577,17 @@ class ThreadRuntime:
             resolved_command_id,
             fingerprint,
             StreamWrite(
-                stream_id=_turn_stream(turn.turn_id),
-                expected_version=turn.version,
+                stream_id=_lease_stream(turn.turn_id),
+                expected_version=(
+                    self._lease_head(resolved_turn_id)[0]
+                    if self._lease_head(resolved_turn_id) is not None
+                    else -1
+                ),
                 events=(event,),
             ),
         )
-        return self._turn_from_receipt(turn.turn_id, receipt)
+        # The typed-lease command leaves the Turn stream unchanged.
+        return self._get_turn_at_version(resolved_turn_id, expected_version)
 
     def release_recovery_run(
         self,
@@ -569,15 +619,13 @@ class ThreadRuntime:
             },
         )
         if receipt := self._committed_receipt(
-            resolved_command_id, fingerprint, _turn_stream(resolved_turn_id)
+            resolved_command_id, fingerprint, _lease_stream(resolved_turn_id)
         ):
             return self._turn_from_receipt(resolved_turn_id, receipt)
+        self._require_lease_fence(resolved_turn_id, resolved_run_id, resolved_token)
         turn = self._get_turn_at_version(resolved_turn_id, expected_version)
         if turn.status is not TurnStatus.RUNNING:
             raise InvalidTransition(f"cannot release a lease in {turn.status.value}")
-        if turn.recovery_claim_token != resolved_token:
-            raise InvalidTransition("recovery lease release token mismatch")
-            raise InvalidTransition("recovery lease release token mismatch")
         event = self._event(
             event_type=TURN_RECOVERY_LEASE_RELEASED,
             payload={
@@ -602,12 +650,88 @@ class ThreadRuntime:
             resolved_command_id,
             fingerprint,
             StreamWrite(
-                stream_id=_turn_stream(turn.turn_id),
-                expected_version=turn.version,
+                stream_id=_lease_stream(turn.turn_id),
+                expected_version=(
+                    self._lease_head(resolved_turn_id)[0]
+                    if self._lease_head(resolved_turn_id) is not None
+                    else -1
+                ),
                 events=(event,),
             ),
         )
-        return self._turn_from_receipt(turn.turn_id, receipt)
+        # The typed-lease command leaves the Turn stream unchanged.
+        return self._get_turn_at_version(resolved_turn_id, expected_version)
+
+    def _lease_head(self, turn_id: UUID):
+        # Head (version, event_type, run_id, claim_token) of the typed-lease stream.
+        cursor = -1
+        head = None
+        while True:
+            page = self._store.read_stream(
+                _lease_stream(turn_id), after_version=cursor, limit=500
+            )
+            if not page:
+                break
+            head = page[-1]
+            cursor = head.stream_version
+            if len(page) < 500:
+                break
+        if head is None:
+            return None
+        payload = head.payload if isinstance(head.payload, Mapping) else {}
+        raw_run = payload.get("run_id")
+        raw_token = payload.get("claim_token")
+        run_value = str(raw_run) if raw_run is not None else None
+        token_value = None if raw_token is None else _as_uuid(raw_token, "claim_token")
+        expiry_value = payload.get("lease_expires_at")
+        return (
+            head.stream_version,
+            head.event_type,
+            run_value,
+            token_value,
+            expiry_value if isinstance(expiry_value, str) else None,
+        )
+
+    def _require_lease_fence(
+        self,
+        turn_id: UUID,
+        run_id: UUID,
+        claim_token: UUID | None,
+    ) -> None:
+        # Heartbeat/release must reuse the active claimed run and token; a
+        # released lease invalidates any later heartbeat/release.
+        head = self._lease_head(turn_id)
+        if head is None:
+            if claim_token is not None:
+                raise InvalidTransition("recovery lease token mismatch")
+            return
+        _head_version, head_type, head_run, head_token, _head_expiry = head
+        if head_type == "turn.recovery-lease-released.v1":
+            raise InvalidTransition("recovery run lease was released")
+        if head_run != str(run_id) or head_token != claim_token:
+            raise InvalidTransition("recovery lease token mismatch")
+
+    def _live_recovery_claim(self, turn_id: UUID) -> bool:
+        # A live recovery-lease overlay fences D1 terminal commands: while a
+        # recovery process owns the run, the old worker cannot terminalize.
+        from datetime import timezone as _tz
+
+        head = self._lease_head(turn_id)
+        if head is None:
+            return False
+        _version, head_type, _run, claim_token, expiry = head
+        if head_type not in ("turn.recovery-lease-claimed.v1", "turn.recovery-lease-heartbeated.v1"):
+            return False
+        # A real recovery claim carries a token; the D1 keeper heartbeats do
+        # not, and must never fence the ordinary D1 terminalization.
+        if claim_token is None:
+            return False
+        if not isinstance(expiry, str):
+            return False
+        parsed = datetime.fromisoformat(expiry)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_tz.utc)
+        return parsed.astimezone(_tz.utc) > self._store.database_time()
 
     def requeue_stale_run(
         self,
@@ -654,6 +778,8 @@ class ThreadRuntime:
             },
             event_slot="turn-stale-run-requeued",
             run_id=resolved_run_id,
+            run_terminal_event_type=RUN_ABANDONED,
+            run_detail="lease_expired",
         )
     def wait_for_input(
         self,
@@ -753,6 +879,10 @@ class ThreadRuntime:
             {"reason": canonical_reason.value},
             event_slot="turn-paused",
             run_id=resolved_run_id,
+            run_terminal_event_type=(
+                RUN_INTERRUPTED if resolved_run_id is not None else None
+            ),
+            run_detail=canonical_reason.value,
         )
 
     def request_resume(
@@ -809,6 +939,12 @@ class ThreadRuntime:
         turn = self._get_turn_at_version(resolved_turn_id, expected_version)
         if turn.status not in RESUMABLE_TURN_STATUSES:
             raise InvalidTransition(f"cannot resume a turn in {turn.status.value}")
+        if turn.status is TurnStatus.PAUSED and turn.current_run_id is not None:
+            run = self.get_run(turn.current_run_id)
+            if isinstance(run, RunState) and run.status is RunStatus.OUTCOME_UNKNOWN:
+                raise InvalidTransition(
+                    "runtime outcome requires typed evidence resolution"
+                )
         if (
             turn.pending_interrupt is not None
             and turn.pending_interrupt.approval_request_id is not None
@@ -856,6 +992,76 @@ class ThreadRuntime:
             run_id=turn.current_run_id,
         )
 
+    def resolve_runtime_outcome(
+        self,
+        turn_id: UUID | str,
+        *,
+        expected_version: int,
+        run_id: UUID | str,
+        evidence_kind: str,
+        evidence_digest: str,
+        reconciler: str,
+        command_id: UUID | str | None = None,
+    ) -> TurnState:
+        """Queue a PAUSED Turn only after its uncertain Run effects reconcile."""
+        resolved_turn_id = _as_uuid(turn_id, "turn_id")
+        resolved_run_id = _as_uuid(run_id, "run_id")
+        expected_version = _expected_version(expected_version)
+        if evidence_kind not in {
+            "effect_reconciliation", "authoritative_postcondition"
+        }:
+            raise ValueError("invalid runtime outcome resolution evidence")
+        if (
+            not isinstance(evidence_digest, str)
+            or len(evidence_digest) != 64
+            or any(c not in "0123456789abcdef" for c in evidence_digest)
+        ):
+            raise ValueError("evidence_digest must be 64 lowercase hex characters")
+        if not isinstance(reconciler, str) or not reconciler.strip() or len(reconciler) > 256:
+            raise ValueError("reconciler must be bounded non-empty text")
+        resolved_command_id = _optional_uuid(command_id) or uuid5(
+            resolved_run_id, f"runtime-outcome-resolution:{evidence_digest}"
+        )
+        fingerprint = self._fingerprint(
+            "resolve_runtime_outcome",
+            {
+                "turn_id": resolved_turn_id,
+                "expected_version": expected_version,
+                "run_id": resolved_run_id,
+                "evidence_kind": evidence_kind,
+                "evidence_digest": evidence_digest,
+                "reconciler": reconciler,
+            },
+        )
+        if receipt := self._committed_receipt(
+            resolved_command_id, fingerprint, _turn_stream(resolved_turn_id)
+        ):
+            return self._turn_from_receipt(resolved_turn_id, receipt)
+        turn = self._get_turn_at_version(resolved_turn_id, expected_version)
+        if turn.status is not TurnStatus.PAUSED or turn.current_run_id != resolved_run_id:
+            raise InvalidTransition("turn is not paused for this uncertain run")
+        run = self.get_run(resolved_run_id)
+        if not isinstance(run, RunState) or run.status is not RunStatus.OUTCOME_UNKNOWN:
+            raise InvalidTransition("run outcome is not unknown")
+        inspection = RunEffectIndex(self._store).inspect(resolved_run_id)
+        if not inspection.terminal_safe:
+            raise InvalidTransition("run effects are not authoritatively resolved")
+        return self._append_turn_event(
+            turn,
+            resolved_command_id,
+            fingerprint,
+            TURN_RUNTIME_OUTCOME_RESOLVED,
+            {
+                "run_id": str(resolved_run_id),
+                "evidence_kind": evidence_kind,
+                "evidence_digest": evidence_digest,
+                "reconciler": reconciler,
+            },
+            event_slot="turn-runtime-outcome-resolved",
+            run_id=resolved_run_id,
+            preconditions=inspection.preconditions,
+        )
+
     def complete_turn(
         self,
         turn_id: UUID | str,
@@ -863,6 +1069,7 @@ class ThreadRuntime:
         *,
         expected_version: int,
         run_id: UUID | str,
+        evidence_ref: CompletionEvidenceRef | None = None,
         command_id: UUID | str | None = None,
     ) -> TurnState:
         """由当前合法 Worker 完成 Turn，并在同一事务中释放 Thread。"""
@@ -875,6 +1082,7 @@ class ThreadRuntime:
             command_id=command_id,
             terminal_status=TurnStatus.COMPLETED,
             event_type=TURN_COMPLETED,
+            evidence_ref=evidence_ref,
         )
 
     def fail_turn(
@@ -896,6 +1104,7 @@ class ThreadRuntime:
             command_id=command_id,
             terminal_status=TurnStatus.FAILED,
             event_type=TURN_FAILED,
+            evidence_ref=None,
         )
 
     def cancel_turn(
@@ -1004,6 +1213,126 @@ class ThreadRuntime:
             self._read_stream(_turn_stream(resolved_turn_id)),
         )
 
+    def get_run(self, run_id: UUID | str) -> RunState | LegacyRunState:
+        """Read explicit Run truth, or synthesize a read-only legacy view."""
+
+        resolved_run_id = _as_uuid(run_id, "run_id")
+        events = self._read_stream(_run_stream(resolved_run_id))
+        if events:
+            return rebuild_run(resolved_run_id, events)
+        return self._legacy_run(resolved_run_id)
+
+    def record_completion_evidence(
+        self,
+        turn_id: UUID | str,
+        *,
+        run_id: UUID | str,
+        final_text: str,
+        command_id: UUID | str | None = None,
+    ) -> CompletionEvidenceRef:
+        """Persist the exact final output fact before terminalizing a Run."""
+        resolved_turn_id = _as_uuid(turn_id, "turn_id")
+        resolved_run_id = _as_uuid(run_id, "run_id")
+        run = self.get_run(resolved_run_id)
+        if isinstance(run, LegacyRunState) or run.status is not RunStatus.RUNNING:
+            raise InvalidTransition("completion evidence requires an explicit running Run")
+        if run.turn_id != resolved_turn_id:
+            raise InvalidTransition("completion evidence run mismatch")
+        canonical = self._canonical_required(
+            final_text, self._text_policy.terminal_text_max_utf8_bytes, "final_text"
+        )
+        digest = hashlib.sha256(canonical.value.encode("utf-8", "strict")).hexdigest()
+        resolved_command_id = _optional_uuid(command_id) or uuid5(
+            resolved_run_id, f"completion-evidence:{digest}"
+        )
+        stream = StreamId("run-evidence", resolved_run_id)
+        fingerprint = self._fingerprint(
+            "record_completion_evidence",
+            {"turn_id": resolved_turn_id, "run_id": resolved_run_id,
+             "evidence_digest": digest},
+        )
+        if receipt := self._store.read_idempotency(
+            resolved_command_id, request_fingerprint=fingerprint
+        ):
+            version = _receipt_version(receipt, stream)
+            event = self._read_stream(stream, through_version=version)[-1]
+            return CompletionEvidenceRef(stream, version, event.event_id, digest)
+        event = self._event(
+            event_type="run.final-output-recorded.v1",
+            payload={"run_id": str(resolved_run_id), "turn_id": str(resolved_turn_id),
+                     "evidence_digest": digest},
+            occurred_at=_now(), command_id=resolved_command_id,
+            event_slot="run-final-output-recorded", thread_id=run.thread_id,
+            turn_id=resolved_turn_id, run_id=resolved_run_id,
+        )
+        receipt = self._append(
+            resolved_command_id, fingerprint,
+            StreamWrite(stream, -1, (event,)),
+        )
+        return CompletionEvidenceRef(stream, _receipt_version(receipt, stream), event.event_id, digest)
+
+    def _legacy_run(self, run_id: UUID) -> LegacyRunState:
+        started = None
+        cursor = 0
+        while True:
+            page = self._store.read_all(after_position=cursor, limit=500)
+            for event in page:
+                if (
+                    event.event_type == TURN_STARTED
+                    and event.payload.get("run_id") == str(run_id)
+                ):
+                    started = event
+                    break
+            if started is not None or len(page) < 500:
+                break
+            cursor = page[-1].global_position
+        if started is None or started.metadata.turn_id is None:
+            raise AggregateNotFound(f"run {run_id} does not exist")
+
+        turn_id = started.metadata.turn_id
+        turn = self.get_turn(turn_id)
+        thread_id = started.metadata.thread_id or turn.thread_id
+        status = RunStatus.RUNNING
+        detail = None
+        updated_at = started.occurred_at
+        closure_types = {
+            TURN_WAITING_FOR_INPUT: RunStatus.INTERRUPTED,
+            TURN_WAITING_FOR_APPROVAL: RunStatus.INTERRUPTED,
+            TURN_PAUSED: RunStatus.INTERRUPTED,
+            TURN_STALE_RUN_REQUEUED: RunStatus.ABANDONED,
+            TURN_COMPLETED: RunStatus.COMPLETED,
+            TURN_FAILED: RunStatus.FAILED,
+            TURN_CANCELLED: RunStatus.CANCELLED,
+            TURN_TIMED_OUT: RunStatus.TIMED_OUT,
+        }
+        for event in self._read_stream(
+            _turn_stream(turn_id), through_version=turn.version
+        ):
+            if event.stream_version <= started.stream_version:
+                continue
+            if event.event_type == TURN_STARTED:
+                break
+            closed = closure_types.get(event.event_type)
+            if closed is not None:
+                status = closed
+                detail = (
+                    event.payload.get("summary")
+                    or event.payload.get("error")
+                    or event.payload.get("reason")
+                )
+                updated_at = event.occurred_at
+                break
+        return LegacyRunState(
+            run_id=run_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            attempt=int(started.payload["attempt"]),
+            status=status,
+            created_at=started.occurred_at,
+            updated_at=updated_at,
+            detail=detail,
+        )
+
     def _read_stream(
         self,
         stream_id: StreamId,
@@ -1108,6 +1437,8 @@ class ThreadRuntime:
             event_payload,
             event_slot=action.replace("_", "-"),
             run_id=resolved_run_id,
+            run_terminal_event_type=RUN_INTERRUPTED,
+            run_detail=event_type,
         )
 
     def _worker_terminate(
@@ -1121,6 +1452,7 @@ class ThreadRuntime:
         command_id: UUID | str | None,
         terminal_status: TurnStatus,
         event_type: str,
+        evidence_ref: CompletionEvidenceRef | None,
     ) -> TurnState:
         """Worker 终止路径：只允许当前 RUNNING 且 run_id 匹配的执行者。"""
         resolved_turn_id = _as_uuid(turn_id, "turn_id")
@@ -1140,6 +1472,15 @@ class ThreadRuntime:
                 "expected_version": expected_version,
                 "run_id": resolved_run_id,
                 value_name: canonical_value.value,
+                "evidence_ref": (
+                    None if evidence_ref is None else {
+                        "stream_kind": evidence_ref.stream_id.category,
+                        "stream_id": str(evidence_ref.stream_id.aggregate_id),
+                        "stream_version": evidence_ref.stream_version,
+                        "event_id": str(evidence_ref.event_id),
+                        "evidence_digest": evidence_ref.evidence_digest,
+                    }
+                ),
                 **_canonical_args(canonical_value),
             },
         )
@@ -1155,7 +1496,23 @@ class ThreadRuntime:
             raise InvalidTransition(
                 f"cannot {terminal_status.value} a turn in {turn.status.value}"
             )
+        if self._live_recovery_claim(resolved_turn_id):
+            raise InvalidTransition("recovery run lease is still active")
         _check_run(turn, resolved_run_id)
+        effect_inspection = RunEffectIndex(self._store).inspect(resolved_run_id)
+        if not effect_inspection.terminal_safe:
+            return self._append_turn_event(
+                turn,
+                resolved_command_id,
+                fingerprint,
+                TURN_PAUSED,
+                {"reason": "open_run_effects"},
+                event_slot="turn-runtime-outcome-unknown",
+                run_id=resolved_run_id,
+                run_terminal_event_type=RUN_OUTCOME_UNKNOWN,
+                run_detail="open_run_effects",
+                preconditions=effect_inspection.preconditions,
+            )
         return self._terminate_turn(
             turn,
             resolved_command_id,
@@ -1164,6 +1521,8 @@ class ThreadRuntime:
             event_type,
             {value_name: canonical_value.value},
             event_run_id=resolved_run_id,
+            evidence_ref=evidence_ref,
+            effect_preconditions=effect_inspection.preconditions,
         )
 
     def _operator_terminate(
@@ -1206,6 +1565,23 @@ class ThreadRuntime:
             raise InvalidTransition(
                 f"cannot {terminal_status.value} a turn in {turn.status.value}"
             )
+        effect_preconditions: tuple[StreamPrecondition, ...] = ()
+        if turn.status is TurnStatus.RUNNING and turn.current_run_id is not None:
+            effect_inspection = RunEffectIndex(self._store).inspect(turn.current_run_id)
+            if not effect_inspection.terminal_safe:
+                return self._append_turn_event(
+                    turn,
+                    resolved_command_id,
+                    fingerprint,
+                    TURN_PAUSED,
+                    {"reason": "open_run_effects"},
+                    event_slot="turn-runtime-outcome-unknown",
+                    run_id=turn.current_run_id,
+                    run_terminal_event_type=RUN_OUTCOME_UNKNOWN,
+                    run_detail="open_run_effects",
+                    preconditions=effect_inspection.preconditions,
+                )
+            effect_preconditions = effect_inspection.preconditions
         return self._terminate_turn(
             turn,
             resolved_command_id,
@@ -1213,7 +1589,11 @@ class ThreadRuntime:
             terminal_status,
             event_type,
             {"reason": canonical_reason.value},
-            event_run_id=None,
+            event_run_id=(
+                turn.current_run_id if turn.status is TurnStatus.RUNNING else None
+            ),
+            evidence_ref=None,
+            effect_preconditions=effect_preconditions,
         )
 
     def _terminate_turn(
@@ -1226,6 +1606,8 @@ class ThreadRuntime:
         payload: Mapping[str, Any],
         *,
         event_run_id: UUID | None,
+        evidence_ref: CompletionEvidenceRef | None,
+        effect_preconditions: tuple[StreamPrecondition, ...] = (),
     ) -> TurnState:
         """原子写入 Turn 终态事件与 Thread 脱离事件。
 
@@ -1261,11 +1643,7 @@ class ThreadRuntime:
             turn_id=turn.turn_id,
             run_id=event_run_id,
         )
-        # EventStore 会先同时核对两条流的 expected_version；任意一条过期，整个
-        # batch 回滚，从而维持“Turn 终止 ⇔ Thread 已释放”的跨聚合不变量。
-        receipt = self._append(
-            command_id,
-            fingerprint,
+        writes = [
             StreamWrite(
                 stream_id=_turn_stream(turn.turn_id),
                 expected_version=turn.version,
@@ -1276,6 +1654,84 @@ class ThreadRuntime:
                 expected_version=thread.version,
                 events=(detached_event,),
             ),
+        ]
+        preconditions: tuple[StreamPrecondition, ...] = effect_preconditions
+        if terminal_status is TurnStatus.COMPLETED and evidence_ref is not None:
+            if event_run_id is None:
+                raise InvalidTransition("completion evidence requires a run")
+            if evidence_ref.stream_id != StreamId("run-evidence", event_run_id):
+                raise InvalidTransition("completion evidence stream mismatch")
+            preconditions = preconditions + (
+                StreamPrecondition(
+                    evidence_ref.stream_id,
+                    evidence_ref.stream_version,
+                    required_event_type="run.final-output-recorded.v1",
+                    required_payload={
+                        "run_id": str(event_run_id),
+                        "turn_id": str(turn.turn_id),
+                        "evidence_digest": evidence_ref.evidence_digest,
+                    },
+                ),
+            )
+        if event_run_id is not None:
+            run = self._get_explicit_running_run(event_run_id, turn)
+            run_event_type = {
+                TurnStatus.COMPLETED: RUN_COMPLETED,
+                TurnStatus.FAILED: RUN_FAILED,
+                TurnStatus.CANCELLED: RUN_CANCELLED,
+                TurnStatus.TIMED_OUT: RUN_TIMED_OUT,
+            }[terminal_status]
+            detail = next(iter(payload.values()), None)
+            run_event = self._event(
+                event_type=run_event_type,
+                payload={
+                    "run_id": str(event_run_id),
+                    "thread_id": str(turn.thread_id),
+                    "turn_id": str(turn.turn_id),
+                    "detail": detail,
+                    **(
+                        {} if evidence_ref is None else {
+                            "completion_evidence": {
+                                "stream_kind": evidence_ref.stream_id.category,
+                                "stream_id": str(evidence_ref.stream_id.aggregate_id),
+                                "stream_version": evidence_ref.stream_version,
+                                "event_id": str(evidence_ref.event_id),
+                                "evidence_digest": evidence_ref.evidence_digest,
+                            }
+                        }
+                    ),
+                },
+                occurred_at=occurred_at,
+                command_id=command_id,
+                event_slot=run_event_type.removesuffix(".v1"),
+                thread_id=turn.thread_id,
+                turn_id=turn.turn_id,
+                run_id=event_run_id,
+            )
+            writes.append(
+                StreamWrite(
+                    stream_id=_run_stream(event_run_id),
+                    expected_version=run.version,
+                    events=(run_event,),
+                )
+            )
+        # All authoritative streams are checked before any write is committed.
+        self._fault_port.hit(
+            FaultPoint.S5_RUN_BEFORE_TERMINAL_APPEND,
+            {"turn_id": str(turn.turn_id), "run_id": (
+                None if event_run_id is None else str(event_run_id)
+            ),
+             "turn_version": turn.version},
+        )
+        receipt = self._append(
+            command_id, fingerprint, *writes, preconditions=preconditions
+        )
+        self._fault_port.hit(
+            FaultPoint.S5_RUN_AFTER_TERMINAL_COMMIT,
+            {"turn_id": str(turn.turn_id), "run_id": (
+                None if event_run_id is None else str(event_run_id)
+            ),
+             "turn_version": turn.version},
         )
         return self._turn_from_receipt(turn.turn_id, receipt)
 
@@ -1289,28 +1745,83 @@ class ThreadRuntime:
         *,
         event_slot: str,
         run_id: UUID | None,
+        run_terminal_event_type: str | None = None,
+        run_detail: str | None = None,
+        preconditions: tuple[StreamPrecondition, ...] = (),
     ) -> TurnState:
-        """追加一个仅影响 Turn 的事件，并按回执版本重建该命令的结果。"""
+        """Append a Turn fact and, when requested, close its Run atomically."""
+        occurred_at = _now()
         event = self._event(
             event_type=event_type,
             payload=payload,
-            occurred_at=_now(),
+            occurred_at=occurred_at,
             command_id=command_id,
             event_slot=event_slot,
             thread_id=turn.thread_id,
             turn_id=turn.turn_id,
             run_id=run_id,
         )
-        receipt = self._append(
-            command_id,
-            fingerprint,
+        writes = [
             StreamWrite(
                 stream_id=_turn_stream(turn.turn_id),
                 expected_version=turn.version,
                 events=(event,),
-            ),
+            )
+        ]
+        if run_terminal_event_type is not None:
+            if run_id is None:
+                raise InvalidTransition("a run terminal event requires run_id")
+            run = self._get_explicit_running_run(run_id, turn)
+            run_event = self._event(
+                event_type=run_terminal_event_type,
+                payload={
+                    "run_id": str(run_id),
+                    "thread_id": str(turn.thread_id),
+                    "turn_id": str(turn.turn_id),
+                    "detail": run_detail,
+                },
+                occurred_at=occurred_at,
+                command_id=command_id,
+                event_slot=run_terminal_event_type.removesuffix(".v1"),
+                thread_id=turn.thread_id,
+                turn_id=turn.turn_id,
+                run_id=run_id,
+            )
+            writes.append(
+                StreamWrite(
+                    stream_id=_run_stream(run_id),
+                    expected_version=run.version,
+                    events=(run_event,),
+                )
+            )
+            self._fault_port.hit(
+                FaultPoint.S5_RUN_BEFORE_TERMINAL_APPEND,
+                {"turn_id": str(turn.turn_id), "run_id": str(run_id),
+                 "turn_version": turn.version},
+            )
+        receipt = self._append(
+            command_id, fingerprint, *writes, preconditions=preconditions
         )
+        if run_terminal_event_type is not None:
+            self._fault_port.hit(
+                FaultPoint.S5_RUN_AFTER_TERMINAL_COMMIT,
+                {"turn_id": str(turn.turn_id), "run_id": str(run_id),
+                 "turn_version": turn.version},
+            )
         return self._turn_from_receipt(turn.turn_id, receipt)
+
+    def _get_explicit_running_run(self, run_id: UUID, turn: TurnState) -> RunState:
+        run = self.get_run(run_id)
+        if isinstance(run, LegacyRunState):
+            raise InvalidTransition("legacy_active_run_restart_required")
+        if (
+            run.status is not RunStatus.RUNNING
+            or run.turn_id != turn.turn_id
+            or run.thread_id != turn.thread_id
+            or run.attempt != turn.attempt
+        ):
+            raise InvalidTransition("run truth does not match the active Turn")
+        return run
 
     def _get_turn_at_version(self, turn_id: UUID, expected_version: int) -> TurnState:
         """重建 Turn 并执行精确版本校验，拒绝基于旧快照作出的命令。"""
@@ -1434,13 +1945,21 @@ class ThreadRuntime:
         command_id: UUID,
         fingerprint: str,
         *writes: StreamWrite,
+        preconditions: tuple[StreamPrecondition, ...] = (),
     ) -> AppendReceipt:
         """把一个命令产生的一个或多个流写入作为原子批次交给 EventStore。"""
         return self._store.append_batch(
             writes,
             idempotency_key=command_id,
             request_fingerprint=fingerprint,
+            preconditions=preconditions,
         )
+
+
+def _lease_stream(turn_id: UUID) -> StreamId:
+    # Dedicated typed-lease stream: keep the Turn stream stable during a run
+    # so D7/D9 tool fences and terminal commands never see stale versions.
+    return StreamId("recovery-lease", turn_id)
 
 
 def _thread_stream(thread_id: UUID) -> StreamId:
@@ -1451,6 +1970,12 @@ def _thread_stream(thread_id: UUID) -> StreamId:
 def _turn_stream(turn_id: UUID) -> StreamId:
     """把 Turn 聚合 ID 映射成稳定的事件流 ID。"""
     return StreamId("turn", turn_id)
+
+
+def _run_stream(run_id: UUID) -> StreamId:
+    """Map an execution attempt to its independent authoritative stream."""
+
+    return StreamId("run", run_id)
 
 
 def _execution_stream(turn_id: UUID) -> StreamId:

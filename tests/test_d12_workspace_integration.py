@@ -41,6 +41,7 @@ def _make_repo(root: Path) -> Path:
     _git(repo, "init", "-b", "main")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "test")
+    _git(repo, "config", "core.autocrlf", "false")
     (repo / "a.txt").write_text("alpha\n", encoding="utf-8")
     (repo / "b.txt").write_text("beta\n", encoding="utf-8")
     _git(repo, "add", ".")
@@ -90,7 +91,7 @@ class D12WorkspaceIntegrationTest(unittest.TestCase):
         )
         self.assertTrue(path.exists())
         self.assertTrue(str(path.resolve()).startswith(str(self.managed.resolve())))
-        record = self.store.reap(agent_id, run_id=run_id, reason="test")
+        record = self.manager.reap(agent_id, run_id=run_id, reason="test")
         self.assertEqual("reaped", record.state)
         self.assertFalse(path.exists())
 

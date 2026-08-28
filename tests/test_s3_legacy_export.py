@@ -24,6 +24,7 @@ from koawa_agent_v2.runtime.store_migration import (
     export_legacy_store,
 )
 from tests.fixtures.legacy_builder import build_legacy_database
+from tests.fixtures.stability_s3_faults import media_snapshot
 
 CANARY = "sk-legacy-RAW-SECRET-3f9a"
 
@@ -82,6 +83,31 @@ class LegacyExportTest(unittest.TestCase):
         self.assertNotIn(CANARY, str(snapshot))
         self.assertTrue(snapshot["outcome"].startswith("finished with"))
         self.assertIn("REDACTED", snapshot["outcome"])
+
+    def test_committed_wal_is_read_without_changing_source_db_wal_or_shm(self):
+        import json
+
+        source = self.directory / "legacy-wal.db"
+        build_legacy_database(source, canary=CANARY)
+        keeper = sqlite3.connect(source, isolation_level=None)
+        try:
+            self.assertEqual("wal", keeper.execute("PRAGMA journal_mode=WAL").fetchone()[0])
+            keeper.execute("PRAGMA wal_autocheckpoint=0")
+            keeper.execute(
+                "UPDATE events SET payload_json=? WHERE event_type=?",
+                (json.dumps({"summary": "wal-only-result " + CANARY}), "turn.completed.v1"),
+            )
+            before = media_snapshot(source)
+            self.assertIsNotNone(before["-wal"])
+            self.assertIsNotNone(before["-shm"])
+            destination = self.directory / "fresh-wal.db"
+            export_legacy_store(source, destination, canaries=[CANARY])
+            self.assertEqual(before, media_snapshot(source))
+            events = SqliteEventStore(destination).read_all()
+            self.assertTrue(events[1].payload["outcome"].startswith("wal-only-result"))
+            self.assertNotIn(CANARY, events[1].payload["outcome"])
+        finally:
+            keeper.close()
 
     def test_active_run_becomes_requires_manual_restart(self):
         source = self.directory / "legacy.db"
@@ -171,5 +197,4 @@ class LegacyExportTest(unittest.TestCase):
                 self.assertTrue(source.exists())
                 leftover = [path for path in self.directory.glob(".partial-*")]
                 self.assertEqual(leftover, [])
-
 

@@ -35,13 +35,26 @@ _CONFIG_ERROR = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _PROFILE_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
 _MCP_SERVER_ID = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# §8.3: loader / code-injection environment variables are hard-denied for
+# every MCP server config (compared casefolded on every platform).
+_MCP_INJECTION_ENV_CASEFOLD = frozenset({
+    name.casefold()
+    for name in (
+        "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH", "PYTHONSTARTUP", "PYTHONINSPECT",
+        "PYTHONPLUGLIBDIR", "BASH_ENV", "ENV", "PERL5LIB", "RUBYOPT",
+        "NODE_OPTIONS",
+    )
+})
 
 # §6.5: the config file is bounded before parsing (bytes, not characters).
 CONFIG_MAX_BYTES = 1_048_576
 
 # I4 顶层 schema：显式值必须为 2；缺失视为 legacy v1（经过单一兼容 translator +
-# deprecation）。I6 会用下一个 schema 区分旧 MCP profile。
-CONFIG_SCHEMA_VERSION = 2
+# deprecation）。I6 把 schema 升为 3：v3 的每个 MCP server 必须显式声明
+# execution_profile（§8.3），v1/v2 保持 legacy 兼容（profile 缺省 =
+# execution_profile None，不自动变成 host_trusted）。
+CONFIG_SCHEMA_VERSION = 3
 
 # provider_options 的正向 allowlist（§6.5）：运行时拥有的 key 一律禁止。
 _PROVIDER_OPTION_ALLOWLIST = frozenset(
@@ -72,6 +85,92 @@ class RuntimeConfigError(RuntimeError):
 class SandboxRunner(StrEnum):
     DOCKER = "docker"
     HOST = "host"
+
+
+class McpExecutionProfile(StrEnum):
+    SANDBOXED = "sandboxed"
+    HOST_TRUSTED = "host_trusted"
+
+
+# §8.4 code-bearing argv roles. Only these explicit roles may carry code into
+# the child; the runtime must never guess which argv entries are code.
+MCP_CODE_ARTIFACT_ROLES = frozenset({
+    "executable", "interpreter_script", "jar", "bundle"
+})
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class McpCodeArtifact:
+    """One declared code-bearing argv entry (role + position)."""
+
+    role: str
+    argv_index: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.role, str) or self.role not in MCP_CODE_ARTIFACT_ROLES:
+            raise RuntimeConfigError("invalid_mcp_code_artifact")
+        if (
+            not isinstance(self.argv_index, int)
+            or isinstance(self.argv_index, bool)
+            or self.argv_index < 0
+        ):
+            raise RuntimeConfigError("invalid_mcp_code_artifact")
+
+    def __repr__(self) -> str:
+        return f"McpCodeArtifact(role={self.role!r}, argv_index={self.argv_index})"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class McpResourceLimits:
+    """I6 §8.3 declarative resource envelope for one MCP process tree.
+
+    These are a declaration, never a substitute for enforcement: the launcher
+    must actually enforce every field through a Job Object / cgroup / wrapper
+    or fail with ``mcp_host_limits_unsupported`` before spawning (doc §8.4).
+    """
+
+    cpus: float = 1.0
+    memory_bytes: int = 512 * 1024 * 1024
+    pids: int = 256
+    tmpfs_bytes: int = 64 * 1024 * 1024
+    process_count: int = 1
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.cpus, (int, float))
+            or isinstance(self.cpus, bool)
+            or not math.isfinite(float(self.cpus))
+            or not 0.01 <= float(self.cpus) <= 1024.0
+        ):
+            raise RuntimeConfigError("invalid_mcp_resource_limits")
+        for name, minimum, maximum in (
+            ("memory_bytes", 1_048_576, 1_099_511_627_776),
+            ("pids", 1, 1_048_576),
+            ("tmpfs_bytes", 0, 1_099_511_627_776),
+            ("process_count", 1, 65_536),
+        ):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not (minimum <= value <= maximum)
+            ):
+                raise RuntimeConfigError("invalid_mcp_resource_limits")
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "cpus": float(self.cpus),
+            "memory_bytes": self.memory_bytes,
+            "pids": self.pids,
+            "tmpfs_bytes": self.tmpfs_bytes,
+            "process_count": self.process_count,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"McpResourceLimits(cpus={self.cpus!r}, "
+            f"memory_bytes={self.memory_bytes}, pids={self.pids})"
+        )
 
 
 class RepositoryTrustMode(StrEnum):
@@ -273,6 +372,13 @@ class McpServerConfig:
     decision: Decision = Decision.ASK
     side_effect_class: str = "read_only"
     recovery_mode: str = "retry"
+    # I6 §8.3 activation fields.  None = legacy config (fixture stdio
+    # semantics); v3 JSON must always set an explicit profile.
+    execution_profile: McpExecutionProfile | None = None
+    image_id: str | None = None
+    resource_limits: McpResourceLimits | None = None
+    read_only_mounts: tuple[tuple[str, str], ...] = ()
+    code_artifacts: tuple[McpCodeArtifact, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.server_id, str) or not _MCP_SERVER_ID.fullmatch(
@@ -298,6 +404,7 @@ class McpServerConfig:
             raise RuntimeConfigError("invalid_mcp_server")
         normalized_environment: list[tuple[str, str]] = []
         total_env_bytes = 0
+        seen_env: set[str] = set()
         for item in self.environment:
             if not isinstance(item, tuple) or len(item) != 2:
                 raise RuntimeConfigError("invalid_mcp_server")
@@ -311,6 +418,14 @@ class McpServerConfig:
                 or len(value.encode("utf-8")) > 4_096
             ):
                 raise RuntimeConfigError("invalid_mcp_server")
+            # §8.3: duplicate env keys are rejected (case-insensitive on
+            # Windows); loader / code-injection variables are hard denied.
+            env_key = name.casefold() if os.name == "nt" else name
+            if env_key in seen_env:
+                raise RuntimeConfigError("duplicate_mcp_environment")
+            if env_key.casefold() in _MCP_INJECTION_ENV_CASEFOLD:
+                raise RuntimeConfigError("mcp_injection_environment_forbidden")
+            seen_env.add(env_key)
             total_env_bytes += len(name.encode("utf-8")) + len(value.encode("utf-8"))
             normalized_environment.append((name, value))
         if total_env_bytes > 65_536:
@@ -371,11 +486,63 @@ class McpServerConfig:
             and self.recovery_mode == "retry"
         ):
             raise RuntimeConfigError("invalid_mcp_server")
+        if self.execution_profile is not None and not isinstance(
+            self.execution_profile, McpExecutionProfile
+        ):
+            raise RuntimeConfigError("invalid_mcp_server")
+        if self.image_id is not None and (
+            not isinstance(self.image_id, str)
+            or not self.image_id.strip()
+            or len(self.image_id.encode("utf-8")) > 512
+        ):
+            raise RuntimeConfigError("invalid_mcp_server")
+        if self.execution_profile is McpExecutionProfile.SANDBOXED:
+            if not self.image_id:
+                raise RuntimeConfigError("mcp_sandbox_requires_image")
+        elif self.execution_profile is McpExecutionProfile.HOST_TRUSTED:
+            if self.image_id is not None:
+                raise RuntimeConfigError("mcp_host_trusted_no_image")
+            if not isinstance(self.resource_limits, McpResourceLimits):
+                raise RuntimeConfigError("invalid_mcp_resource_limits")
+        if self.resource_limits is not None and not isinstance(
+            self.resource_limits, McpResourceLimits
+        ):
+            raise RuntimeConfigError("invalid_mcp_resource_limits")
+        if not isinstance(self.read_only_mounts, tuple) or len(self.read_only_mounts) > 32:
+            raise RuntimeConfigError("invalid_mcp_server")
+        for mount in self.read_only_mounts:
+            if not isinstance(mount, tuple) or len(mount) != 2:
+                raise RuntimeConfigError("invalid_mcp_server")
+            source, container_path = mount
+            if (
+                not isinstance(source, str)
+                or not source
+                or not isinstance(container_path, str)
+                or not container_path.startswith("/")
+                or "\x00" in source
+                or "\x00" in container_path
+                or len(source.encode("utf-8")) > 4096
+                or len(container_path.encode("utf-8")) > 4096
+            ):
+                raise RuntimeConfigError("invalid_mcp_server")
+        if not isinstance(self.code_artifacts, tuple) or len(self.code_artifacts) > 16:
+            raise RuntimeConfigError("invalid_mcp_server")
+        seen_artifacts: set[int] = set()
+        for artifact in self.code_artifacts:
+            if not isinstance(artifact, McpCodeArtifact):
+                raise RuntimeConfigError("invalid_mcp_server")
+            index = artifact.argv_index
+            if index in seen_artifacts or index >= len(self.command):
+                raise RuntimeConfigError("invalid_mcp_server")
+            if artifact.role == "executable" and index != 0:
+                raise RuntimeConfigError("invalid_mcp_server")
+            seen_artifacts.add(index)
 
     def __repr__(self) -> str:
         return (
             f"McpServerConfig(server_id={self.server_id!r}, "
-            f"command_count={len(self.command)}, decision={self.decision.value!r})"
+            f"command_count={len(self.command)}, decision={self.decision.value!r}, "
+            f"profile={None if self.execution_profile is None else self.execution_profile.value!r})"
         )
 
 
@@ -533,7 +700,7 @@ class RuntimeConfig:
             self.config_schema_version, bool
         ):
             raise RuntimeConfigError("config_unsupported_schema_version")
-        if self.config_schema_version not in (1, 2):
+        if self.config_schema_version not in (1, 2, 3):
             raise RuntimeConfigError("config_unsupported_schema_version")
         try:
             normalized_limits = validate_runtime_ingress(self.durable_limits)
@@ -707,14 +874,16 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     if unknown:
         raise RuntimeConfigError("config_unknown_field")
 
-    # config_schema_version: explicit must be exactly 2; missing means legacy
-    # v1 which passes through one compatible translator plus a deprecation.
+    # config_schema_version: explicit must be exactly 3 (I6).  Missing means
+    # legacy v1 (single compatible translator + deprecation).  Legacy v1/v2
+    # documents keep loading MCP servers without an execution_profile; v3
+    # requires an explicit profile for every server (§8.3).
     raw_version = document.get("config_schema_version")
     if raw_version is None:
         schema_version = 1
         warnings.warn(
             "runtime config without config_schema_version is legacy v1 and "
-            "deprecated; add \"config_schema_version\": 2",
+            "deprecated; add \"config_schema_version\": 3",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -723,7 +892,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     else:
         schema_version = CONFIG_SCHEMA_VERSION
 
-    strict_v2 = schema_version == CONFIG_SCHEMA_VERSION
+    strict_v3 = schema_version == CONFIG_SCHEMA_VERSION
     _reject_secret_config_literals(document)
     if "durable_limits" in document:
         try:
@@ -736,11 +905,13 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     base = config_path.parent
     repo = _absolute_path(document.get("repo"), base, "repo")
     db = _absolute_path(document.get("db"), base, "db")
-    provider = _parse_provider(document.get("provider"), strict_options=strict_v2)
+    provider = _parse_provider(document.get("provider"), strict_options=strict_v3)
     sandbox = _parse_sandbox(document.get("sandbox"))
     test_profiles = _parse_test_profiles(document.get("test_profiles"))
     policy = _parse_policy(document.get("policy"))
-    mcp_servers = _parse_mcp_servers(document.get("mcp_servers", []), base)
+    mcp_servers = _parse_mcp_servers(
+        document.get("mcp_servers", []), base, strict=strict_v3,
+    )
     system_prompt = document.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
     if isinstance(system_prompt, str):
         try:
@@ -1043,7 +1214,9 @@ def _parse_test_profiles(value: Any) -> tuple[TestProfileConfig, ...]:
     return tuple(profiles)
 
 
-def _parse_mcp_servers(value: Any, base: Path) -> tuple[McpServerConfig, ...]:
+def _parse_mcp_servers(
+    value: Any, base: Path, *, strict: bool = False,
+) -> tuple[McpServerConfig, ...]:
     if value is None:
         return ()
     if not isinstance(value, list):
@@ -1076,8 +1249,20 @@ def _parse_mcp_servers(value: Any, base: Path) -> tuple[McpServerConfig, ...]:
             "decision",
             "side_effect_class",
             "recovery_mode",
+            "execution_profile",
+            "image_id",
+            "resource_limits",
+            "read_only_mounts",
+            "code_artifacts",
         }
         _reject_unknown(item, allowed, "invalid_mcp_server")
+        # §8.3: v3 JSON must declare an explicit execution_profile for every
+        # server; a missing profile cannot silently become host_trusted or
+        # sandboxed.  Legacy v1/v2 keeps the pre-I6 behavior (None profile).
+        if strict and "execution_profile" not in item:
+            raise RuntimeConfigError("mcp_profile_migration_required")
+        if strict and "request_timeout_seconds" in item:
+            raise RuntimeConfigError("ambiguous_mcp_timeout_config")
         _new_timeouts = {
             "process_start_timeout_seconds",
             "initialize_timeout_seconds",
@@ -1099,6 +1284,11 @@ def _parse_mcp_servers(value: Any, base: Path) -> tuple[McpServerConfig, ...]:
             environment = tuple(
                 tuple(pair) for pair in item.get("environment", ())
             )
+            read_only_mounts = tuple(
+                tuple(pair) for pair in item.get("read_only_mounts", ())
+            )
+            code_artifacts = _mcp_code_artifacts(item.get("code_artifacts"))
+            resource_limits = _mcp_resource_limits(item.get("resource_limits"))
             legacy_timeout = item.get("request_timeout_seconds")
             deprecation = legacy_timeout is not None
             tool_call_timeout = item.get(
@@ -1145,6 +1335,11 @@ def _parse_mcp_servers(value: Any, base: Path) -> tuple[McpServerConfig, ...]:
                     decision=_decision(item.get("decision", "ask")),
                     side_effect_class=item.get("side_effect_class", "read_only"),
                     recovery_mode=item.get("recovery_mode", "retry"),
+                    execution_profile=_mcp_profile(item.get("execution_profile")),
+                    image_id=item.get("image_id"),
+                    resource_limits=resource_limits,
+                    read_only_mounts=read_only_mounts,
+                    code_artifacts=code_artifacts,
                 )
             )
         except RuntimeConfigError:
@@ -1152,6 +1347,63 @@ def _parse_mcp_servers(value: Any, base: Path) -> tuple[McpServerConfig, ...]:
         except (TypeError, ValueError):
             raise RuntimeConfigError("invalid_mcp_server") from None
     return tuple(servers)
+
+
+def _mcp_profile(value: Any) -> McpExecutionProfile | None:
+    """Parse one explicit execution_profile; None stays legacy (unset)."""
+    if value is None:
+        return None
+    if isinstance(value, McpExecutionProfile):
+        return value
+    if not isinstance(value, str):
+        raise RuntimeConfigError("invalid_mcp_server")
+    try:
+        return McpExecutionProfile(value)
+    except ValueError:
+        raise RuntimeConfigError("invalid_mcp_server") from None
+
+
+def _mcp_resource_limits(value: Any) -> McpResourceLimits | None:
+    if value is None:
+        return None
+    if isinstance(value, McpResourceLimits):
+        return value
+    if not isinstance(value, dict):
+        raise RuntimeConfigError("invalid_mcp_resource_limits")
+    allowed = {"cpus", "memory_bytes", "pids", "tmpfs_bytes", "process_count"}
+    _reject_unknown(value, allowed, "invalid_mcp_resource_limits")
+    try:
+        return McpResourceLimits(
+            cpus=value.get("cpus", 1.0),
+            memory_bytes=value.get("memory_bytes", 512 * 1024 * 1024),
+            pids=value.get("pids", 256),
+            tmpfs_bytes=value.get("tmpfs_bytes", 64 * 1024 * 1024),
+            process_count=value.get("process_count", 1),
+        )
+    except RuntimeConfigError:
+        raise
+    except (TypeError, ValueError):
+        raise RuntimeConfigError("invalid_mcp_resource_limits") from None
+
+
+def _mcp_code_artifacts(value: Any) -> tuple[McpCodeArtifact, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise RuntimeConfigError("invalid_mcp_server")
+    artifacts: list[McpCodeArtifact] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise RuntimeConfigError("invalid_mcp_server")
+        allowed = {"role", "argv_index"}
+        _reject_unknown(entry, allowed, "invalid_mcp_server")
+        artifacts.append(
+            McpCodeArtifact(
+                entry.get("role", ""),
+                entry.get("argv_index", -1),
+            )
+        )
+    return tuple(artifacts)
 
 
 def _parse_policy(value: Any) -> PolicyConfig:

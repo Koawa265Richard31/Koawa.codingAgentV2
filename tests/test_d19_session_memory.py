@@ -42,6 +42,9 @@ from koawa_agent_v2.runtime.session import (
     SessionMemory,
     SessionTurn,
 )
+from koawa_agent_v2.control.sqlite_store import SqliteEventStore
+from koawa_agent_v2.workspace.content import repository_identity
+from koawa_agent_v2.workspace.effects import WorkspaceEffectStore
 
 
 def _git(root: Path, *arguments: str) -> None:
@@ -272,7 +275,17 @@ class SessionMemoryEnhancementTest(unittest.TestCase):
                 error="d2:model_client_failed",
             ),
         )
-        target = SessionJournal().write(self.repo, turns)
+        event_store = SqliteEventStore(self.root / "journal.sqlite3")
+        run_id = uuid4()
+        semantic_id = uuid4()
+        journal = SessionJournal(WorkspaceEffectStore(event_store))
+        target = journal.write(
+            self.repo,
+            turns,
+            run_id=run_id,
+            semantic_command_id=semantic_id,
+            repository_identity_digest=repository_identity(self.repo),
+        )
         content = target.read_text(encoding="utf-8")
         self.assertEqual("SESSION.md", target.name)
         self.assertIn("- turns: 2", content)
@@ -281,6 +294,20 @@ class SessionMemoryEnhancementTest(unittest.TestCase):
         self.assertIn("**files:** calc.py", content)
         self.assertIn("**status:** failed", content)
         self.assertIn("**error:** d2:model_client_failed", content)
+        # A response-loss retry reuses the same effect and exact bytes.
+        self.assertEqual(
+            target,
+            journal.write(
+                self.repo,
+                turns,
+                run_id=run_id,
+                semantic_command_id=semantic_id,
+                repository_identity_digest=repository_identity(self.repo),
+            ),
+        )
+        events = event_store.read_all()
+        self.assertIn("workspace.effect-intended.v2", {e.event_type for e in events})
+        self.assertIn("workspace.effect-applied.v2", {e.event_type for e in events})
 
     def test_cli_extracts_changed_files_from_git_diff(self) -> None:
         import contextlib

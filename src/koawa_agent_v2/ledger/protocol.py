@@ -92,6 +92,54 @@ MANUAL_WRITE_PROFILE = ToolRecoveryProfile(
 
 
 @dataclass(frozen=True, slots=True, repr=False)
+class LogicalExecutionIdentity:
+    """I6 §8.8 / plan §10.3: ONE typed key for prepare/claim/load/recovery.
+
+    Every boundary that derives an execution key must carry the exact same
+    binding_digest (or None for builtin tools); a missing-field tuple lookup
+    is a bug, not a compatibility path.
+    """
+
+    turn_id: UUID
+    model_turn_id: UUID
+    call_id: str
+    binding_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.turn_id, UUID) or not isinstance(
+            self.model_turn_id, UUID,
+        ):
+            raise TypeError("turn_id and model_turn_id must be UUID")
+        if not isinstance(self.call_id, str) or not self.call_id:
+            raise ValueError("call_id must be non-empty")
+        if self.binding_digest is not None and (
+            not isinstance(self.binding_digest, str)
+            or len(self.binding_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.binding_digest
+            )
+        ):
+            raise ValueError("binding_digest must be 64 hex chars")
+
+    def derive(self) -> UUID:
+        """The one stable execution key for this logical identity."""
+        return logical_execution_id(
+            self.turn_id,
+            self.model_turn_id,
+            self.call_id,
+            binding_digest=self.binding_digest,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"LogicalExecutionIdentity(turn_id={self.turn_id}, "
+            f"model_turn_id={self.model_turn_id}, call_id={self.call_id!r}, "
+            f"binding_digest={self.binding_digest})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class DurableToolResult:
     """A bounded, redacted result that may be reused after process restart."""
 

@@ -501,6 +501,10 @@ class ActionRequest:
     mcp_server_id: str | None = None
     mcp_session_generation: int | None = None
     mcp_schema_hash: str | None = None
+    # I6 §8.8: semantic binding identity enters the action digest so a
+    # refreshed catalog cannot inherit an old approval.
+    mcp_binding_digest: str | None = None
+    mcp_server_identity_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, ActionKind):
@@ -558,6 +562,16 @@ class ActionRequest:
             "mcp_schema_hash",
             _mcp_schema_hash(self.mcp_schema_hash, self.kind),
         )
+        object.__setattr__(
+            self,
+            "mcp_binding_digest",
+            _mcp_binding_digest(self.mcp_binding_digest, self.kind),
+        )
+        object.__setattr__(
+            self,
+            "mcp_server_identity_digest",
+            _mcp_identity_digest(self.mcp_server_identity_digest, self.kind),
+        )
         object.__setattr__(self, "resource_references", references)
         object.__setattr__(self, "resolved_resources", resources)
         object.__setattr__(self, "mcp_claimed_capabilities", claims)
@@ -590,6 +604,8 @@ class ResolvedAction:
     mcp_server_id: str | None = None
     mcp_session_generation: int | None = None
     mcp_schema_hash: str | None = None
+    mcp_binding_digest: str | None = None
+    mcp_server_identity_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, ActionKind):
@@ -649,6 +665,16 @@ class ResolvedAction:
             "mcp_schema_hash",
             _mcp_schema_hash(self.mcp_schema_hash, self.kind),
         )
+        object.__setattr__(
+            self,
+            "mcp_binding_digest",
+            _mcp_binding_digest(self.mcp_binding_digest, self.kind),
+        )
+        object.__setattr__(
+            self,
+            "mcp_server_identity_digest",
+            _mcp_identity_digest(self.mcp_server_identity_digest, self.kind),
+        )
         object.__setattr__(self, "mcp_claimed_capabilities", claims)
 
     @property
@@ -678,6 +704,8 @@ class ResolvedAction:
             "mcp_server_id": self.mcp_server_id,
             "mcp_session_generation": self.mcp_session_generation,
             "mcp_schema_hash": self.mcp_schema_hash,
+            "mcp_binding_digest": self.mcp_binding_digest,
+            "mcp_server_identity_digest": self.mcp_server_identity_digest,
             # Untrusted MCP declarations are bound for tamper evidence only.
             "mcp_claimed_capabilities": list(self.mcp_claimed_capabilities),
         }
@@ -706,6 +734,8 @@ def action_request_from_tool_call(
     mcp_server_id: str | None = None,
     mcp_session_generation: int | None = None,
     mcp_schema_hash: str | None = None,
+    mcp_binding_digest: str | None = None,
+    mcp_server_identity_digest: str | None = None,
 ) -> ActionRequest:
     """Adapter-friendly constructor without importing Provider/Registry types."""
 
@@ -724,6 +754,8 @@ def action_request_from_tool_call(
         mcp_server_id=mcp_server_id,
         mcp_session_generation=mcp_session_generation,
         mcp_schema_hash=mcp_schema_hash,
+        mcp_binding_digest=mcp_binding_digest,
+        mcp_server_identity_digest=mcp_server_identity_digest,
     )
 
 
@@ -788,6 +820,8 @@ def resolve_action_request(
         mcp_server_id=request.mcp_server_id,
         mcp_session_generation=request.mcp_session_generation,
         mcp_schema_hash=request.mcp_schema_hash,
+        mcp_binding_digest=request.mcp_binding_digest,
+        mcp_server_identity_digest=request.mcp_server_identity_digest,
     )
 
 
@@ -1396,6 +1430,26 @@ def _mcp_session_generation(value: Any, kind: ActionKind) -> int | None:
         raise PolicyError("invalid_mcp_binding")
     if kind is not ActionKind.MCP_TOOL:
         raise PolicyError("mcp_binding_on_non_mcp_action")
+    return value
+
+
+def _mcp_binding_digest(value: Any, kind: ActionKind) -> str | None:
+    if value is None:
+        return None
+    if kind is not ActionKind.MCP_TOOL:
+        raise PolicyError("mcp_binding_on_non_mcp_action")
+    if not isinstance(value, str) or not _SHA256.fullmatch(value):
+        raise PolicyError("invalid_mcp_binding_digest")
+    return value
+
+
+def _mcp_identity_digest(value: Any, kind: ActionKind) -> str | None:
+    if value is None:
+        return None
+    if kind is not ActionKind.MCP_TOOL:
+        raise PolicyError("mcp_binding_on_non_mcp_action")
+    if not isinstance(value, str) or not _SHA256.fullmatch(value):
+        raise PolicyError("invalid_mcp_identity_digest")
     return value
 
 

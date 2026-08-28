@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,7 +37,22 @@ from ..ledger import (
     ToolLedgerStore,
 )
 from ..mcp import McpSession, StdioTransport
+from ..mcp.activation import (
+    ActivationService,
+    ActivationView,
+    AuthorizedLaunchTicket,
+    McpActivationError,
+    StagedLaunchPlan,
+    process_start_scope,
+    stage_code_artifacts,
+)
+from ..mcp.launcher import (
+    HostTrustedLauncher,
+    McpProcessLauncher,
+    SandboxedLauncher,
+)
 from ..mcp.tool_binding import McpBinding, McpCatalog, build_mcp_registry
+from ..mcp.transport import TransportError
 from ..model.openai_client import OpenAICompatibleChatClient
 from ..model.protocol import InstructionMessage, InstructionRole, ModelContextItem
 from ..model.stream import StreamLimits
@@ -53,7 +69,7 @@ from ..policy import (
 from ..recovery import CheckpointStore
 from ..sandbox.protocol import SandboxCommandProfile, SandboxError
 from ..sandbox.runtime import DockerCommandRunner
-from ..telemetry.trace import TraceStore
+from ..telemetry.trace import BestEffortTraceSink, TraceSink, TraceStore
 from ..tools.registry import ToolRegistry
 from ..verification.runner import (
     CommandProfile,
@@ -61,10 +77,11 @@ from ..verification.runner import (
     RepositoryTrust,
     TrustedCommandRunner,
 )
-from ..verification.git import GitFacadeError
+from ..verification.git import GitFacade, GitFacadeError
 from ..verification.tools import build_verified_coding_tool_registry
 from .composite_registry import CompositeToolRegistry
 from .config import (
+    McpExecutionProfile,
     McpServerConfig,
     ProviderConfig,
     RepositoryTrustMode,
@@ -109,6 +126,7 @@ class AssembledRuntime:
     ledger: ToolLedgerStore
     approvals: ApprovalService
     trace: TraceStore
+    trace_sink: TraceSink
     registry: object
     executor: LedgerExecutor
     client: object
@@ -151,7 +169,7 @@ class AssembledRuntime:
                     max_tool_calls=self.config.max_tool_calls,
                 ),
                 stream_limits=StreamLimits(),
-                trace_store=self.trace,
+                trace_sink=self.trace_sink,
                 correlation_id=self.correlation_id,
             )
         return TurnWorker(
@@ -189,6 +207,124 @@ class AssembledRuntime:
         self.close()
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class ControlPlaneRuntime:
+    """I6 §8.9: control-plane resources only; never spawns MCP processes.
+
+    status / doctor / approvals / approve / deny / cancel run entirely from
+    this object; the execution plane (model client + MCP processes) is
+    assembled lazily on the first real run/resume/chat.
+    """
+
+    config: RuntimeConfig
+    config_base_dir: Path
+    store: SqliteEventStore
+    runtime: ThreadRuntime
+    ledger: ToolLedgerStore
+    approvals: ApprovalService
+    trace: TraceStore
+    trace_sink: TraceSink
+    checkpoint_store: CheckpointStore
+    correlation_id: object
+    activation: ActivationService
+    staging_root: Path
+    git: GitFacade
+    _execution: object | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def attach_execution(self, execution: object) -> None:
+        object.__setattr__(self, "_execution", execution)
+
+    @property
+    def client(self):
+        execution = self._execution
+        return None if execution is None else getattr(execution, "client", None)
+
+    @property
+    def loop(self):
+        execution = self._execution
+        return None if execution is None else getattr(execution, "loop", None)
+
+    @property
+    def worker(self):
+        execution = self._execution
+        return None if execution is None else getattr(execution, "worker", None)
+
+    @property
+    def executor(self):
+        execution = self._execution
+        return None if execution is None else getattr(execution, "executor", None)
+
+    @property
+    def mcp_sessions(self) -> tuple:
+        execution = self._execution
+        return () if execution is None else getattr(execution, "mcp_sessions", ())
+
+    def build_worker(
+        self,
+        initial_context: Sequence[ModelContextItem] = (),
+        *,
+        task_mode: bool = True,
+        claim_gate: bool = False,
+    ) -> TurnWorker:
+        execution = self._execution
+        if execution is None:
+            raise RuntimeAssemblyError("execution_plane_not_assembled")
+        return execution.build_worker(
+            initial_context, task_mode=task_mode, claim_gate=claim_gate,
+        )
+
+    def close(self) -> None:
+        """Close the execution plane (if any) and the control staging dir."""
+        if self._closed:
+            return
+        object.__setattr__(self, "_closed", True)
+        execution = self._execution
+        if execution is not None:
+            try:
+                execution.close()
+            except Exception as exc:
+                _logger.warning("execution plane close failed: %r", exc)
+        staging = self.staging_root
+        if staging is not None:
+            try:
+                import shutil as _shutil
+
+                _shutil.rmtree(staging, ignore_errors=True)
+            except Exception:
+                pass
+
+    def __enter__(self) -> "ControlPlaneRuntime":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
+@dataclass(frozen=True, slots=True)
+class GrantedExecutionPlan:
+    """Preflight outcome: every activated server has an effective grant."""
+
+    activated_plans: Mapping[str, StagedLaunchPlan]
+    activated_views: Mapping[str, ActivationView]
+    legacy_servers: tuple[McpServerConfig, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationPending:
+    """Preflight outcome: durable mcp_process_start ASKs exist; no Turn yet."""
+
+    requests: Mapping[str, ActivationView]
+
+    @property
+    def request_ids(self) -> tuple[str, ...]:
+        return tuple(
+            view.request_id_str for view in self.requests.values()
+        )
+
+
 def _close_mcp_sessions(sessions: Sequence[object]) -> None:
     """Close sessions in reverse assembly order; never raises."""
     for session in reversed(tuple(sessions)):
@@ -198,23 +334,21 @@ def _close_mcp_sessions(sessions: Sequence[object]) -> None:
             _logger.warning("mcp session close failed: %r", exc)
 
 
-def assemble_runtime(
+def assemble_control_plane(
     config: RuntimeConfig,
     *,
-    model_client: object | None = None,
-    api_key: str | None = None,
-    reasoning_sink: Callable[[str], None] | None = None,
-) -> AssembledRuntime:
-    """Build the complete runtime.
-
-    ``model_client`` and ``api_key`` are injection points for deterministic tests;
-    production callers leave both unset and let the config resolve the key from the
-    process environment.
-    """
+    config_base_dir: Path | None = None,
+) -> ControlPlaneRuntime:
+    """Control plane only: no model client, no MCP process spawn (I6 §8.9)."""
     if not isinstance(config, RuntimeConfig):
         raise TypeError("config must be RuntimeConfig")
     if not config.repo.is_dir():
         raise RuntimeAssemblyError("repo_not_found")
+    base_dir = (
+        Path(config_base_dir).resolve()
+        if config_base_dir is not None
+        else config.repo
+    )
     try:
         store = SqliteEventStore(config.db, durable_limits=config.durable_limits)
         runtime = ThreadRuntime(
@@ -229,15 +363,144 @@ def assemble_runtime(
             budget_action_limits=dict(config.budget_action_limits),
         )
         trace = TraceStore(store)
+        trace_sink = BestEffortTraceSink(trace)
         correlation_id = uuid4()
+        activation = ActivationService(
+            store, approval_ttl_seconds=300,
+        )
+        staging_root = Path(tempfile.mkdtemp(prefix="koawa-mcp-staging-"))
+        checkpoint_store = CheckpointStore(store)
+        # Same repo boundary the execution registry uses: construct the git
+        # facade so not_a_git_repository surfaces at control construction.
+        from ..tools.workspace import WorkspacePathResolver
 
+        git = GitFacade(
+            config.repo,
+            WorkspacePathResolver(config.repo),
+        )
+        return ControlPlaneRuntime(
+            config=config,
+            config_base_dir=base_dir,
+            store=store,
+            runtime=runtime,
+            ledger=ledger,
+            approvals=approvals,
+            trace=trace,
+            trace_sink=trace_sink,
+            checkpoint_store=checkpoint_store,
+            correlation_id=correlation_id,
+            activation=activation,
+            staging_root=staging_root,
+            git=git,
+        )
+    except (RuntimeConfigError, RuntimeAssemblyError):
+        raise
+    except GitFacadeError as exc:
+        raise RuntimeAssemblyError(getattr(exc, "code", "git_facade_failed")) from None
+    except CommandRunnerError as exc:
+        raise RuntimeAssemblyError(getattr(exc, "code", "command_runner_failed")) from None
+    except SandboxError as exc:
+        raise RuntimeAssemblyError(getattr(exc, "code", "sandbox_failed")) from None
+    except Exception as exc:
+        raise RuntimeAssemblyError("runtime_assembly_failed") from None
+
+
+def _process_start_decision(
+    server_config: McpServerConfig,
+    scopes: tuple[str, ...],
+) -> tuple[str, str]:
+    """Policy decision for one process start (I6 §8.5)."""
+    profile = server_config.execution_profile
+    if profile is McpExecutionProfile.HOST_TRUSTED:
+        scope = process_start_scope(profile)
+        if scope not in scopes:
+            return ("deny", scope)
+        return ("ask", scope)
+    if profile is McpExecutionProfile.SANDBOXED:
+        raise RuntimeAssemblyError("mcp_sandbox_unavailable")
+    return ("allow", process_start_scope(None))
+
+
+def preflight_execution_activation(
+    control: ControlPlaneRuntime,
+    *,
+    command_context: str,
+) -> GrantedExecutionPlan | ActivationPending:
+    """Resolve activated MCP launch identity + policy (I6 §8.5)."""
+    if not isinstance(control, ControlPlaneRuntime):
+        raise TypeError("control must be ControlPlaneRuntime")
+    activated_plans: dict[str, StagedLaunchPlan] = {}
+    activated_views: dict[str, ActivationView] = {}
+    legacy_servers: list[McpServerConfig] = []
+    scopes = control.config.policy.principal_scopes
+    try:
+        for server_config in control.config.mcp_servers:
+            if server_config.execution_profile is None:
+                legacy_servers.append(server_config)
+                continue
+            plan = stage_code_artifacts(
+                server_config,
+                base_dir=control.config_base_dir,
+                staging_root=control.staging_root,
+            )
+            decision, scope = _process_start_decision(
+                server_config, scopes,
+            )
+            view = control.activation.plan_start(
+                plan.identity,
+                principal_id="root",
+                scope=scope,
+                decision=decision,
+            )
+            activated_plans[server_config.server_id] = plan
+            activated_views[server_config.server_id] = view
+    except McpActivationError as exc:
+        raise RuntimeAssemblyError(getattr(exc, "code", "mcp_activation_failed")) from None
+    pending = {
+        server_id: view
+        for server_id, view in activated_views.items()
+        if view.status == ActivationService.STATUS_REQUESTED
+    }
+    if pending:
+        return ActivationPending(requests=pending)
+    return GrantedExecutionPlan(
+        activated_plans=activated_plans,
+        activated_views=activated_views,
+        legacy_servers=tuple(legacy_servers),
+    )
+
+
+def assemble_execution_plane(
+    control: ControlPlaneRuntime,
+    granted_plan: GrantedExecutionPlan,
+    *,
+    model_client: object | None = None,
+    api_key: str | None = None,
+    reasoning_sink: Callable[[str], None] | None = None,
+    launcher_builder=None,
+) -> AssembledRuntime:
+    """Build the lazy execution plane: verified registry + MCP + client."""
+    if not isinstance(control, ControlPlaneRuntime):
+        raise TypeError("control must be ControlPlaneRuntime")
+    if not isinstance(granted_plan, GrantedExecutionPlan):
+        raise TypeError("granted_plan must be GrantedExecutionPlan")
+    config = control.config
+    store = control.store
+    runtime = control.runtime
+    ledger = control.ledger
+    approvals = control.approvals
+    trace = control.trace
+    trace_sink = control.trace_sink
+    correlation_id = control.correlation_id
+    try:
         runner = _build_command_runner(config, store)
         builtin_registry = build_verified_coding_tool_registry(
             config.repo,
             command_runner=runner,
+            git_facade=control.git,
         )
-        mcp_sessions, mcp_bindings = _connect_mcp_servers(
-            config, trace, correlation_id
+        mcp_sessions, mcp_bindings = _connect_execution_mcp_servers(
+            control, granted_plan, launcher_builder=launcher_builder,
         )
         registry = (
             builtin_registry
@@ -254,7 +517,7 @@ def assemble_runtime(
             registry,
             ledger,
             approvals,
-            trace,
+            trace_sink,
             correlation_id,
             mcp_bindings,
         )
@@ -269,7 +532,6 @@ def assemble_runtime(
             if not callable(getattr(model_client, "stream", None)):
                 raise RuntimeAssemblyError("invalid_model_client")
             client = model_client
-
         instructions = (
             InstructionMessage(
                 InstructionRole.SYSTEM,
@@ -285,10 +547,10 @@ def assemble_runtime(
                 max_tool_calls=config.max_tool_calls,
             ),
             stream_limits=StreamLimits(),
-            trace_store=trace,
+            trace_sink=trace_sink,
             correlation_id=correlation_id,
         )
-        checkpoint_store = CheckpointStore(store)
+        checkpoint_store = control.checkpoint_store
         worker = TurnWorker(
             runtime,
             loop,
@@ -300,13 +562,14 @@ def assemble_runtime(
             owner_id=config.owner_id,
             lease_seconds=config.lease_seconds,
         )
-        return AssembledRuntime(
+        assembled = AssembledRuntime(
             config=config,
             store=store,
             runtime=runtime,
             ledger=ledger,
             approvals=approvals,
             trace=trace,
+            trace_sink=trace_sink,
             registry=registry,
             executor=executor,
             client=client,
@@ -316,6 +579,8 @@ def assemble_runtime(
             loop=loop,
             mcp_sessions=mcp_sessions,
         )
+        control.attach_execution(assembled)
+        return assembled
     except (RuntimeConfigError, RuntimeAssemblyError):
         raise
     except CommandRunnerError as exc:
@@ -326,6 +591,32 @@ def assemble_runtime(
         raise RuntimeAssemblyError(getattr(exc, "code", "git_facade_failed")) from None
     except Exception as exc:
         raise RuntimeAssemblyError("runtime_assembly_failed") from None
+
+
+def assemble_runtime(
+    config: RuntimeConfig,
+    *,
+    model_client: object | None = None,
+    api_key: str | None = None,
+    reasoning_sink: Callable[[str], None] | None = None,
+    config_base_dir: Path | None = None,
+) -> AssembledRuntime:
+    """Eager composition for deterministic tests and legacy callers."""
+    control = assemble_control_plane(
+        config, config_base_dir=config_base_dir,
+    )
+    plan = preflight_execution_activation(
+        control, command_context="eager",
+    )
+    if isinstance(plan, ActivationPending):
+        raise RuntimeAssemblyError("mcp_process_activation_pending")
+    return assemble_execution_plane(
+        control,
+        plan,
+        model_client=model_client,
+        api_key=api_key,
+        reasoning_sink=reasoning_sink,
+    )
 
 
 def _build_command_runner(config: RuntimeConfig, store: SqliteEventStore):
@@ -382,56 +673,19 @@ def _host_profile(item: TestProfileConfig) -> CommandProfile:
 
 def _connect_mcp_servers(
     config: RuntimeConfig,
-    trace: TraceStore,
+    trace_sink: TraceSink,
     correlation_id: object,
 ):
+    # Legacy eager connect path (I6 §8.9); only profile-None servers reach it.
     sessions: list[tuple[McpServerConfig, object, McpCatalog]] = []
     bindings: dict[str, tuple[McpServerConfig, object, McpCatalog]] = {}
     opened: list[object] = []
     try:
         for server_config in config.mcp_servers:
-            transport = StdioTransport(
-                server_config.command,
-                env=dict(server_config.environment),
-                cwd=(
-                    None
-                    if server_config.cwd is None
-                    else str(server_config.cwd)
-                ),
-                # I1 staged deadlines: startup never inherits the short
-                # tool-call deadline (Windows cold spawn 0.57-0.76s).
-                process_start_timeout_seconds=(
-                    server_config.process_start_timeout_seconds
-                ),
-                shutdown_timeout_seconds=server_config.shutdown_timeout_seconds,
-                max_inbound_messages=server_config.max_inbound_messages,
-                max_stderr_bytes=server_config.max_stderr_bytes,
+            transport, session, catalog, adapter = _connect_legacy_server(
+                server_config, trace_sink, correlation_id,
             )
-            session = McpSession(
-                server_config.server_id,
-                transport,
-                # I1: legacy request_timeout exists only for config compat; the
-                # staged fields drive the phases.  The parser already maps a
-                # legacy request_timeout_seconds into tool_call_timeout_seconds.
-                initialize_timeout_seconds=server_config.initialize_timeout_seconds,
-                tools_list_timeout_seconds=server_config.tools_list_timeout_seconds,
-                tool_call_timeout_seconds=server_config.tool_call_timeout_seconds,
-                io_poll_timeout_seconds=server_config.io_poll_timeout_seconds,
-                shutdown_timeout_seconds=server_config.shutdown_timeout_seconds,
-                max_pending_requests=server_config.max_pending_requests,
-                max_tools=server_config.max_tools,
-                max_list_pages=server_config.max_list_pages,
-                max_cursor_bytes=server_config.max_cursor_bytes,
-                max_notifications_per_window=server_config.max_notifications_per_window,
-                max_result_chars=server_config.max_result_bytes,
-                trace_store=trace,
-                correlation_id=correlation_id,
-            )
-            catalog = session.connect()
-            adapter = build_mcp_registry(session, catalog)
             opened.append(session)
-            # Retain the McpSession (not the adapter) so the ownership chain
-            # can close every real transport/session in reverse order.
             sessions.append((server_config, session, catalog))
             bindings[server_config.server_id] = (
                 server_config,
@@ -440,11 +694,203 @@ def _connect_mcp_servers(
             )
         return tuple(sessions), bindings
     except BaseException:
-        # Mid-assembly failure: close every already-started session through
-        # the same idempotent teardown helper that AssembledRuntime.close()
-        # uses (reverse order, never raises).
         _close_mcp_sessions(opened)
         raise
+
+
+def _connect_legacy_server(
+    server_config: McpServerConfig,
+    trace_sink: TraceSink,
+    correlation_id: object,
+):
+    # Connect one pre-I6 (fixture stdio) server exactly as before.
+    transport = StdioTransport(
+        server_config.command,
+        env=dict(server_config.environment),
+        cwd=(
+            None
+            if server_config.cwd is None
+            else str(server_config.cwd)
+        ),
+        process_start_timeout_seconds=(
+            server_config.process_start_timeout_seconds
+        ),
+        shutdown_timeout_seconds=server_config.shutdown_timeout_seconds,
+        max_inbound_messages=server_config.max_inbound_messages,
+        max_stderr_bytes=server_config.max_stderr_bytes,
+    )
+    session = McpSession(
+        server_config.server_id,
+        transport,
+        initialize_timeout_seconds=server_config.initialize_timeout_seconds,
+        tools_list_timeout_seconds=server_config.tools_list_timeout_seconds,
+        tool_call_timeout_seconds=server_config.tool_call_timeout_seconds,
+        io_poll_timeout_seconds=server_config.io_poll_timeout_seconds,
+        shutdown_timeout_seconds=server_config.shutdown_timeout_seconds,
+        max_pending_requests=server_config.max_pending_requests,
+        max_tools=server_config.max_tools,
+        max_list_pages=server_config.max_list_pages,
+        max_cursor_bytes=server_config.max_cursor_bytes,
+        max_notifications_per_window=server_config.max_notifications_per_window,
+        max_result_chars=server_config.max_result_bytes,
+        trace_sink=trace_sink,
+        correlation_id=correlation_id,
+    )
+    catalog = session.connect()
+    adapter = build_mcp_registry(session, catalog)
+    return transport, session, catalog, adapter
+
+
+def _connect_execution_mcp_servers(
+    control: ControlPlaneRuntime,
+    granted_plan: GrantedExecutionPlan,
+    *,
+    launcher_builder=None,
+):
+    # Execution-plane MCP connect in config order (legacy + activated).
+    config = control.config
+    sessions: list[tuple[McpServerConfig, object, McpCatalog]] = []
+    bindings: dict[str, tuple[McpServerConfig, object, McpCatalog]] = {}
+    opened: list[object] = []
+    try:
+        for server_config in config.mcp_servers:
+            if server_config.execution_profile is None:
+                transport, session, catalog, adapter = _connect_legacy_server(
+                    server_config, control.trace_sink, control.correlation_id,
+                )
+            else:
+                transport, session, catalog, adapter = _connect_activated_server(
+                    control,
+                    granted_plan,
+                    server_config,
+                    launcher_builder=launcher_builder,
+                )
+            opened.append(session)
+            sessions.append((server_config, session, catalog))
+            bindings[server_config.server_id] = (
+                server_config,
+                adapter,
+                catalog,
+            )
+        return tuple(sessions), bindings
+    except BaseException:
+        _close_mcp_sessions(opened)
+        raise
+
+
+def _connect_activated_server(
+    control: ControlPlaneRuntime,
+    granted_plan: GrantedExecutionPlan,
+    server_config: McpServerConfig,
+    *,
+    launcher_builder=None,
+):
+    # grant -> intend -> claim -> ticket -> launcher -> transport (I6 §8.5).
+    plan = granted_plan.activated_plans.get(server_config.server_id)
+    view = granted_plan.activated_views.get(server_config.server_id)
+    if plan is None or view is None:
+        raise RuntimeAssemblyError("mcp_grant_missing")
+    activation = control.activation
+    if view.status != ActivationService.STATUS_GRANTED:
+        raise RuntimeAssemblyError("mcp_no_effective_grant")
+    intent = activation.intend(view)
+    ticket = activation.claim(
+        intent, view, principal_id="root",
+    )
+    launcher = (
+        launcher_builder(activation, server_config, plan)
+        if launcher_builder is not None
+        else _default_launcher(control, server_config, plan)
+    )
+
+    def factory():
+        try:
+            return launcher.launch(ticket)
+        except McpActivationError as exc:
+            raise TransportError(exc.code) from None
+
+    def reporter(state: str) -> None:
+        _allocation_reporter(activation, ticket, state)
+
+    transport = StdioTransport(
+        (),
+        env={},
+        cwd=None,
+        process_factory=factory,
+        allocation_state_reporter=reporter,
+        process_start_timeout_seconds=(
+            server_config.process_start_timeout_seconds
+        ),
+        shutdown_timeout_seconds=server_config.shutdown_timeout_seconds,
+        max_inbound_messages=server_config.max_inbound_messages,
+        max_stderr_bytes=server_config.max_stderr_bytes,
+    )
+    session = McpSession(
+        server_config.server_id,
+        transport,
+        initialize_timeout_seconds=server_config.initialize_timeout_seconds,
+        tools_list_timeout_seconds=server_config.tools_list_timeout_seconds,
+        tool_call_timeout_seconds=server_config.tool_call_timeout_seconds,
+        io_poll_timeout_seconds=server_config.io_poll_timeout_seconds,
+        shutdown_timeout_seconds=server_config.shutdown_timeout_seconds,
+        max_pending_requests=server_config.max_pending_requests,
+        max_tools=server_config.max_tools,
+        max_list_pages=server_config.max_list_pages,
+        max_cursor_bytes=server_config.max_cursor_bytes,
+        max_notifications_per_window=server_config.max_notifications_per_window,
+        max_result_chars=server_config.max_result_bytes,
+        trace_sink=control.trace_sink,
+        correlation_id=control.correlation_id,
+        launch_identity=plan.identity,
+    )
+    try:
+        catalog = session.connect()
+        activation.record_ready(ticket)
+    except BaseException:
+        try:
+            activation.record_outcome_unknown(
+                ticket, reason="connect_failed",
+            )
+        except Exception:
+            pass
+        raise
+    adapter = build_mcp_registry(session, catalog)
+    return transport, session, catalog, adapter
+
+
+def _allocation_reporter(
+    activation: ActivationService, ticket: AuthorizedLaunchTicket, state: str,
+) -> None:
+    # Map transport lifecycle states onto allocation events (§8.5).
+    try:
+        if state == "started":
+            activation.record_started(ticket)
+        elif state == "failed_before_start":
+            activation.record_failed_before_start(
+                ticket, reason="launcher_failed",
+            )
+        elif state == "stopped":
+            activation.record_stopped(ticket)
+        elif state == "outcome_unknown":
+            activation.record_outcome_unknown(
+                ticket, reason="cleanup_uncertain",
+            )
+    except Exception:
+        pass
+
+
+def _default_launcher(
+    control: ControlPlaneRuntime,
+    server_config: McpServerConfig,
+    plan: StagedLaunchPlan,
+) -> McpProcessLauncher:
+    if server_config.execution_profile is McpExecutionProfile.SANDBOXED:
+        return SandboxedLauncher(control.activation, plan)
+    return HostTrustedLauncher(
+        control.activation,
+        plan,
+        staging_root=control.staging_root,
+    )
 
 
 def _mcp_policy_side_effect(config: McpServerConfig) -> SideEffectClass:
@@ -480,7 +926,7 @@ def _bind_ledger_policy(
     registry,
     ledger: ToolLedgerStore,
     approvals: ApprovalService,
-    trace: TraceStore,
+    trace_sink: TraceSink,
     correlation_id: object,
     mcp_bindings: Mapping[str, tuple[McpServerConfig, object, McpCatalog]] | None = None,
 ) -> LedgerExecutor:
@@ -601,7 +1047,7 @@ def _bind_ledger_policy(
         policy_engine=engine,
         approval_service=approvals,
         action_resolvers={name: resolve_tool for name in names},
-        trace_store=trace,
+        trace_sink=trace_sink,
         correlation_id=correlation_id,
     )
 

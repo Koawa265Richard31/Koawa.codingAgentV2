@@ -18,9 +18,11 @@ from ..control.event_store import (
     StreamWrite,
     WrongExpectedVersion,
 )
+from ..control.run_effects import RunEffectIndex, effect_identity_digest
 from ..recovery.redaction import redact_text
 from .protocol import (
     DurableToolResult,
+    LogicalExecutionIdentity,
     RecoveryMode,
     SideEffectClass,
     ToolExecutionRecord,
@@ -59,8 +61,17 @@ class ToolLedgerStore:
         turn_id: UUID,
         model_turn_id: UUID,
         call_id: str,
+        binding_digest: str | None = None,
     ) -> ToolExecutionRecord | None:
-        return self.load(logical_execution_id(turn_id, model_turn_id, call_id))
+        """Load with the EXACT typed identity (plan §10.3).
+
+        Callers must pass the same binding_digest that prepare() used; a
+        missing-field lookup key silently misses digest-bound records.
+        """
+        identity = LogicalExecutionIdentity(
+            turn_id, model_turn_id, call_id, binding_digest=binding_digest,
+        )
+        return self.load(identity.derive())
 
     def prepare(
         self,
@@ -185,6 +196,45 @@ class ToolLedgerStore:
             },
             turn_id=current.turn_id,
             run_id=current.claimant_run_id,
+            actor=actor,
+        )
+        return self._require_current(current.execution_id)
+
+    def commit_prepared_failure(
+        self,
+        record: ToolExecutionRecord,
+        result: DurableToolResult,
+        *,
+        turn_version: int,
+        run_id: UUID,
+        actor: str = "policy",
+    ) -> ToolExecutionRecord:
+        """Close a call rejected before claim; no external effect was entered."""
+        current = self._require_current(record.execution_id)
+        if current.state in (ToolExecutionState.SUCCEEDED, ToolExecutionState.FAILED):
+            return current
+        if current.state is not ToolExecutionState.PREPARED:
+            raise ToolLedgerConflict("tool_prepared_failure_not_allowed")
+        if not isinstance(result, DurableToolResult) or not result.is_error:
+            raise TypeError("prepared failure requires an error DurableToolResult")
+        persisted_content = redact_text(result.content)
+        content_sha256, content_bytes = result_digest(result.content)
+        self._append(
+            current.execution_id,
+            current.version,
+            "tool.execution-failed.v1",
+            {
+                "execution_id": str(current.execution_id),
+                "claim_token": None,
+                "result": {"content": persisted_content, "is_error": True},
+                "result_sha256": content_sha256,
+                "result_bytes": content_bytes,
+                "rejected_before_claim": True,
+            },
+            turn_id=current.turn_id,
+            run_id=run_id,
+            turn_version=turn_version,
+            fence_turn=True,
             actor=actor,
         )
         return self._require_current(current.execution_id)
@@ -391,18 +441,33 @@ class ToolLedgerStore:
                     {"run_id": str(run_id)},
                 ),
             )
-        self.event_store.append_batch(
-            (
-                StreamWrite(
-                    StreamId("tool-execution", execution_id),
-                    expected_version,
-                    (event,),
-                ),
-            ),
-            idempotency_key=command_id,
-            request_fingerprint=fingerprint,
-            preconditions=preconditions,
-        )
+        effect_stream = StreamId("tool-execution", execution_id)
+        link_index = event_type == "tool.execution-prepared.v1" and run_id is not None
+        for attempt in range(4):
+            writes = [StreamWrite(effect_stream, expected_version, (event,))]
+            if link_index:
+                writes.append(
+                    RunEffectIndex(self.event_store).link_write(
+                        run_id=run_id,
+                        effect_kind="tool",
+                        effect_stream=effect_stream,
+                        identity_digest=effect_identity_digest(dict(payload)),
+                        first_version=0,
+                        command_id=command_id,
+                        actor=actor,
+                    )
+                )
+            try:
+                self.event_store.append_batch(
+                    tuple(writes),
+                    idempotency_key=command_id,
+                    request_fingerprint=fingerprint,
+                    preconditions=preconditions,
+                )
+                return
+            except WrongExpectedVersion:
+                if not link_index or attempt == 3:
+                    raise
 
     def _read_all(self, stream: StreamId) -> tuple:
         values = []
@@ -518,7 +583,16 @@ def _reconstruct(events: tuple) -> ToolExecutionRecord:
             "tool.execution-succeeded.v1",
             "tool.execution-failed.v1",
         ):
-            _require_event_claim(record, payload, allow_unknown=True)
+            rejected_before_claim = (
+                event.event_type == "tool.execution-failed.v1"
+                and payload.get("rejected_before_claim") is True
+                and payload.get("claim_token") is None
+            )
+            if rejected_before_claim:
+                if record.state is not ToolExecutionState.PREPARED:
+                    raise EventStoreError("invalid pre-claim tool failure transition")
+            else:
+                _require_event_claim(record, payload, allow_unknown=True)
             result = payload["result"]
             state = (
                 ToolExecutionState.SUCCEEDED

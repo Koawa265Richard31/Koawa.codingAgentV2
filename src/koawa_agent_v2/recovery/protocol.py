@@ -43,6 +43,16 @@ class CheckpointError(RuntimeError):
         super().__init__(code if not detail else code)
 
 
+LIVE_RUN_TURN_EVENT_TYPES = frozenset(
+    {
+        "turn.started.v1",
+        "turn.recovery-lease-claimed.v1",
+        "turn.recovery-lease-heartbeated.v1",
+        "turn.recovery-lease-released.v1",
+    }
+)
+
+
 REDUCER_NAME = "run-execution"
 REDUCER_VERSION = 2
 

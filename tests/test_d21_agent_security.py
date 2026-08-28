@@ -460,15 +460,15 @@ class RepoInjectionEgressTest(D21SecurityTest):
         self.assertEqual("policy_denied", denied["error"])
         self.assertEqual("network_disabled", denied["code"])
         self.assertNotIn(SECRET, error_result.content)
-        # ledger：拒绝发生在 claim 之前（PREPARED 且无结果、无 claim 事件）。
+        # ledger：拒绝发生在 claim 之前，并以确定性 FAILED 收口；无 handler claim。
         web_record = self.load_record(queued.turn_id, client, 1, "call-web")
         self.assertIsNotNone(web_record)
-        self.assertEqual(ToolExecutionState.PREPARED, web_record.state)
-        self.assertIsNone(web_record.result)
+        self.assertEqual(ToolExecutionState.FAILED, web_record.state)
+        self.assertTrue(web_record.result.is_error)
         stream_events = self.execution_stream(
             queued.turn_id, client.requests[1].model_turn_id, "call-web"
         )
-        self.assertEqual(("tool.execution-prepared.v1",), tuple(
+        self.assertEqual(("tool.execution-prepared.v1", "tool.execution-failed.v1"), tuple(
             event.event_type for event in stream_events
         ))
         # 预算只被成功的 read_file 占用 1 次；被拒外泄不占用预算。
@@ -800,14 +800,14 @@ class BudgetExhaustionTest(D21SecurityTest):
         self.assertEqual(TurnStatus.FAILED, result.turn.status)
         self.assertEqual(20, counting.calls)
         self.assertEqual(20, self.budget_reserved())
-        # 第 21 个调用停在 PREPARED：从未 claim、从未触发 handler。
+        # 第 21 个调用在 claim 前以 FAILED 收口：从未触发 handler。
         record21 = self.load_record(queued.turn_id, client, 20, "call-21")
         self.assertIsNotNone(record21)
-        self.assertEqual(ToolExecutionState.PREPARED, record21.state)
+        self.assertEqual(ToolExecutionState.FAILED, record21.state)
         events21 = self.execution_stream(
             queued.turn_id, client.requests[20].model_turn_id, "call-21"
         )
-        self.assertEqual(("tool.execution-prepared.v1",), tuple(
+        self.assertEqual(("tool.execution-prepared.v1", "tool.execution-failed.v1"), tuple(
             event.event_type for event in events21
         ))
 
@@ -955,6 +955,5 @@ class SupplyChainConfigTest(D21SecurityTest):
 
 if __name__ == "__main__":
     unittest.main()
-
 
 

@@ -1,14 +1,17 @@
 """Discovery and safe stale-run takeover orchestration (section 7.6)."""
 
 from __future__ import annotations
+from koawa_agent_v2.telemetry.faults import FaultPoint
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Mapping, Protocol, Sequence
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ..control.event_store import StreamId
 from ..control.models import TurnStatus
 from ..control.runtime import ThreadRuntime
+from ..control.schema import inject_fault
 from .context import (
     ExecutionProjection,
     ReconstructionError,
@@ -23,7 +26,7 @@ from .protocol import (
     RunPhase,
     stored_event_hash_v2,
 )
-from .store import CheckpointStore, RecoverableTurn
+from .store import CheckpointStore, LeaseConflict, RecoverableTurn
 
 
 class AutomaticRecoveryBlocked(RuntimeError):
@@ -116,6 +119,7 @@ class RecoveryCoordinator:
         except CheckpointError:
             checkpoint = None
         if checkpoint is not None and self._valid_cache(checkpoint, item, events, full):
+            inject_fault(FaultPoint.S3_CHECKPOINT_AFTER_VERIFY_BEFORE_TAIL)
             covered = events[: checkpoint.covered_stream_version + 1]
             covered_projection = reduce_execution(covered)
             tail = events[checkpoint.covered_stream_version + 1 :]
@@ -155,6 +159,8 @@ class RecoveryCoordinator:
         return True
 
     def claim_stale(self, item: RecoverableTurn, *, force: bool = False) -> RecoveryClaim:
+        if self._live_recovery_claim(item.turn_id):
+            raise LeaseConflict("recovery run lease is still active")
         try:
             context = self.reconstruct(item)
         except ReconstructionError as exc:
@@ -202,6 +208,39 @@ class RecoveryCoordinator:
                 "possible side effect requires D7 ledger or operator"
             )
         return RecoveryClaim(queued, None, context)
+
+    def _live_recovery_claim(self, turn_id: UUID) -> bool:
+        # A live recovery-lease overlay fences every stale takeover, even
+        # with force: another process may still be recovering this run.
+        from datetime import timezone
+
+        stream = StreamId("recovery-lease", turn_id)
+        cursor = -1
+        head = None
+        while True:
+            page = self.checkpoints.event_store.read_stream(
+                stream, after_version=cursor, limit=500
+            )
+            if not page:
+                break
+            head = page[-1]
+            cursor = head.stream_version
+            if len(page) < 500:
+                break
+        if head is None:
+            return False
+        if head.event_type not in (
+            "turn.recovery-lease-claimed.v1",
+            "turn.recovery-lease-heartbeated.v1",
+        ):
+            return False
+        expiry = head.payload.get("lease_expires_at")
+        if not isinstance(expiry, str):
+            return False
+        parsed = datetime.fromisoformat(expiry)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc) > self.checkpoints.database_time()
 
     def _read_events(self, stream: StreamId, after_version: int) -> tuple:
         values = []

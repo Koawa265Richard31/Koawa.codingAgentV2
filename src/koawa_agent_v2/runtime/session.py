@@ -14,6 +14,9 @@ restart by re-reading the thread.
 from __future__ import annotations
 
 import re
+import hashlib
+import os
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Sequence
@@ -34,6 +37,14 @@ from ..model.protocol import (
     UserMessage,
 )
 from ..model.stream import assemble_model_stream
+from ..workspace.effects import (
+    WorkspaceEffectKind,
+    WorkspaceEffectResolvedState,
+    WorkspaceEffectResultKind,
+    WorkspaceEffectState,
+    WorkspaceEffectStore,
+    workspace_effect_id,
+)
 
 _SESSION_ERROR = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _UNTRUSTED_MARKER = "[untrusted-session-summary]"
@@ -419,9 +430,14 @@ class SessionMemory:
 
 
 class SessionJournal:
-    """Durable, human-readable session artifact written into the repo (D19-5)."""
+    """Ledgered, crash-aware human-readable session artifact."""
 
     DEFAULT_PATH = "SESSION.md"
+
+    def __init__(self, effect_store: WorkspaceEffectStore) -> None:
+        if not isinstance(effect_store, WorkspaceEffectStore):
+            raise TypeError("effect_store must be WorkspaceEffectStore")
+        self._effects = effect_store
 
     def write(
         self,
@@ -429,8 +445,11 @@ class SessionJournal:
         turns: Sequence[SessionTurn],
         *,
         path: str = DEFAULT_PATH,
+        run_id: UUID,
+        semantic_command_id: UUID,
+        repository_identity_digest: str,
     ) -> Path:
-        """Write a deterministic markdown summary of the session turns."""
+        """Write deterministic markdown through a JOURNAL_EXPORT effect."""
         if not isinstance(repo, Path) or not repo.is_dir():
             raise SessionHistoryError("invalid_journal_repo")
         lines = ["# Session journal", ""]
@@ -448,8 +467,124 @@ class SessionJournal:
             if turn.error is not None:
                 lines.append(f"**error:** {turn.error}")
             lines.append("")
-        target = repo / path
-        target.write_text("\n".join(lines), encoding="utf-8")
+        relative = Path(path)
+        if relative.is_absolute() or not relative.parts or any(
+            part in {"", ".", ".."} for part in relative.parts
+        ):
+            raise SessionHistoryError("invalid_journal_path")
+        root = repo.resolve()
+        target = (root / relative).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise SessionHistoryError("invalid_journal_path") from None
+        encoded = "\n".join(lines).encode("utf-8", "strict")
+        expected_post = hashlib.sha256(encoded).hexdigest()
+        before = target.read_bytes() if target.is_file() else b""
+        precondition = hashlib.sha256(before).hexdigest()
+        existing = self._effects.load(
+            workspace_effect_id(WorkspaceEffectKind.JOURNAL_EXPORT, semantic_command_id)
+        )
+        if existing is not None:
+            precondition = existing.precondition_digest
+        intended = self._effects.intend(
+            semantic_command_id=semantic_command_id,
+            kind=WorkspaceEffectKind.JOURNAL_EXPORT,
+            repository_identity_digest=repository_identity_digest,
+            agent_id=None,
+            run_id=run_id,
+            resource_ref=relative.as_posix(),
+            base_digest=None,
+            input_digest=expected_post,
+            precondition_digest=precondition,
+            expected_postcondition_digest=expected_post,
+        ).record
+        if intended.state is WorkspaceEffectState.APPLIED:
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != expected_post:
+                raise SessionHistoryError("journal_postcondition_drift")
+            return target
+        if intended.state is WorkspaceEffectState.OUTCOME_UNKNOWN:
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != expected_post:
+                raise SessionHistoryError("journal_outcome_unknown")
+            self._effects.resolve_unknown(
+                intended.effect_id,
+                expected_version=intended.version,
+                claim_epoch=intended.claim_epoch,
+                claim_token=intended.claim_token,
+                unknown_event_id=intended.unknown_event_id,
+                resolved_state=WorkspaceEffectResolvedState.APPLIED,
+                result_kind=WorkspaceEffectResultKind.SUCCESS,
+                reconciler_principal="session-journal",
+                evidence_kind="exact_content_digest",
+                evidence_digest=expected_post,
+            )
+            return target
+        claimed = (
+            intended
+            if intended.state is WorkspaceEffectState.CLAIMED
+            else self._effects.claim(
+                intended.effect_id,
+                expected_version=intended.version,
+                owner_id="session-journal",
+            ).record
+        )
+        if claimed.state is not WorkspaceEffectState.CLAIMED:
+            raise SessionHistoryError("journal_effect_invalid_state")
+        # A lost response after replace is reconciled from exact target bytes.
+        if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == expected_post:
+            self._effects.record_applied(
+                claimed.effect_id,
+                expected_version=claimed.version,
+                claim_epoch=claimed.claim_epoch,
+                claim_token=claimed.claim_token,
+                result_kind=WorkspaceEffectResultKind.SUCCESS,
+                result_code="journal_exported",
+                exit_code=0,
+                postcondition_digest=expected_post,
+                evidence_digest=expected_post,
+            )
+            return target
+        temporary_name: str | None = None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_name, target)
+            temporary_name = None
+            if hashlib.sha256(target.read_bytes()).hexdigest() != expected_post:
+                raise OSError("journal postcondition mismatch")
+        except Exception:
+            self._effects.record_outcome_unknown(
+                claimed.effect_id,
+                expected_version=claimed.version,
+                claim_epoch=claimed.claim_epoch,
+                claim_token=claimed.claim_token,
+                uncertainty_code="journal_export_uncertain",
+                evidence_digest=None,
+            )
+            raise
+        finally:
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name)
+                except FileNotFoundError:
+                    pass
+        self._effects.record_applied(
+            claimed.effect_id,
+            expected_version=claimed.version,
+            claim_epoch=claimed.claim_epoch,
+            claim_token=claimed.claim_token,
+            result_kind=WorkspaceEffectResultKind.SUCCESS,
+            result_code="journal_exported",
+            exit_code=0,
+            postcondition_digest=expected_post,
+            evidence_digest=expected_post,
+        )
         return target
 
 

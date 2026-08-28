@@ -5,11 +5,13 @@
 """
 
 from __future__ import annotations
+from koawa_agent_v2.telemetry.faults import FaultPoint
 
 import hashlib
 import json
 import math
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -45,7 +47,7 @@ from .schema import (
     ensure_schema,
     inject_fault,
 )
-from ..recovery.protocol import CheckpointError
+from ..recovery.protocol import LIVE_RUN_TURN_EVENT_TYPES, CheckpointError
 from ..recovery.store import (
     CacheReceipt,
     CheckpointCacheRecord,
@@ -221,7 +223,7 @@ class SqliteEventStore:
             else _require_fingerprint(request_fingerprint)
         )
         request_hash = _fingerprint_hash(fingerprint)
-        inject_fault("s3.event.after_validate_before_begin")
+        inject_fault(FaultPoint.S3_EVENT_AFTER_VALIDATE_BEFORE_BEGIN)
 
         connection = self._connect()
         try:
@@ -374,6 +376,16 @@ class SqliteEventStore:
                             stream_version,
                             str(write.stream_id.aggregate_id),
                         )
+                    elif write.stream_id.category == "recovery-lease":
+                        # Typed lease events live on the dedicated recovery-lease
+                        # stream so the Turn stream stays stable during a run
+                        # (D7/D9 tool fences keep their start-time versions).
+                        self._project_lease_event(
+                            connection,
+                            event_document,
+                            stream_version,
+                            str(write.stream_id.aggregate_id),
+                        )
                     commit_index += 1
 
                 last_version = first_version + len(write.events) - 1
@@ -391,7 +403,7 @@ class SqliteEventStore:
                     )
                 )
 
-            inject_fault("s3.event.mid_batch_before_receipt")
+            inject_fault(FaultPoint.S3_EVENT_MID_BATCH_BEFORE_RECEIPT)
             # 阶段 7：把结果回执与业务事件放进同一事务。只有事件和 receipt 都落库
             # 后才 COMMIT；因此重试不会遇到“事件成功但没有幂等证明”的中间状态。
             receipt = AppendReceipt(resolved_key, tuple(receipts))
@@ -579,18 +591,35 @@ class SqliteEventStore:
         in _connect.
         """
 
-        connection = sqlite3.connect(
-            self._database_path,
-            timeout=self._busy_timeout_ms / 1000,
-            isolation_level=None,
-        )
-        try:
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("PRAGMA synchronous = FULL")
-        except sqlite3.Error as exc:
-            raise EventStoreError(f"could not initialize SQLite event store: {exc}") from exc
-        finally:
-            connection.close()
+        deadline = time.monotonic() + self._busy_timeout_ms / 1000
+        # A journal-mode lock upgrade may return BUSY without invoking SQLite's
+        # busy handler. Release that connection before retrying; wait for a
+        # writer reservation on a NEW connection so two initializers cannot
+        # retain each other's read locks. Bound both attempts and total time.
+        for attempt in range(4):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise EventStoreError("SQLite initialization busy deadline exceeded")
+            connection = sqlite3.connect(
+                self._database_path, timeout=remaining, isolation_level=None,
+            )
+            try:
+                if attempt:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.rollback()
+                mode = connection.execute("PRAGMA journal_mode").fetchone()
+                if mode is None or str(mode[0]).lower() != "wal":
+                    mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+                if mode is None or str(mode[0]).lower() != "wal":
+                    raise EventStoreError("SQLite WAL mode unavailable")
+                connection.execute("PRAGMA synchronous = FULL")
+                return
+            except sqlite3.Error as exc:
+                code = getattr(exc, "sqlite_errorcode", 0)
+                if code & 0xFF != sqlite3.SQLITE_BUSY or attempt == 3 or time.monotonic() >= deadline:
+                    raise EventStoreError(f"could not initialize SQLite event store: {exc}") from exc
+            finally:
+                connection.close()
 
     def _connect(self) -> sqlite3.Connection:
         """创建一个配置一致的短生命周期 SQLite 连接。
@@ -726,6 +755,60 @@ class SqliteEventStore:
             connection.execute("DELETE FROM recoverable_turns WHERE turn_id=?", (turn_id,))
             return
 
+    def _project_lease_event(
+        self,
+        connection: sqlite3.Connection,
+        event_document: Mapping[str, Any],
+        stream_version: int,
+        turn_id: str,
+    ) -> None:
+        # Typed lease events maintain the recoverable/lease projection from the
+        # dedicated recovery-lease stream (the Turn stream stays stable).
+        event_type = event_document["event_type"]
+        payload = event_document["payload"]
+        metadata = event_document["metadata"]
+        run_id = metadata.get("run_id")
+        thread_id = metadata.get("thread_id")
+        if event_type == "turn.recovery-lease-claimed.v1":
+            lease_run = payload.get("run_id")
+            owner = payload.get("owner")
+            expires_at = payload.get("lease_expires_at")
+            if not (lease_run and owner and expires_at):
+                return
+            db_now = _db_now_text(connection)
+            connection.execute(
+                "INSERT INTO run_leases(turn_id,run_id,owner_id,generation,version,expires_at) VALUES(?,?,?,1,0,?) "
+                "ON CONFLICT(turn_id) DO UPDATE SET run_id=excluded.run_id,owner_id=excluded.owner_id,generation=run_leases.generation+1,version=0,expires_at=excluded.expires_at",
+                (turn_id, lease_run, owner, expires_at),
+            )
+            if run_id and thread_id:
+                connection.execute(
+                    "INSERT INTO recoverable_turns(turn_id,thread_id,run_id,turn_version,lease_expires_at,updated_at) VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(turn_id) DO UPDATE SET thread_id=excluded.thread_id,run_id=excluded.run_id,turn_version=excluded.turn_version,lease_expires_at=excluded.lease_expires_at,updated_at=excluded.updated_at",
+                    (turn_id, thread_id, run_id, stream_version, expires_at, db_now),
+                )
+            return
+        if event_type == "turn.recovery-lease-heartbeated.v1":
+            lease_run = payload.get("run_id")
+            owner = payload.get("owner")
+            expires_at = payload.get("lease_expires_at")
+            if not (lease_run and owner and expires_at):
+                return
+            db_now = _db_now_text(connection)
+            connection.execute(
+                "UPDATE run_leases SET version=version+1, expires_at=? WHERE turn_id=? AND run_id=? AND owner_id=?",
+                (expires_at, turn_id, lease_run, owner),
+            )
+            connection.execute(
+                "UPDATE recoverable_turns SET lease_expires_at=?, updated_at=? WHERE turn_id=?",
+                (expires_at, db_now, turn_id),
+            )
+            return
+        if event_type == "turn.recovery-lease-released.v1":
+            connection.execute("DELETE FROM run_leases WHERE turn_id=?", (turn_id,))
+            connection.execute("DELETE FROM recoverable_turns WHERE turn_id=?", (turn_id,))
+            return
+
     # ------------------------------------------------------------------
     # I5 RecoveryProjectionPort implementation
     # ------------------------------------------------------------------
@@ -754,6 +837,7 @@ class SqliteEventStore:
                 "WHERE e.global_position = ?",
                 (record.source_global_position,),
             ).fetchone()
+            inject_fault(FaultPoint.S3_CHECKPOINT_AFTER_SOURCE_READ)
             if (
                 source is None
                 or source["category"] != "run-execution"
@@ -770,7 +854,7 @@ class SqliteEventStore:
             ).fetchone()
             if turn_row is None or int(turn_row["current_version"]) != record.turn_version:
                 raise CheckpointError("checkpoint_fence_mismatch")
-            if turn_row["event_type"] != "turn.started.v1":
+            if turn_row["event_type"] not in LIVE_RUN_TURN_EVENT_TYPES:
                 raise CheckpointError("checkpoint_terminal_race")
             payload = json.loads(turn_row["payload_json"])
             if payload.get("run_id") != str(record.run_id):
@@ -779,7 +863,7 @@ class SqliteEventStore:
                 "SELECT cache_version, checkpoint_id FROM checkpoint_cache WHERE turn_id = ?",
                 (str(record.turn_id),),
             ).fetchone()
-            inject_fault("s3.checkpoint.before_cache_commit")
+            inject_fault(FaultPoint.S3_CHECKPOINT_BEFORE_CACHE_COMMIT)
             if existing is None:
                 connection.execute(
                     "INSERT INTO checkpoint_cache "
@@ -833,8 +917,8 @@ class SqliteEventStore:
                     ),
                 )
                 changed = True
-            inject_fault("s3.checkpoint.after_cache_commit")
             connection.commit()
+            inject_fault(FaultPoint.S3_CHECKPOINT_AFTER_CACHE_COMMIT)
             return CacheReceipt(record.turn_id, record.cache_version, record.checkpoint_id, changed)
         except CheckpointError:
             connection.rollback()

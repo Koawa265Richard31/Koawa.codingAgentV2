@@ -76,6 +76,63 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_list(name: str) -> list[str]:
+    raw = os.environ.get(name)
+    if not raw:
+        return []
+    return [
+        item.strip()
+        for item in raw.split(",")
+        if item.strip()
+    ]
+
+
+_PROBE_TOOLS: dict[str, dict[str, Any]] = {
+    "probe_env_names": {
+        "name": "probe_env_names",
+        "description": "Return the sorted visible environment variable names.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    "probe_host_path": {
+        "name": "probe_host_path",
+        "description": "Read one host path and return its sha256 (canary).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    "probe_network": {
+        "name": "probe_network",
+        "description": "Attempt one HTTP GET against the given URL (canary).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048,
+                }
+            },
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 def _load_tools() -> list[dict[str, Any]]:
     raw = os.environ.get("KOAWA_MCP_FIXTURE_TOOLS_JSON")
     if not raw:
@@ -86,7 +143,12 @@ def _load_tools() -> list[dict[str, Any]]:
         return DEFAULT_TOOLS
     if not isinstance(tools, list):
         return DEFAULT_TOOLS
-    return [item for item in tools if isinstance(item, dict)]
+    visible = [item for item in tools if isinstance(item, dict)]
+    for name in _env_list("KOAWA_MCP_FIXTURE_EXTRA_TOOLS"):
+        probe = _PROBE_TOOLS.get(name)
+        if probe is not None:
+            visible.append(probe)
+    return visible
 
 
 def _parse_message(raw: str) -> dict[str, Any] | None:
@@ -158,6 +220,9 @@ def main() -> int:
     tools = _load_tools()
     page_size = _env_int("KOAWA_MCP_FIXTURE_PAGE_SIZE", 2)
     call_delay_ms = _env_int("KOAWA_MCP_FIXTURE_CALL_DELAY_MS", 0)
+    init_delay_ms = _env_int("KOAWA_MCP_FIXTURE_INIT_DELAY_MS", 0)
+    list_delay_ms = _env_int("KOAWA_MCP_FIXTURE_LIST_DELAY_MS", 0)
+    shutdown_hang_ms = _env_int("KOAWA_MCP_FIXTURE_SHUTDOWN_HANG_MS", 0)
     list_changed_after = _env_int("KOAWA_MCP_FIXTURE_LIST_CHANGED_AFTER_CALLS", 0)
     unknown_id = _env_bool("KOAWA_MCP_FIXTURE_UNKNOWN_ID_RESPONSE")
     throw_on_tool = os.environ.get("KOAWA_MCP_FIXTURE_THROW_ON_TOOL")
@@ -207,6 +272,10 @@ def main() -> int:
             return
         method = request.get("method")
         if method == "initialize":
+            if init_delay_ms > 0:
+                import time as _time
+
+                _time.sleep(init_delay_ms / 1000.0)
             result = {
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {"listChanged": True}},
@@ -218,6 +287,10 @@ def main() -> int:
             initialized = True
             return
         if method == "tools/list":
+            if list_delay_ms > 0:
+                import time as _time
+
+                _time.sleep(list_delay_ms / 1000.0)
             params = request.get("params") or {}
             cursor = params.get("cursor")
             start = 0
@@ -250,7 +323,35 @@ def main() -> int:
 
                 time.sleep(call_delay_ms / 1000.0)
             arguments = params.get("arguments") or {}
-            if tool_name == "echo":
+            if tool_name == "probe_env_names":
+                result = {
+                    "content": [
+                        {"type": "text", "text": _canonical({"names": sorted(os.environ)})}
+                    ]
+                }
+            elif tool_name == "probe_host_path":
+                target = arguments.get("path", "")
+                import hashlib as _hashlib
+
+                try:
+                    with open(target, "rb") as handle:
+                        digest = _hashlib.sha256(handle.read()).hexdigest()
+                    result = {"content": [{"type": "text", "text": digest}]}
+                except OSError:
+                    result = {"content": [{"type": "text", "text": "unreadable"}]}
+                    result["isError"] = True
+            elif tool_name == "probe_network":
+                import urllib.request as _request
+
+                url = arguments.get("url", "")
+                try:
+                    with _request.urlopen(url, timeout=2) as response:
+                        code = response.getcode() or 0
+                    result = {"content": [{"type": "text", "text": f"http:{code}"}]}
+                except Exception:
+                    result = {"content": [{"type": "text", "text": "unreachable"}]}
+                    result["isError"] = True
+            elif tool_name == "echo":
                 value = arguments.get("value", "")
                 result = {
                     "content": [{"type": "text", "text": _canonical({"echo": value})}]
@@ -276,6 +377,10 @@ def main() -> int:
     while True:
         frame = frame_reader.read()
         if frame is None:
+            if shutdown_hang_ms > 0:
+                import time as _time
+
+                _time.sleep(shutdown_hang_ms / 1000.0)
             return 0
         try:
             raw = frame.decode("utf-8", "strict")

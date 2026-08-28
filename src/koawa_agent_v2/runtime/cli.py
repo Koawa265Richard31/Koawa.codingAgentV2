@@ -6,7 +6,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from ..agents.graph import AgentError
 from ..approval_service import ApprovalService
@@ -707,6 +707,9 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
             continue
         if text == "/journal":
             from .session import SessionHistory, SessionJournal
+            from .truth import RuntimeTruthVerifier
+            from ..workspace.content import repository_identity
+            from ..workspace.effects import WorkspaceEffectStore
 
             if thread_id is None:
                 print("  （还没有会话线程）")
@@ -718,7 +721,26 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
                     thread_id,
                     provider=config.provider.provider,
                 ).turns
-                target = SessionJournal().write(config.repo, turns)
+                if not turns or turns[-1].turn_id is None:
+                    raise RuntimeError("journal_requires_completed_turn")
+                truth = RuntimeTruthVerifier(
+                    app.assembled.runtime, app.assembled.store
+                ).read(turns[-1].turn_id)
+                if truth.run is None:
+                    raise RuntimeError("journal_requires_run_truth")
+                semantic = uuid5(
+                    thread_id,
+                    f"journal:{len(turns)}:{turns[-1].turn_id}",
+                )
+                target = SessionJournal(
+                    WorkspaceEffectStore(app.assembled.store)
+                ).write(
+                    config.repo,
+                    turns,
+                    run_id=truth.run.run_id,
+                    semantic_command_id=semantic,
+                    repository_identity_digest=repository_identity(config.repo),
+                )
                 print(f"  journal written: {target}")
             except Exception as exc:
                 print(f"  journal failed: {getattr(exc, 'code', exc)}")

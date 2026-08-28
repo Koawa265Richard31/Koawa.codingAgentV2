@@ -186,6 +186,23 @@ class SpawnSpec:
     cwd: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CloseReport:
+    """What the terminal close actually proved (§8.7).
+
+    ``uncertain`` means a phase hit its shared deadline and the process
+    tree may still exist; the caller must record the allocation as
+    OUTCOME_UNKNOWN instead of a clean stop.
+    """
+
+    process_exited: bool | None
+    process_terminated: bool
+    uncertain: bool
+    stderr_truncated: bool
+    stderr_bytes: int
+    cleanup_error: str | None
+
+
 class OwnedProcess(Protocol):
     """Process tree owned by the transport, with deadline-bounded control."""
 
@@ -301,11 +318,11 @@ class OwnedSystemProcess:
         return self._popen.poll()
 
     def terminate_tree(self, *, deadline: float) -> None:
-        self._signal_tree(force=False)
+        self._signal_tree(force=False, deadline=deadline)
         self._wait_or_raise(deadline)
 
     def kill_tree(self, *, deadline: float) -> None:
-        self._signal_tree(force=True)
+        self._signal_tree(force=True, deadline=deadline)
         self._wait_or_raise(deadline)
 
     def wait(self, *, deadline: float) -> int:
@@ -328,20 +345,32 @@ class OwnedSystemProcess:
                 except (OSError, ValueError):
                     pass
 
-    def _signal_tree(self, force: bool) -> None:
+    def _signal_tree(self, force: bool, *, deadline: float) -> None:
         if os.name == "nt":
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                raise TransportError("mcp_process_wait_timeout")
             args = ["taskkill", "/PID", str(self.pid), "/T"]
             if force:
                 args.append("/F")
             try:
                 subprocess.run(
                     args,
-                    timeout=10,
+                    timeout=remaining,
                     capture_output=True,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             except (OSError, subprocess.TimeoutExpired):
                 pass  # bounded: either the tree died or the signal failed
+            if force and self._popen.poll() is None:
+                # taskkill itself can miss its short deadline on a loaded
+                # Windows host.  The process handle is still exact, so force
+                # the owned root through Popen as a final bounded fallback;
+                # the preceding /T attempt remains responsible for children.
+                try:
+                    self._popen.kill()
+                except OSError:
+                    pass
             return
         signal_number = signal.SIGKILL if force else signal.SIGTERM
         try:
@@ -386,11 +415,18 @@ class StdioTransport:
         max_inbound_messages: int = 1024,
         process_spawner: ProcessSpawner | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        # I6 §8.7: launcher path.  When set, open() binds an already-
+        # spawned endpoint instead of building env + spawning itself.
+        process_factory: Callable[[], OwnedProcess] | None = None,
+        allocation_state_reporter: Callable[[str], None] | None = None,
     ) -> None:
         if not isinstance(command, Sequence) or isinstance(command, (str, bytes)):
             raise TypeError("command must be a sequence")
         if not command or any(not isinstance(item, str) for item in command):
-            raise ValueError("command must contain non-empty strings")
+            if not (not command and process_factory is not None):
+                # I6 §8.7: only the launcher/factory path may supply an
+                # empty command; the raw-command path still requires it.
+                raise ValueError("command must contain non-empty strings")
         if not isinstance(env, Mapping):
             raise TypeError("env must be a mapping")
         if allowed_env_names is not None and not isinstance(
@@ -429,6 +465,14 @@ class StdioTransport:
         self._shutdown_timeout_seconds = float(shutdown_timeout_seconds)
         self._max_inbound_messages = max_inbound_messages
         self._clock = monotonic
+        if process_factory is not None and not callable(process_factory):
+            raise TypeError("process_factory must be callable or None")
+        if allocation_state_reporter is not None and not callable(
+            allocation_state_reporter,
+        ):
+            raise TypeError("allocation_state_reporter must be callable or None")
+        self._factory = process_factory
+        self._allocation_reporter = allocation_state_reporter
         self._spawner = process_spawner if process_spawner is not None else SystemProcessSpawner(clock=monotonic)
         self._messages: queue.Queue[object] = queue.Queue(
             maxsize=max_inbound_messages
@@ -447,6 +491,8 @@ class StdioTransport:
         self._send_state = "not_sent"
         self._overflow_code: str | None = None
         self._cleanup_error: TransportError | None = None
+        self._close_report: CloseReport | None = None
+        self._close_uncertain = False
 
     # -- public state -------------------------------------------------------
 
@@ -488,6 +534,18 @@ class StdioTransport:
         owned = self._owned
         return owned.pid if owned is not None else None
 
+    def close_report(self) -> CloseReport | None:
+        """Terminal CloseReport of the last close (None while open)."""
+
+        return self._close_report
+
+    def _report_allocation(self, state: str) -> None:
+        if self._allocation_reporter is not None:
+            try:
+                self._allocation_reporter(state)
+            except Exception:
+                pass
+
     # -- lifecycle ----------------------------------------------------------
 
     def open(self) -> None:
@@ -506,35 +564,51 @@ class StdioTransport:
             epoch = self._epoch
             temporary = tempfile.TemporaryDirectory(prefix="koawa-mcp-")
             self._temp = temporary
-        try:
-            environment = build_minimal_environment(
-                self._env,
-                allowed_names=self._allowed_names,
-                private_temp=Path(temporary.name),
-            )
-        except SubprocessEnvError as error:
-            self._fail_open(error.code)
-            raise TransportError(error.code) from None
-        spec = SpawnSpec(command=self._command, env=environment, cwd=self._cwd)
-        deadline = self._clock() + self._process_start_timeout_seconds
-        try:
-            owned = self._spawner.spawn(spec, deadline=deadline)
-        except SubprocessEnvError as error:
-            self._fail_open(error.code)
-            raise TransportError(error.code) from None
-        except TransportError as error:
-            self._fail_open(error.code)
-            raise
-        except OSError as error:
-            self._fail_open("mcp_process_start_failed")
-            raise TransportError("mcp_process_start_failed") from error
-        if self._clock() >= deadline:
-            # ACK arrived past the start deadline: the OS process may exist, so
-            # force-collect the owned tree and only then report the timeout
-            # (wait confirms the tree is gone before the error is raised).
-            self._collect_owned(owned)
-            self._fail_open("mcp_process_start_timeout")
-            raise TransportError("mcp_process_start_timeout")
+        if self._factory is not None:
+            # I6 §8.7: the launcher already consumed the ticket, enforced
+            # limits and created the OS process; open() only binds it.  The
+            # private temp was created by the launcher.
+            try:
+                owned = self._factory()
+            except TransportError as error:
+                self._fail_open(getattr(error, "code", "mcp_process_start_failed"))
+                raise
+            except Exception as error:
+                self._fail_open("mcp_process_start_failed")
+                raise TransportError("mcp_process_start_failed") from error
+            if owned is None:
+                self._fail_open("mcp_process_start_failed")
+                raise TransportError("mcp_process_start_failed")
+        else:
+            try:
+                environment = build_minimal_environment(
+                    self._env,
+                    allowed_names=self._allowed_names,
+                    private_temp=Path(temporary.name),
+                )
+            except SubprocessEnvError as error:
+                self._fail_open(error.code)
+                raise TransportError(error.code) from None
+            spec = SpawnSpec(command=self._command, env=environment, cwd=self._cwd)
+            deadline = self._clock() + self._process_start_timeout_seconds
+            try:
+                owned = self._spawner.spawn(spec, deadline=deadline)
+            except SubprocessEnvError as error:
+                self._fail_open(error.code)
+                raise TransportError(error.code) from None
+            except TransportError as error:
+                self._fail_open(error.code)
+                raise
+            except OSError as error:
+                self._fail_open("mcp_process_start_failed")
+                raise TransportError("mcp_process_start_failed") from error
+            if self._clock() >= deadline:
+                # ACK arrived past the start deadline: the OS process may exist,
+                # so force-collect the owned tree and only then report the
+                # timeout (wait confirms the tree is gone before the error).
+                self._collect_owned(owned)
+                self._fail_open("mcp_process_start_timeout")
+                raise TransportError("mcp_process_start_timeout")
         with self._state_lock:
             if self._epoch != epoch or self._state != self.OPENING:
                 # A close raced open and won: collect our process, go terminal.
@@ -544,6 +618,7 @@ class StdioTransport:
                 raise TransportClosed()
             self._owned = owned
             self._state = self.OPEN
+        self._report_allocation("started")
         stdout_thread = threading.Thread(
             target=self._read_loop,
             args=(owned,),
@@ -643,6 +718,7 @@ class StdioTransport:
     # -- internals ----------------------------------------------------------
 
     def _fail_open(self, code: str) -> None:
+        self._report_allocation("failed_before_start")
         temporary = self._temp
         if temporary is not None:
             try:
@@ -760,6 +836,22 @@ class StdioTransport:
                         "mcp_temp_cleanup_failed"
                     )
             self._temp = None
+        # 7) I6 §8.7: record what the close actually proved.  A phase that
+        #    hit the shared shutdown deadline leaves outcome uncertain.
+        self._close_report = CloseReport(
+            process_exited=self._process_exited(owned) if owned is not None else None,
+            process_terminated=owned is None or self._process_exited(owned),
+            uncertain=self._close_uncertain or self._cleanup_error is not None,
+            stderr_truncated=self._stderr_truncated,
+            stderr_bytes=self._stderr_bytes,
+            cleanup_error=
+            None if self._cleanup_error is None else self._cleanup_error.code,
+        )
+        report = self._close_report
+        if report is not None and report.uncertain:
+            self._report_allocation("outcome_unknown")
+        else:
+            self._report_allocation("stopped")
 
     def _wait_bounded(
         self, owned: OwnedProcess, *, deadline: float, cap: float | None

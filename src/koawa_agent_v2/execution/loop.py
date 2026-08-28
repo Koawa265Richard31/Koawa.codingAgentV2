@@ -13,6 +13,8 @@ from threading import Event
 from typing import Callable, Iterable, Protocol, Sequence
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from ..telemetry.trace import TraceProbe, TraceSink
+
 from ..model.protocol import (
     AssistantMessage,
     AssistantTextItem,
@@ -219,7 +221,8 @@ class AgentLoop:
         claim_gate: bool = False,
         limits: AgentLoopLimits | None = None,
         stream_limits: StreamLimits | None = None,
-        trace_store: "TraceStore | None" = None,
+        trace_sink: TraceSink | None = None,
+        trace_store: object | None = None,
         correlation_id: object | None = None,
     ) -> None:
         if not hasattr(client, "stream"):
@@ -251,9 +254,20 @@ class AgentLoop:
             raise ValueError("tool executor definitions contain duplicate names")
         self._tool_definitions = definitions
         self._available_tools = frozenset(item.name for item in definitions)
+        # I6 §8.8: the snapshot consumed by the most recent model round.
+        self._last_snapshot = None
         self._limits = limits or AgentLoopLimits()
         self._stream_limits = stream_limits or StreamLimits()
-        self._trace_store = trace_store
+        if trace_sink is not None and trace_store is not None:
+            raise ValueError("use only one of trace_sink or trace_store")
+        if trace_sink is not None and not callable(getattr(trace_sink, "emit", None)):
+            raise TypeError("trace_sink must implement TraceSink")
+        # trace_store is a compatibility path for older tests/callers. Runtime
+        # assembly exclusively supplies the failure-isolated TraceSink.
+        if trace_store is not None and not callable(getattr(trace_store, "append", None)):
+            raise TypeError("trace_store must provide append()")
+        self._trace_sink = trace_sink
+        self._legacy_trace_store = trace_store
         self._correlation_id = correlation_id
 
     @property
@@ -268,20 +282,45 @@ class AgentLoop:
     def has_tools(self) -> bool:
         return bool(self._available_tools)
 
+    @property
+    def last_snapshot(self):
+        """The frozen ToolCatalogSnapshot bound to the last model round."""
+
+        return self._last_snapshot
+
+    def _take_snapshot(self):
+        """Atomically snapshot the catalog for THIS model round (§8.8).
+
+        An executor with a catalog_snapshot() accessor pins definitions,
+        profiles, resolvers and semantic bindings for exactly the model
+        request built next and every tool call that follows it.
+        """
+        executor = self._tool_executor
+        snapshot = None
+        if executor is not None and hasattr(executor, "catalog_snapshot"):
+            try:
+                snapshot = executor.catalog_snapshot()
+            except Exception:
+                snapshot = None
+        return snapshot
+
     def _trace(self, stream: str, kind: str, fields: dict[str, object]) -> None:
-        if self._trace_store is None:
+        if self._trace_sink is None and self._legacy_trace_store is None:
             return
         correlation_id = self._correlation_id
         if not isinstance(correlation_id, UUID):
             from uuid import uuid4
 
             correlation_id = uuid4()
-        self._trace_store.append(
-            correlation_id=correlation_id,
-            stream=stream,
-            kind=kind,
-            fields=fields,
-        )
+        if self._trace_sink is not None:
+            self._trace_sink.emit(TraceProbe(correlation_id, stream, kind, fields))
+        else:
+            self._legacy_trace_store.append(
+                correlation_id=correlation_id,
+                stream=stream,
+                kind=kind,
+                fields=fields,
+            )
 
     def run(
         self,
@@ -394,6 +433,15 @@ class AgentLoop:
             token.raise_if_cancelled()
             if ownership_guard is not None:
                 ownership_guard()
+            # I6 §8.8: ONE snapshot pins definitions for this request and
+            # every tool call produced by this response.
+            snapshot = self._take_snapshot()
+            self._last_snapshot = snapshot
+            round_definitions = (
+                self._tool_definitions
+                if snapshot is None
+                else snapshot.definitions
+            )
             model_turn_id = _model_turn_id(run_id, model_round)
             self._trace("model", "round", {"kind": "round"})
             try:
@@ -402,7 +450,7 @@ class AgentLoop:
                     provider=provider,
                     model=model,
                     input_items=tuple(context),
-                    tool_definitions=self._tool_definitions,
+                    tool_definitions=round_definitions,
                     max_output_tokens=max_output_tokens,
                 )
             except (TypeError, ValueError) as exc:

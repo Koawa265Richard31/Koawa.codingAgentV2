@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Callable
+from ..telemetry.faults import FaultPoint, emit_fault, require_fault_point
+from .read_snapshot import ReadSnapshotError, read_snapshot
 
 
 DATABASE_LEGACY_EXPORT_REQUIRED = "database_legacy_export_required"
@@ -72,6 +74,9 @@ _fault_hooks: dict[str, Callable[[], None]] = {}
 
 def register_fault_hook(point: str, hook: Callable[[], None] | None) -> None:
     """Install/remove one named callable for the deterministic fault points."""
+    require_fault_point(point)
+    if hook is not None and not callable(hook):
+        raise TypeError("fault hook must be callable")
     if hook is None:
         _fault_hooks.pop(point, None)
     else:
@@ -80,6 +85,7 @@ def register_fault_hook(point: str, hook: Callable[[], None] | None) -> None:
 
 def inject_fault(point: str) -> None:
     """Trigger a registered fault once per call; production default is no-op."""
+    emit_fault(point, {})
     hook = _fault_hooks.get(point)
     if hook is not None:
         hook()
@@ -372,41 +378,6 @@ class Classification:
     user_version: int
 
 
-def _file_digest(path: Path) -> str:
-    data = path.read_bytes()
-    return hashlib.sha256(data).hexdigest()
-
-
-def _sidecar_snapshot(path: Path) -> tuple[bool, bool]:
-    # Read-only WAL access legitimately (re)creates/updates the -shm file,
-    # so the byte-preservation invariant covers the database file plus the
-    # no-NEW-sidecar rule; pre-existing sidecars may be re-read.
-    return (
-        Path(str(path) + "-wal").exists(),
-        Path(str(path) + "-shm").exists(),
-    )
-
-
-def _read_only_connection(path: Path, busy_timeout_ms: int):
-    connection = sqlite3.connect(
-        f"file:{path}?mode=ro",
-        uri=True,
-        timeout=busy_timeout_ms / 1000,
-        isolation_level=None,
-    )
-    connection.row_factory = sqlite3.Row
-    connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
-    return connection
-
-
-def _assert_no_new_sidecars(path: Path, before_wal: bool, before_shm: bool) -> None:
-    after_wal, after_shm = _sidecar_snapshot(path)
-    if (not before_wal and after_wal) or (not before_shm and after_shm):
-        raise DatabaseSchemaError(
-            DATABASE_CLASSIFICATION_FAILED, "classification created a sidecar file"
-        )
-
-
 def classify_database(
     database_path: str | Path,
     *,
@@ -425,43 +396,27 @@ def classify_database(
         return Classification(DatabaseState.FRESH, 0)
     if not path.is_file():
         raise DatabaseSchemaError(DATABASE_CLASSIFICATION_FAILED, "path is not a file")
-    for _attempt in range(4):
-        before = _file_digest(path)
-        before_wal, before_shm = _sidecar_snapshot(path)
-        try:
-            connection = _read_only_connection(path, busy_timeout_ms)
-        except sqlite3.Error as exc:
-            raise DatabaseSchemaError(
-                DATABASE_CLASSIFICATION_FAILED, "read-only snapshot unavailable"
-            ) from exc
-        try:
-            user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            signature = schema_signature(connection)
-            ledger = _ledger_rows(connection)
-        except sqlite3.DatabaseError as exc:
-            raise DatabaseSchemaError(
-                DATABASE_CLASSIFICATION_FAILED, "file is not a SQLite database"
-            ) from exc
-        finally:
-            connection.close()
-        after = _file_digest(path)
-        if before == after:
-            break
-    else:
-        raise DatabaseSchemaError(
-            DATABASE_CLASSIFICATION_FAILED, "classification changed the file bytes"
-        )
+    try:
+        snapshot = read_snapshot(path, timeout_ms=busy_timeout_ms)
+        with snapshot.connect() as connection:
+            return classify_connection(connection)
+    except (ReadSnapshotError, sqlite3.Error):
+        raise DatabaseSchemaError(DATABASE_CLASSIFICATION_FAILED) from None
+
+
+def classify_connection(connection: sqlite3.Connection) -> Classification:
+    """Classify the caller's already captured snapshot, without reopening media."""
+    user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    signature = schema_signature(connection)
+    ledger = _ledger_rows(connection)
 
     if user_version == 0 and not signature:
         return Classification(DatabaseState.FRESH, 0)
     if user_version == 0 and signature in LEGACY_V0_FINGERPRINTS:
-        _assert_no_new_sidecars(path, before_wal, before_shm)
         return Classification(DatabaseState.LEGACY_EXPORT_REQUIRED, 0)
     if user_version == 0:
-        _assert_no_new_sidecars(path, before_wal, before_shm)
         return Classification(DatabaseState.UNKNOWN, 0)
     if user_version > CURRENT_SCHEMA_VERSION:
-        _assert_no_new_sidecars(path, before_wal, before_shm)
         return Classification(DatabaseState.TOO_NEW, user_version)
     if (
         signature == _expected_signature(user_version)
@@ -473,7 +428,6 @@ def classify_database(
             else DatabaseState.MIGRATABLE
         )
         return Classification(state, user_version)
-    _assert_no_new_sidecars(path, before_wal, before_shm)
     return Classification(DatabaseState.UNKNOWN, user_version)
 
 # ---------------------------------------------------------------------------
@@ -486,7 +440,7 @@ _schema_lock = threading.Lock()
 def _apply_step(connection, step: MigrationStep) -> None:
     """Apply one migration step inside the caller's BEGIN IMMEDIATE."""
     step.apply(connection)
-    inject_fault("s3.migration.after_ddl")
+    inject_fault(FaultPoint.S3_MIGRATION_AFTER_DDL)
     step.postcheck(connection)
     connection.execute(
         "INSERT INTO schema_migrations "
@@ -500,9 +454,9 @@ def _apply_step(connection, step: MigrationStep) -> None:
             _db_now(connection),
         ),
     )
-    inject_fault("s3.migration.before_user_version")
+    inject_fault(FaultPoint.S3_MIGRATION_BEFORE_USER_VERSION)
     connection.execute(f"PRAGMA user_version = {step.to_version}")
-    inject_fault("s3.migration.after_user_version_before_commit")
+    inject_fault(FaultPoint.S3_MIGRATION_AFTER_USER_VERSION_BEFORE_COMMIT)
 
 
 def _migrate_connection(connection, start_version: int) -> int:

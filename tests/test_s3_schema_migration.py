@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from koawa_agent_v2.control.schema import (
     CURRENT_SCHEMA_VERSION,
@@ -27,12 +28,91 @@ from koawa_agent_v2.control.schema import (
     schema_signature,
 )
 from koawa_agent_v2.control.sqlite_store import SqliteEventStore
+from koawa_agent_v2.control.event_store import EventStoreError
 from tests.fixtures.legacy_builder import (
     build_legacy_database,
     build_versioned_v1_database,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class WalInitializationTest(unittest.TestCase):
+    def _exercise(self, directory, *, failures, code=sqlite3.SQLITE_BUSY, clock=None):
+        database = Path(directory) / "wal-init.db"
+        ensure_schema(database)
+        target = SqliteEventStore.__new__(SqliteEventStore)
+        target._database_path = str(database)
+        target._busy_timeout_ms = 1000
+        original_connect = sqlite3.connect
+        calls, connections = [], []
+
+        class Connection:
+            def __init__(self, raw):
+                self.raw = raw
+                self.closed = False
+
+            def execute(self, sql):
+                calls.append(sql)
+                if sql == "PRAGMA journal_mode = WAL" and len(connections) <= failures:
+                    error = sqlite3.OperationalError("injected_journal_transition_error")
+                    error.sqlite_errorcode = code
+                    raise error
+                return self.raw.execute(sql)
+
+            def rollback(self):
+                self.raw.rollback()
+
+            def close(self):
+                self.closed = True
+                self.raw.close()
+
+        def connect(*args, **kwargs):
+            self.assertTrue(all(item.closed for item in connections), "retry retained old read locks")
+            connection = Connection(original_connect(*args, **kwargs))
+            connections.append(connection)
+            return connection
+
+        with patch("koawa_agent_v2.control.sqlite_store.sqlite3.connect", side_effect=connect):
+            with patch("koawa_agent_v2.control.sqlite_store.time.monotonic", **(
+                {"side_effect": clock} if clock else {"return_value": 0}
+            )):
+                try:
+                    target._initialize()
+                    outcome = None
+                except EventStoreError as error:
+                    outcome = error
+        self.assertTrue(all(item.closed for item in connections))
+        return database, calls, len(connections), outcome
+
+    def test_busy_retry_releases_connection_and_waits_on_fresh_writer_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, calls, attempts, error = self._exercise(directory, failures=1)
+            self.assertIsNone(error)
+            self.assertEqual(2, attempts)
+            self.assertEqual(1, calls.count("BEGIN IMMEDIATE"))
+            with sqlite3.connect(database) as connection:
+                self.assertEqual("wal", connection.execute("PRAGMA journal_mode").fetchone()[0])
+            connection.close()
+
+    def test_non_busy_error_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, calls, attempts, error = self._exercise(directory, failures=9, code=sqlite3.SQLITE_IOERR)
+            self.assertIsInstance(error, EventStoreError)
+            self.assertEqual(1, attempts)
+            self.assertNotIn("BEGIN IMMEDIATE", calls)
+
+    def test_persistent_busy_has_fixed_attempt_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, attempts, error = self._exercise(directory, failures=9)
+            self.assertIsInstance(error, EventStoreError)
+            self.assertEqual(4, attempts)
+
+    def test_busy_deadline_is_shared_across_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, attempts, error = self._exercise(directory, failures=9, clock=[0, .01, 2])
+            self.assertIsInstance(error, EventStoreError)
+            self.assertEqual(1, attempts)
 
 
 class SchemaMigrationTest(unittest.TestCase):
@@ -206,13 +286,20 @@ class SchemaMigrationTest(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             for _ in range(2)
         ]
-        for process in processes:
-            stdout, stderr = process.communicate(timeout=60)
-            self.assertEqual(process.returncode, 0, stderr + stdout)
-            self.assertIn("2", stdout)
+        try:
+            results = [(process, *process.communicate(timeout=60)) for process in processes]
+            for process, stdout, stderr in results:
+                self.assertEqual(process.returncode, 0, stderr + stdout)
+                self.assertIn("2", stdout)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=10)
         connection = sqlite3.connect(database)
         try:
             rows = connection.execute("SELECT migration_id FROM schema_migrations ORDER BY to_version").fetchall()

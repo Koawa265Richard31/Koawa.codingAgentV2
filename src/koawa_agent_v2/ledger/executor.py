@@ -17,13 +17,14 @@ from ..execution.loop import (
 from ..model.protocol import ToolCallItem, ToolDefinition
 from ..approval_service import (
     ApprovalDenied,
+    ApprovalError,
     ApprovalRecord,
     ApprovalService,
     ApprovalStatus,
 )
 from ..control.event_store import StreamId
 from ..policy import Decision, PolicyEngine, PolicyVerdict, ResolvedAction
-from ..telemetry.trace import TraceStore
+from ..telemetry.trace import TraceProbe, TraceSink
 from .protocol import (
     DurableToolResult,
     ToolExecutionRecord,
@@ -83,7 +84,8 @@ class LedgerExecutor:
         policy_engine: PolicyEngine | None = None,
         approval_service: ApprovalService | None = None,
         action_resolvers: Mapping[str, ActionResolver] | None = None,
-        trace_store: TraceStore | None = None,
+        trace_sink: TraceSink | None = None,
+        trace_store: object | None = None,
         correlation_id: object | None = None,
     ) -> None:
         if not hasattr(delegate, "definitions") or not hasattr(delegate, "execute"):
@@ -100,14 +102,19 @@ class LedgerExecutor:
             raise TypeError("profiles contain an invalid recovery profile")
         if fault_hook is not None and not callable(fault_hook):
             raise TypeError("fault_hook must be callable or None")
-        if trace_store is not None and not isinstance(trace_store, TraceStore):
-            raise TypeError("trace_store must be TraceStore or None")
+        if trace_sink is not None and trace_store is not None:
+            raise ValueError("use only one of trace_sink or trace_store")
+        if trace_sink is not None and not callable(getattr(trace_sink, "emit", None)):
+            raise TypeError("trace_sink must implement TraceSink")
+        if trace_store is not None and not callable(getattr(trace_store, "append", None)):
+            raise TypeError("trace_store must provide append()")
         self._delegate = delegate
         self._ledger = ledger
         self._profiles = copied_profiles
         self._definitions = definitions
         self._fault_hook = fault_hook
-        self._trace_store = trace_store
+        self._trace_sink = trace_sink
+        self._legacy_trace_store = trace_store
         self._correlation_id = correlation_id
         configured = (
             policy_engine is not None,
@@ -159,6 +166,37 @@ class LedgerExecutor:
     def ledger(self) -> ToolLedgerStore:
         return self._ledger
 
+    def catalog_snapshot(self):
+        """I6 §8.8: one frozen snapshot (definitions + profiles + resolvers +
+        semantic bindings) taken at the start of a model round.
+        """
+        from ..runtime.composite_registry import ToolCatalogSnapshot
+        from types import MappingProxyType
+
+        delegate = self._delegate
+        builder = getattr(delegate, "current_snapshot", None)
+        if callable(builder):
+            return builder(
+                profiles=self._profiles,
+                resolvers=self._action_resolvers,
+            )
+        semantic: dict[str, object] = {}
+        method = getattr(delegate, "semantic_bindings", None)
+        if callable(method):
+            semantic.update(method())
+        epoch = None
+        epoch_method = getattr(delegate, "catalog_epoch_id", None)
+        if callable(epoch_method):
+            epoch = epoch_method()
+        return ToolCatalogSnapshot(
+            catalog_epoch_id=epoch,
+            definitions=self._definitions,
+            profiles=MappingProxyType(dict(self._profiles)),
+            resolvers=MappingProxyType(dict(self._action_resolvers)),
+            semantic_bindings=MappingProxyType(semantic),
+            delegates=(delegate,),
+        )
+
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return self._definitions
 
@@ -193,11 +231,17 @@ class LedgerExecutor:
         if profile is None:
             raise ToolLedgerError("tool_recovery_profile_missing")
 
-        existing = self._ledger.load_for_call(
-            context.turn_id,
-            context.call_ref.model_turn_id,
-            context.call_ref.call_id,
+        # §10.3: ONE binding-aware lookup key across prepare/claim/load/
+        # recovery.  The digest comes from the delegate binding map first;
+        # a prepared invocation that carries its own digest wins (it is the
+        # same value in practice, but there is exactly one source of truth).
+        binding_digest = (
+            self._delegate.binding_digest(call.name)
+            if self._prepared_delegate
+            and hasattr(self._delegate, "binding_digest")
+            else None
         )
+        existing = self._load_existing(context, binding_digest)
         arguments_were_redacted = (
             context.recovered_call and "[REDACTED]" in call.arguments_json
         )
@@ -226,12 +270,9 @@ class LedgerExecutor:
                     record=None,
                     early_result=early_result,
                 )
-            binding_digest = (
-                self._delegate.binding_digest(call.name)
-                if self._prepared_delegate
-                and hasattr(self._delegate, "binding_digest")
-                else None
-            )
+            # The ledger key is the delegate binding digest (generation-
+            # aware); the semantic binding digest is for recovery/fencing
+            # and must NOT replace the ledger key (D10 identity contract).
             record = self._ledger.prepare(
                 turn_id=context.turn_id,
                 turn_version=context.turn_version,
@@ -357,13 +398,24 @@ class LedgerExecutor:
                 first_grant = None
             if self._approval_service is None:
                 raise ToolLedgerError("approval_service_missing")
-            claimed = self._approval_service.claim(
-                record,
-                final,
-                final_verdict,
-                final_grant,
-                context=context,
-            )
+            try:
+                claimed = self._approval_service.claim(
+                    record,
+                    final,
+                    final_verdict,
+                    final_grant,
+                    context=context,
+                )
+            except ApprovalError as error:
+                if error.code == "resource_budget_exceeded":
+                    denied = _policy_error(error.code)
+                    self._ledger.commit_prepared_failure(
+                        record,
+                        DurableToolResult(denied.content, denied.is_error),
+                        turn_version=context.turn_version,
+                        run_id=context.run_id,
+                    )
+                raise
             self._fault("after_claim", claimed)
             self._trace("ledger", "claimed", {"tool_name": call.name, "state": "claimed"})
             return self._ticket(
@@ -397,6 +449,19 @@ class LedgerExecutor:
             del self._live_tickets[id(authorization)]
         try:
             if authorization.early_result is not None:
+                if (
+                    authorization.record is not None
+                    and authorization.record.state is ToolExecutionState.PREPARED
+                ):
+                    self._ledger.commit_prepared_failure(
+                        authorization.record,
+                        DurableToolResult(
+                            authorization.early_result.content,
+                            authorization.early_result.is_error,
+                        ),
+                        turn_version=authorization.context.turn_version,
+                        run_id=authorization.context.run_id,
+                    )
                 return authorization.early_result
             record = authorization.record
             if record is None:
@@ -531,6 +596,18 @@ class LedgerExecutor:
         self._delegate.discard_prepared(
             prepared,
             authority=self._registry_authority,
+        )
+
+    def _load_existing(
+        self,
+        context: ToolExecutionContext,
+        binding_digest: str | None,
+    ) -> ToolExecutionRecord | None:
+        return self._ledger.load_for_call(
+            context.turn_id,
+            context.call_ref.model_turn_id,
+            context.call_ref.call_id,
+            binding_digest=binding_digest,
         )
 
     def _authorize_terminal(
@@ -669,17 +746,20 @@ class LedgerExecutor:
             self._fault_hook(point, record)
 
     def _trace(self, stream: str, kind: str, fields: Mapping[str, object]) -> None:
-        if self._trace_store is None:
+        if self._trace_sink is None and self._legacy_trace_store is None:
             return
         correlation_id = self._correlation_id
         if not isinstance(correlation_id, UUID):
             correlation_id = uuid4()
-        self._trace_store.append(
-            correlation_id=correlation_id,
-            stream=stream,
-            kind=kind,
-            fields=fields,
-        )
+        if self._trace_sink is not None:
+            self._trace_sink.emit(TraceProbe(correlation_id, stream, kind, fields))
+        else:
+            self._legacy_trace_store.append(
+                correlation_id=correlation_id,
+                stream=stream,
+                kind=kind,
+                fields=fields,
+            )
 
 
 def _policy_error(code: str) -> ToolExecutionResult:

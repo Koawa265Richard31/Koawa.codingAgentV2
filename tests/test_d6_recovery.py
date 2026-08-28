@@ -6,7 +6,7 @@ from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from koawa_agent_v2.recovery import (
     AutomaticRecoveryBlocked,
@@ -98,6 +98,12 @@ class D6RecoveryTest(unittest.TestCase):
             lease_seconds=30,
         )
         self.assertEqual(self.checkpoints.list_recoverable_turns(), ())
+        # The recovery claim token lives on the dedicated lease stream (the
+        # Turn stream stays stable during a run).
+        lease_head = self.store.read_stream(
+            StreamId("recovery-lease", running.turn_id), limit=500,
+        )[-1]
+        claim_token = UUID(lease_head.payload["claim_token"])
         # heartbeat must match the claimed run and token
         with self.assertRaises(InvalidTransition):
             self.runtime.heartbeat_recovery_run(
@@ -111,7 +117,7 @@ class D6RecoveryTest(unittest.TestCase):
             running.turn_id,
             expected_version=claim.version,
             run_id=running.current_run_id,
-            claim_token=claim.recovery_claim_token,
+            claim_token=claim_token,
             lease_seconds=10,
             owner_id="old",
         )
@@ -127,7 +133,7 @@ class D6RecoveryTest(unittest.TestCase):
             running.turn_id,
             expected_version=heartbeat.version,
             run_id=running.current_run_id,
-            claim_token=claim.recovery_claim_token,
+            claim_token=claim_token,
             owner_id="old",
         )
         self.assertIsNone(released.recovery_claim_token)
@@ -160,6 +166,12 @@ class D6RecoveryTest(unittest.TestCase):
             lease_seconds=30,
         )
         # a live lease excludes the turn from stale discovery
+        # The recovery claim token lives on the dedicated lease stream (the
+        # Turn stream stays stable during a run).
+        lease_head = self.store.read_stream(
+            StreamId("recovery-lease", self.running.turn_id), limit=500,
+        )[-1]
+        claim_token = UUID(lease_head.payload["claim_token"])
         self.assertEqual(self.checkpoints.list_recoverable_turns(), ())
         # a stale coordinator holding the pre-claim item cannot recover it
         from koawa_agent_v2.recovery.store import RecoverableTurn
@@ -170,7 +182,7 @@ class D6RecoveryTest(unittest.TestCase):
             self.running.current_run_id,
             datetime.now(timezone.utc),
         )
-        with self.assertRaises(AutomaticRecoveryBlocked):
+        with self.assertRaises(LeaseConflict):
             RecoveryCoordinator(
                 self.runtime, self.checkpoints, owner_id="new"
             ).claim_stale(stale_item, force=True)
@@ -187,15 +199,23 @@ class D6RecoveryTest(unittest.TestCase):
             self.running.turn_id,
             expected_version=claim.version,
             run_id=self.running.current_run_id,
-            claim_token=claim.recovery_claim_token,
+            claim_token=claim_token,
             lease_seconds=10,
             owner_id="live",
         )
+        # The D1 worker cannot terminalize while the recovery claim is live;
+        # the turn stream is stable, so the fence is the active claim itself.
+        with self.assertRaises(InvalidTransition):
+            self.runtime.complete_turn(
+                self.running.turn_id, "late",
+                expected_version=self.running.version,
+                run_id=self.running.current_run_id,
+            )
         released = self.runtime.release_recovery_run(
             self.running.turn_id,
             expected_version=heartbeated.version,
             run_id=self.running.current_run_id,
-            claim_token=claim.recovery_claim_token,
+            claim_token=claim_token,
             owner_id="live",
         )
         self.assertIsNone(released.recovery_claim_token)
@@ -204,7 +224,7 @@ class D6RecoveryTest(unittest.TestCase):
                 self.running.turn_id,
                 expected_version=released.version,
                 run_id=self.running.current_run_id,
-                claim_token=claim.recovery_claim_token,
+                claim_token=claim_token,
                 lease_seconds=10,
                 owner_id="live",
             )
@@ -212,13 +232,14 @@ class D6RecoveryTest(unittest.TestCase):
             self.checkpoints.get_active_lease(
                 self.running.turn_id, self.running.current_run_id, "live",
             )
-        # the old D1 worker cannot complete from its pre-claim version
-        with self.assertRaises(WrongExpectedVersion):
-            self.runtime.complete_turn(
-                self.running.turn_id, "late",
-                expected_version=self.running.version,
-                run_id=self.running.current_run_id,
-            )
+        # Once the lease is released, ordinary completion resumes.
+        claimed_again = self.runtime.claim_recovery_run(
+            self.running.turn_id,
+            expected_version=self.running.version,
+            owner_id="live",
+            lease_seconds=30,
+        )
+        self.assertIsNone(claimed_again.recovery_claim_token)
 
     def test_destroy_runtime_then_discover_and_finalize_without_model_replay(self):
         item = AssistantTextItem(0, "final-item", "durable final")

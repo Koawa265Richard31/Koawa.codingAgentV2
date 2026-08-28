@@ -1,6 +1,7 @@
 """Durable MCP session lifecycle: initialize, catalog, call, refresh, close."""
 
 from __future__ import annotations
+from koawa_agent_v2.telemetry.faults import FaultPoint
 
 import itertools
 import json
@@ -29,7 +30,8 @@ from .protocol import (
 )
 from .tool_binding import McpBinding, McpBindingError, McpCatalog, bind_catalog
 from .transport import TransportError, TransportTimeout
-from ..telemetry.trace import TraceStore
+from ..telemetry.trace import TraceProbe, TraceSink
+from ..telemetry.faults import FaultPort, NO_OP_FAULT_PORT
 
 
 def _bounded_positive(value: float, minimum: float, maximum: float, code: str) -> float:
@@ -110,8 +112,12 @@ class McpSession:
         max_notifications_per_window: int = 64,
         max_result_chars: int = 262_144,
         auto_refresh: bool = False,
-        trace_store: TraceStore | None = None,
+        trace_sink: TraceSink | None = None,
+        trace_store: object | None = None,
         correlation_id: Any | None = None,
+        # I6 §8.7: resolved launch identity the session audits against.
+        launch_identity: object | None = None,
+        fault_port: FaultPort = NO_OP_FAULT_PORT,
     ) -> None:
         from .tool_binding import _TOOL_NAME
 
@@ -152,8 +158,20 @@ class McpSession:
         )
         self._max_result_chars = _bounded_int(max_result_chars, 1, 16 * 1024 * 1024, "mcp_result_limit")
         self._auto_refresh = auto_refresh
-        self._trace_store = trace_store
+        if trace_sink is not None and trace_store is not None:
+            raise ValueError("use only one of trace_sink or trace_store")
+        if trace_sink is not None and not callable(getattr(trace_sink, "emit", None)):
+            raise TypeError("trace_sink must implement TraceSink")
+        if trace_store is not None and not callable(getattr(trace_store, "append", None)):
+            raise TypeError("trace_store must provide append()")
+        self._trace_sink = trace_sink
+        self._legacy_trace_store = trace_store
         self._correlation_id = correlation_id
+        self._launch_identity = launch_identity
+        if not callable(getattr(fault_port, "hit", None)):
+            raise TypeError("fault_port must implement FaultPort")
+        self._fault_port = fault_port
+        self._session_instance_id = uuid4()
         self._next_id = itertools.count(1)
         self._pending: dict[int, _PendingCall] = {}
         self._pending_lock = threading.Lock()
@@ -172,6 +190,22 @@ class McpSession:
     @property
     def server_id(self) -> str:
         return self._server_id
+
+    @property
+    def session_instance_id(self) -> UUID:
+        """Physical instance token; fences live handles only (§8.8)."""
+
+        return self._session_instance_id
+
+    @property
+    def launch_identity(self):
+        return self._launch_identity
+
+    @property
+    def launch_identity_digest(self) -> str | None:
+        identity = self._launch_identity
+        digest = getattr(identity, "config_digest", None)
+        return digest if isinstance(digest, str) else None
 
     @property
     def state(self) -> str:
@@ -230,6 +264,10 @@ class McpSession:
             self._catalog = catalog
             self._generation = 1
             self._state = self.READY
+            self._fault_port.hit(
+                FaultPoint.S4_MCP_LIST_AFTER_CATALOG_COMMIT,
+                {"server_id": self._server_id, "generation": self._generation},
+            )
             return catalog
         except McpSessionError:
             self._state = self.FAILED
@@ -249,9 +287,18 @@ class McpSession:
             self._state = self.REFRESHING
         try:
             catalog = self._list_tools(self._generation + 1)
+            self._fault_port.hit(
+                FaultPoint.S4_MCP_REFRESH_AFTER_LIST_BEFORE_PUBLISH,
+                {"server_id": self._server_id,
+                 "generation": self._generation + 1},
+            )
             self._catalog = catalog
             self._generation += 1
             self._pending_refresh = False
+            self._fault_port.hit(
+                FaultPoint.S4_MCP_LIST_AFTER_CATALOG_COMMIT,
+                {"server_id": self._server_id, "generation": self._generation},
+            )
             return catalog
         except (McpSessionError, TransportError, McpProtocolError) as error:
             raise McpSessionError(
@@ -295,6 +342,10 @@ class McpSession:
                     {"name": binding.tool_name, "arguments": arguments},
                 )
             )
+            self._fault_port.hit(
+                FaultPoint.S4_MCP_CALL_AFTER_SEND_BEFORE_RESULT,
+                {"server_id": self._server_id, "request_id": request_id},
+            )
         except TransportError as error:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
@@ -320,6 +371,11 @@ class McpSession:
             )
             return McpCallResult(content, True, False)
         result = self._extract_result(message.result)
+        self._fault_port.hit(
+            FaultPoint.S4_MCP_CALL_AFTER_RESULT_BEFORE_LEDGER,
+            {"server_id": self._server_id, "request_id": request_id,
+             "is_error": result.is_error},
+        )
         self._trace(
             "mcp",
             "call_result",
@@ -389,6 +445,11 @@ class McpSession:
             self._pending[request_id] = pending
         try:
             self._transport.send(request_payload(request_id, method, dict(params)))
+            if method == INITIALIZE:
+                self._fault_port.hit(
+                    FaultPoint.S4_MCP_INITIALIZE_AFTER_SEND_BEFORE_RESULT,
+                    {"server_id": self._server_id, "request_id": request_id},
+                )
         except TransportError as error:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
@@ -406,6 +467,11 @@ class McpSession:
         message = pending.result
         if message is None or message.error is not None:
             raise McpSessionError("mcp_request_failed")
+        if method == INITIALIZE:
+            self._fault_port.hit(
+                FaultPoint.S4_MCP_INITIALIZE_AFTER_RESULT_BEFORE_COMMIT,
+                {"server_id": self._server_id, "request_id": request_id},
+            )
         return message.result
 
     def _list_tools(self, generation: int) -> McpCatalog:
@@ -438,11 +504,21 @@ class McpSession:
             if len(tools) > self._max_tools:
                 raise McpSessionError("mcp_tool_limit_exceeded")
             next_cursor = result.get("nextCursor")
+            self._fault_port.hit(
+                FaultPoint.S4_MCP_LIST_AFTER_PAGE_BEFORE_CURSOR,
+                {"server_id": self._server_id, "page": pages,
+                 "tool_count": len(tools)},
+            )
             if not isinstance(next_cursor, str) or not next_cursor:
                 break
             cursor = next_cursor
         try:
-            return bind_catalog(self._server_id, generation, tools)
+            return bind_catalog(
+                self._server_id,
+                generation,
+                tools,
+                launch_identity_digest=self.launch_identity_digest,
+            )
         except McpBindingError as error:
             raise McpSessionError(error.code) from None
 
@@ -517,17 +593,20 @@ class McpSession:
             item.event.set()
 
     def _trace(self, stream: str, kind: str, fields: Mapping[str, Any]) -> None:
-        if self._trace_store is None:
+        if self._trace_sink is None and self._legacy_trace_store is None:
             return
         correlation_id = self._correlation_id
         if not isinstance(correlation_id, UUID):
             correlation_id = uuid4()
-        self._trace_store.append(
-            correlation_id=correlation_id,
-            stream=stream,
-            kind=kind,
-            fields=fields,
-        )
+        if self._trace_sink is not None:
+            self._trace_sink.emit(TraceProbe(correlation_id, stream, kind, fields))
+        else:
+            self._legacy_trace_store.append(
+                correlation_id=correlation_id,
+                stream=stream,
+                kind=kind,
+                fields=fields,
+            )
 
     def _throttle_notify(self) -> bool:
         """I1: merge notification storms; False means this notification is dropped."""

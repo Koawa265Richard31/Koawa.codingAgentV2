@@ -10,6 +10,7 @@ events. The original DB/WAL/SHM/backups are never modified or deleted; they
 remain restricted legacy media."""
 
 from __future__ import annotations
+from koawa_agent_v2.telemetry.faults import FaultPoint
 
 import hashlib
 import json
@@ -22,6 +23,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ..control.durable_json import (
     TERMINAL_TEXT_MAX_UTF8_BYTES,
+    canonical_json_bytes_v1,
     canonicalize_text,
 )
 from ..control.event_store import (
@@ -33,11 +35,12 @@ from ..control.event_store import (
 from ..control.models import TERMINAL_TURN_STATUSES, TurnStatus, rebuild_turn
 from ..control.schema import (
     DatabaseState,
-    classify_database,
+    classify_connection,
     ensure_schema,
     inject_fault,
 )
 from ..control.sqlite_store import SqliteEventStore
+from ..control.read_snapshot import ReadSnapshotError, read_snapshot
 from ..recovery.redaction import redact_text
 
 LEGACY_EXPORT_DESTINATION_EXISTS = 'legacy_export_destination_exists'
@@ -82,27 +85,20 @@ class _RowEvent:
 # ---------------------------------------------------------------------------
 
 
-def _source_digest(source: Path) -> str:
-    digest = hashlib.sha256()
-    for candidate in (source, Path(str(source) + '-wal'), Path(str(source) + '-shm')):
-        if candidate.exists():
-            with open(candidate, 'rb') as handle:
-                for chunk in iter(lambda: handle.read(1 << 16), b''):
-                    digest.update(chunk)
-    return digest.hexdigest()
+def _read_legacy_streams(source: Path, busy_timeout_ms: int) -> tuple[dict, str]:
+    try:
+        snapshot = read_snapshot(source, timeout_ms=busy_timeout_ms)
+        with snapshot.connect() as connection:
+            if classify_connection(connection).state is not DatabaseState.LEGACY_EXPORT_REQUIRED:
+                raise LegacyExportError(LEGACY_EXPORT_SOURCE_INVALID)
+            if connection.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise LegacyExportError(LEGACY_EXPORT_SOURCE_INVALID)
+            return _legacy_rows(connection), snapshot.source_digest
+    except (ReadSnapshotError, sqlite3.Error, ValueError):
+        raise LegacyExportError(LEGACY_EXPORT_SOURCE_INVALID) from None
 
 
-def _read_legacy_streams(source: Path, busy_timeout_ms: int) -> dict:
-    classification = classify_database(source, busy_timeout_ms=busy_timeout_ms)
-    if classification.state is not DatabaseState.LEGACY_EXPORT_REQUIRED:
-        raise LegacyExportError(LEGACY_EXPORT_SOURCE_INVALID)
-    connection = sqlite3.connect(
-        'file:' + str(source) + '?mode=ro',
-        uri=True,
-        timeout=busy_timeout_ms / 1000,
-        isolation_level=None,
-    )
-    connection.row_factory = sqlite3.Row
+def _legacy_rows(connection) -> dict:
     try:
         rows = connection.execute(
             'SELECT s.stream_id, s.category, s.aggregate_id, e.stream_version, '
@@ -130,8 +126,6 @@ def _read_legacy_streams(source: Path, busy_timeout_ms: int) -> dict:
         raise
     except (sqlite3.Error, ValueError) as exc:
         raise LegacyExportError(LEGACY_EXPORT_SOURCE_INVALID) from exc
-    finally:
-        connection.close()
 
 
 def _turn_summary(turn) -> dict:
@@ -228,9 +222,8 @@ def export_legacy_store(
         raise LegacyExportError(LEGACY_EXPORT_SOURCE_INVALID)
     if destination_path.exists():
         raise LegacyExportError(LEGACY_EXPORT_DESTINATION_EXISTS)
-    streams = _read_legacy_streams(source_path, busy_timeout_ms)
-    source_digest = _source_digest(source_path)
-    inject_fault('s3.export.after_source_scan')
+    streams, source_digest = _read_legacy_streams(source_path, busy_timeout_ms)
+    inject_fault(FaultPoint.S3_EXPORT_AFTER_SOURCE_SCAN)
     partial = _fresh_partial(destination_path)
     try:
         ensure_schema(partial, busy_timeout_ms=busy_timeout_ms)
@@ -255,13 +248,13 @@ def export_legacy_store(
             terminal_summaries=terminal_summaries,
             manual_restart=manual_restart,
         )
-        inject_fault('s3.export.mid_destination_import')
+        inject_fault(FaultPoint.S3_EXPORT_MID_DESTINATION_IMPORT)
         _verify_destination(store, source_digest, terminal_summaries)
         if canaries:
             hits = _scan_destination_files(partial, canaries)
             if hits:
                 raise LegacyExportError(LEGACY_EXPORT_VERIFICATION_FAILED)
-        inject_fault('s3.export.after_verify_before_rename')
+        inject_fault(FaultPoint.S3_EXPORT_AFTER_VERIFY_BEFORE_RENAME)
         _close_wal(store, partial)
         os.replace(partial, destination_path)
         for sidecar in _sidecars(partial):
@@ -317,6 +310,15 @@ def _write_legacy_import_audit(
     store.append_batch(
         (StreamWrite(stream, -1, tuple(snapshot_events)),),
         idempotency_key=command_id,
+        # A killed export may already have committed this sanitized audit to
+        # the private partial DB. Wall-clock event time is not command identity:
+        # a fresh interpreter must replay the receipt for the same source and
+        # canonical summaries, rather than conflict on datetime.now().
+        request_fingerprint=hashlib.sha256(canonical_json_bytes_v1({
+            'source_digest': source_digest,
+            'terminal_summaries': list(terminal_summaries),
+            'manual_restart': list(manual_restart),
+        })).hexdigest(),
     )
 
 
@@ -346,8 +348,16 @@ def _verify_destination(
     payload = page[0].payload
     if payload.get('source_digest') != source_digest:
         raise LegacyExportError(LEGACY_EXPORT_VERIFICATION_FAILED)
-    count = sum(1 for event in page if event.event_type == 'legacy-turn-snapshot-imported.v1')
-    if count != len(terminal_summaries):
+    snapshots = [dict(event.payload) for event in page[1:]
+                 if event.event_type == 'legacy-turn-snapshot-imported.v1']
+    if (
+        len(page) != len(terminal_summaries) + 1
+        or snapshots != [dict(summary) for summary in terminal_summaries]
+        or payload.get('terminal_turns') != len(terminal_summaries)
+        or list(payload.get('requires_manual_restart', ())) != [
+            summary['turn_id'] for summary in terminal_summaries if summary['requires_manual_restart']
+        ]
+    ):
         raise LegacyExportError(LEGACY_EXPORT_VERIFICATION_FAILED)
 
 

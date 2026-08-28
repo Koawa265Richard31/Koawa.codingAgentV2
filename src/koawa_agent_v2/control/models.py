@@ -10,8 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Iterable, Mapping, Protocol
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from .event_store import StreamId
 
 
 # Thread 事件：创建会话、占用/释放当前 Turn、归档会话。
@@ -27,6 +30,7 @@ TURN_WAITING_FOR_INPUT = "turn.waiting-for-input.v1"
 TURN_WAITING_FOR_APPROVAL = "turn.waiting-for-approval.v1"
 TURN_PAUSED = "turn.paused.v1"
 TURN_RECOVERY_QUEUED = "turn.recovery-queued.v1"
+TURN_RUNTIME_OUTCOME_RESOLVED = "turn.runtime-outcome-resolved.v1"
 TURN_STALE_RUN_REQUEUED = "turn.stale-run-requeued.v1"
 TURN_RECOVERY_LEASE_CLAIMED = "turn.recovery-lease-claimed.v1"
 TURN_RECOVERY_LEASE_HEARTBEATED = "turn.recovery-lease-heartbeated.v1"
@@ -35,6 +39,17 @@ TURN_COMPLETED = "turn.completed.v1"
 TURN_FAILED = "turn.failed.v1"
 TURN_CANCELLED = "turn.cancelled.v1"
 TURN_TIMED_OUT = "turn.timed-out.v1"
+
+# Run attempt events.  A Run is an execution attempt, not the business Turn:
+# waiting/requeue close the current attempt while leaving the Turn resumable.
+RUN_STARTED = "run.started.v1"
+RUN_INTERRUPTED = "run.interrupted.v1"
+RUN_ABANDONED = "run.abandoned.v1"
+RUN_COMPLETED = "run.completed.v1"
+RUN_FAILED = "run.failed.v1"
+RUN_CANCELLED = "run.cancelled.v1"
+RUN_TIMED_OUT = "run.timed-out.v1"
+RUN_OUTCOME_UNKNOWN = "run.outcome-unknown.v1"
 
 
 class DomainError(RuntimeError):
@@ -79,6 +94,19 @@ class TurnStatus(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+class RunStatus(StrEnum):
+    """Lifecycle of one fenced execution attempt."""
+
+    RUNNING = "running"
+    INTERRUPTED = "interrupted"
+    ABANDONED = "abandoned"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+
+
 class InterruptKind(StrEnum):
     """待处理中断期望的响应类型。"""
 
@@ -94,6 +122,9 @@ TERMINAL_TURN_STATUSES = frozenset(
         TurnStatus.CANCELLED,
         TurnStatus.TIMED_OUT,
     }
+)
+TERMINAL_RUN_STATUSES = frozenset(
+    status for status in RunStatus if status is not RunStatus.RUNNING
 )
 # 只有等待输入、等待审批和暂停状态可通过 recovery-queued 回到队列。
 RESUMABLE_TURN_STATUSES = frozenset(
@@ -178,6 +209,55 @@ class TurnState:
         return self.status in TERMINAL_TURN_STATUSES
 
 
+@dataclass(frozen=True, slots=True)
+class CompletionEvidenceRef:
+    """Exact reference to the typed evidence authorizing terminalization."""
+
+    stream_id: StreamId
+    stream_version: int
+    event_id: UUID
+    evidence_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunState:
+    """Explicit durable truth for one execution attempt."""
+
+    run_id: UUID
+    thread_id: UUID
+    turn_id: UUID
+    attempt: int
+    status: RunStatus
+    version: int
+    created_at: datetime
+    updated_at: datetime
+    detail: str | None = None
+    completion_evidence: CompletionEvidenceRef | None = None
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in TERMINAL_RUN_STATUSES
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyRunState:
+    """Read-only Run view synthesized from a pre-I7 Turn stream."""
+
+    run_id: UUID
+    thread_id: UUID
+    turn_id: UUID
+    attempt: int
+    status: RunStatus
+    created_at: datetime
+    updated_at: datetime
+    detail: str | None = None
+    version: int = -1
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in TERMINAL_RUN_STATUSES
+
+
 class StoredEventLike(Protocol):
     """聚合重放真正需要的最小事件视图，与具体 EventStore 实现解耦。"""
 
@@ -223,6 +303,101 @@ def rebuild_turn(turn_id: UUID, events: Iterable[StoredEventLike]) -> TurnState:
     if state is None:
         raise AggregateNotFound(f"turn {turn_id} does not exist")
     return state
+
+
+def rebuild_run(run_id: UUID, events: Iterable[StoredEventLike]) -> RunState:
+    """Rebuild one explicit Run attempt and reject impossible histories."""
+
+    state: RunState | None = None
+    for event in events:
+        _require_next_version(state.version if state else -1, event.stream_version)
+        _require_schema_version(event)
+        state = _apply_run_event(run_id, state, event)
+    if state is None:
+        raise AggregateNotFound(f"run {run_id} does not exist")
+    return state
+
+
+def _apply_run_event(
+    run_id: UUID,
+    state: RunState | None,
+    event: StoredEventLike,
+) -> RunState:
+    if event.event_type == RUN_STARTED:
+        if state is not None:
+            raise CorruptEventStream("run.started.v1 must be the first run event")
+        _require_uuid(event.payload, "run_id", run_id)
+        attempt = _require_int(event.payload, "attempt")
+        if attempt < 1:
+            raise CorruptEventStream("run attempt must be positive")
+        return RunState(
+            run_id=run_id,
+            thread_id=_require_uuid(event.payload, "thread_id"),
+            turn_id=_require_uuid(event.payload, "turn_id"),
+            attempt=attempt,
+            status=RunStatus.RUNNING,
+            version=event.stream_version,
+            created_at=event.occurred_at,
+            updated_at=event.occurred_at,
+        )
+    if state is None:
+        raise CorruptEventStream("run stream must begin with run.started.v1")
+    if state.is_terminal:
+        raise CorruptEventStream(f"terminal run {run_id} cannot transition")
+
+    terminal_by_event = {
+        RUN_INTERRUPTED: RunStatus.INTERRUPTED,
+        RUN_ABANDONED: RunStatus.ABANDONED,
+        RUN_COMPLETED: RunStatus.COMPLETED,
+        RUN_FAILED: RunStatus.FAILED,
+        RUN_CANCELLED: RunStatus.CANCELLED,
+        RUN_TIMED_OUT: RunStatus.TIMED_OUT,
+        RUN_OUTCOME_UNKNOWN: RunStatus.OUTCOME_UNKNOWN,
+    }
+    status = terminal_by_event.get(event.event_type)
+    if status is None:
+        raise CorruptEventStream(f"unknown run event type: {event.event_type}")
+    _require_uuid(event.payload, "run_id", run_id)
+    _require_uuid(event.payload, "thread_id", state.thread_id)
+    _require_uuid(event.payload, "turn_id", state.turn_id)
+    detail = event.payload.get("detail")
+    if detail is not None and (not isinstance(detail, str) or not detail.strip()):
+        raise CorruptEventStream("run terminal detail must be non-empty text")
+    completion_evidence = None
+    raw_evidence = event.payload.get("completion_evidence")
+    if raw_evidence is not None:
+        if status is not RunStatus.COMPLETED or not isinstance(raw_evidence, Mapping):
+            raise CorruptEventStream("completion evidence is only valid for completed Runs")
+        if set(raw_evidence) != {
+            "stream_kind", "stream_id", "stream_version", "event_id", "evidence_digest"
+        }:
+            raise CorruptEventStream("completion evidence has invalid fields")
+        from .event_store import StreamId
+
+        stream_kind = raw_evidence.get("stream_kind")
+        if not isinstance(stream_kind, str):
+            raise CorruptEventStream("completion evidence stream kind is invalid")
+        stream_version = raw_evidence.get("stream_version")
+        if not isinstance(stream_version, int) or isinstance(stream_version, bool) or stream_version < 0:
+            raise CorruptEventStream("completion evidence version is invalid")
+        digest = raw_evidence.get("evidence_digest")
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise CorruptEventStream("completion evidence digest is invalid")
+        try:
+            completion_evidence = CompletionEvidenceRef(
+                StreamId(stream_kind, UUID(str(raw_evidence.get("stream_id")))),
+                stream_version, UUID(str(raw_evidence.get("event_id"))), digest,
+            )
+        except (TypeError, ValueError, AttributeError):
+            raise CorruptEventStream("completion evidence identity is invalid") from None
+    return replace(
+        state,
+        status=status,
+        detail=detail,
+        completion_evidence=completion_evidence,
+        version=event.stream_version,
+        updated_at=event.occurred_at,
+    )
 
 
 def _apply_thread_event(
@@ -574,6 +749,37 @@ def _apply_turn_event(
             ),
             last_resume_approval_request_id=approval_request_id,
             last_resume_approval_decision=approval_decision,
+            recovery_claim_token=None,
+            last_resume_version=event.stream_version,
+            version=event.stream_version,
+            updated_at=event.occurred_at,
+        )
+
+    if event.event_type == TURN_RUNTIME_OUTCOME_RESOLVED:
+        # This transition is deliberately separate from an operator resume:
+        # only the runtime can emit it after every effect referenced by the
+        # closed Run has authoritative terminal evidence.
+        _require_status(state, TurnStatus.PAUSED)
+        if set(event.payload) != {
+            "run_id", "evidence_kind", "evidence_digest", "reconciler"
+        }:
+            raise CorruptEventStream("runtime outcome resolution payload mismatch")
+        if _require_uuid(event.payload, "run_id") != state.current_run_id:
+            raise CorruptEventStream("runtime outcome resolution run mismatch")
+        evidence_kind = _require_text(event.payload, "evidence_kind")
+        if evidence_kind not in {
+            "effect_reconciliation", "authoritative_postcondition"
+        }:
+            raise CorruptEventStream("invalid runtime outcome resolution evidence")
+        digest = _require_text(event.payload, "evidence_digest")
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise CorruptEventStream("invalid runtime outcome resolution digest")
+        _require_text(event.payload, "reconciler")
+        return replace(
+            state,
+            status=TurnStatus.QUEUED,
+            current_run_id=None,
+            pending_interrupt=None,
             recovery_claim_token=None,
             last_resume_version=event.stream_version,
             version=event.stream_version,

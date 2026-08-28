@@ -515,7 +515,7 @@ class StrictConfigLoaderTest(unittest.TestCase):
 
     def base_document(self) -> dict:
         return {
-            "config_schema_version": 2,
+            "config_schema_version": 3,
             "repo": "repo",
             "db": "agent.sqlite3",
             "provider": {
@@ -580,8 +580,9 @@ class StrictConfigLoaderTest(unittest.TestCase):
             self.load(document)
         self.assertEqual("config_json_limit_exceeded", raised.exception.code)
 
-    def test_config_schema_version_present_but_not_two_is_rejected(self) -> None:
-        for wrong in (1, 3, "2", True):
+    def test_config_schema_version_present_but_not_three_is_rejected(self) -> None:
+        """I6: the explicit schema must be exactly 3 (v1/v2 are legacy)."""
+        for wrong in (1, 2, "3", True, 4):
             document = self.base_document()
             document["config_schema_version"] = wrong
             with self.assertRaises(RuntimeConfigError) as raised:

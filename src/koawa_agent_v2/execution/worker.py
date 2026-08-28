@@ -456,11 +456,18 @@ class TurnWorker:
             raise
 
         try:
+            evidence_ref = self._runtime.record_completion_evidence(
+                running.turn_id,
+                run_id=running.current_run_id,
+                final_text=loop_result.final_text,
+                command_id=_command_id(resolved_execution_id, "completion-evidence"),
+            )
             completed = self._runtime.complete_turn(
                 running.turn_id,
                 loop_result.final_text,
                 expected_version=running.version,
                 run_id=running.current_run_id,
+                evidence_ref=evidence_ref,
                 command_id=_command_id(resolved_execution_id, "complete"),
             )
         except BaseException:

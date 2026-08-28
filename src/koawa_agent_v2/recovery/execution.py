@@ -16,6 +16,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ..control.event_store import (
     EventMetadata,
+    EventStoreError,
     NewEvent,
     StreamId,
     StreamPrecondition,
@@ -45,7 +46,13 @@ from .context import (
     ReconstructionError,
     reduce_execution,
 )
-from .protocol import REDUCER_NAME, REDUCER_VERSION, CheckpointError, RunPhase
+from .protocol import (
+    LIVE_RUN_TURN_EVENT_TYPES,
+    REDUCER_NAME,
+    REDUCER_VERSION,
+    CheckpointError,
+    RunPhase,
+)
 from .redaction import redact_arguments_json, redact_json_value, redact_text
 
 SEED_EVENT_TYPE = "run.context-seeded.v2"
@@ -662,8 +669,19 @@ class DurableExecutionRecorder:
                 "worker",
             ),
         )
-        fence_version = self.turn_version
+        # The Turn fence must accept any same-run live event (typed lease
+        # heartbeats/claims advance the stream head), not only turn.started.
+        received = None
         for _attempt in range(2):
+            head_fence = self._turn_head_fence()
+            if head_fence is None:
+                raise EventStoreError("recorder turn fence: turn stream missing")
+            fence_version, head_type, head_run = head_fence
+            if (
+                head_type not in LIVE_RUN_TURN_EVENT_TYPES
+                or head_run != str(self.run_id)
+            ):
+                raise EventStoreError("recorder turn fence is no longer active")
             try:
                 receipt = self.store.append_batch(
                     (StreamWrite(stream, version, (event,)),),
@@ -672,17 +690,17 @@ class DurableExecutionRecorder:
                         StreamPrecondition(
                             StreamId("turn", self.turn_id),
                             fence_version,
-                            "turn.started.v1",
+                            head_type,
                             {"run_id": str(self.run_id)},
                         ),
                     ),
                 )
+                received = receipt
                 break
             except WrongExpectedVersion:
-                # Typed lease heartbeats advance the Turn stream; re-read the
-                # current head and retry the same command once.
-                fence_version = self._turn_head_version()
-        else:
+                # A heartbeat landed between read and commit; retry once.
+                continue
+        if received is None:
             raise CheckpointError("execution_fence_retry_exhausted")
         saved = self.store.read_stream(
             stream, after_version=receipt.streams[0].last_version - 1, limit=1
@@ -721,3 +739,22 @@ class DurableExecutionRecorder:
             cursor = page[-1].stream_version
             if len(page) < 500:
                 return cursor
+
+    def _turn_head_fence(self):
+        """Live head (version, event_type, run_id) of the Turn stream."""
+        cursor = -1
+        head = None
+        while True:
+            page = self.store.read_stream(
+                StreamId("turn", self.turn_id), after_version=cursor, limit=500
+            )
+            if not page:
+                break
+            head = page[-1]
+            cursor = head.stream_version
+            if len(page) < 500:
+                break
+        if head is None:
+            return None
+        raw_run = head.payload.get("run_id") if isinstance(head.payload, Mapping) else None
+        return (head.stream_version, head.event_type, str(raw_run) if raw_run is not None else None)

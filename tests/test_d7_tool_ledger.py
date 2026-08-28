@@ -651,12 +651,30 @@ class D7ToolLedgerTest(unittest.TestCase):
             "operator cancelled after claim",
             expected_version=claim_first.version,
         )
-        self.assertEqual("cancelled", cancelled.status.value)
+        self.assertEqual("paused", cancelled.status.value)
+        self.assertEqual(
+            "outcome_unknown",
+            self.runtime.get_run(claim_first.current_run_id).status.value,
+        )
         settled = self.ledger.commit_result(
             claimed,
             DurableToolResult("already-claimed-operation-settled"),
         )
         self.assertEqual(ToolExecutionState.SUCCEEDED, settled.state)
+        queued = self.runtime.resolve_runtime_outcome(
+            cancelled.turn_id,
+            expected_version=cancelled.version,
+            run_id=claim_first.current_run_id,
+            evidence_kind="effect_reconciliation",
+            evidence_digest="a" * 64,
+            reconciler="test-recovery",
+        )
+        cancelled = self.runtime.cancel_turn(
+            queued.turn_id,
+            "operator cancelled after reconciliation",
+            expected_version=queued.version,
+        )
+        self.assertEqual("cancelled", cancelled.status.value)
 
 
 if __name__ == "__main__":

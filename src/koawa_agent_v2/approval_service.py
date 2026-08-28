@@ -16,7 +16,7 @@ from .control.event_store import (
     StreamPrecondition, StreamWrite, WrongExpectedVersion,
 )
 from .control.models import (
-    TURN_RECOVERY_QUEUED, TURN_WAITING_FOR_APPROVAL,
+    RUN_INTERRUPTED, RUN_STARTED, TURN_RECOVERY_QUEUED, TURN_WAITING_FOR_APPROVAL,
     TurnState, TurnStatus, rebuild_turn,
 )
 from .execution.loop import ToolExecutionContext
@@ -649,6 +649,18 @@ class ApprovalService:
             },
             turn.thread_id, turn.turn_id, now, run_id=context.run_id,
         )
+        run_events = self._read_all(StreamId("run", context.run_id))
+        if not run_events or run_events[0].event_type != RUN_STARTED:
+            raise ApprovalError("legacy_active_run_restart_required")
+        run_head = run_events[-1]
+        if run_head.event_type != RUN_STARTED:
+            raise ApprovalError("approval_run_fence_rejected")
+        run_event = _event(
+            command_id, "run-interrupted", RUN_INTERRUPTED,
+            {"run_id": str(context.run_id), "thread_id": str(turn.thread_id),
+             "turn_id": str(turn.turn_id), "detail": TURN_WAITING_FOR_APPROVAL},
+            turn.thread_id, turn.turn_id, now, run_id=context.run_id,
+        )
         self.event_store.append_batch(
             (
                 StreamWrite(
@@ -657,6 +669,9 @@ class ApprovalService:
                 ),
                 StreamWrite(
                     StreamId("turn", turn.turn_id), turn.version, (turn_event,),
+                ),
+                StreamWrite(
+                    StreamId("run", context.run_id), run_head.stream_version, (run_event,),
                 ),
             ),
             idempotency_key=command_id,

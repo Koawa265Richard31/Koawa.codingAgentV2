@@ -20,6 +20,51 @@ class _PreparedCall:
     delegate: Any
     prepared: Any
 
+    @property
+    def early_result(self):
+        return getattr(self.prepared, "early_result", None)
+
+    @property
+    def binding_digest(self) -> str | None:
+        return getattr(self.prepared, "binding_digest", None)
+
+    @property
+    def semantic_binding(self):
+        return getattr(self.prepared, "semantic_binding", None)
+
+    @property
+    def physical_fence(self):
+        return getattr(self.prepared, "physical_fence", None)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCatalogSnapshot:
+    """I6 §8.8 frozen catalog consumed atomically by one model round.
+
+    Contains definitions, recovery profiles, action resolvers, semantic
+    bindings and the prepared delegate handles in ONE immutable object; a
+    refresh publishes the NEXT snapshot, never a partial registry swap.
+    """
+
+    catalog_epoch_id: Any
+    definitions: tuple[ToolDefinition, ...]
+    profiles: Mapping[str, Any]
+    resolvers: Mapping[str, Any]
+    semantic_bindings: Mapping[str, Any]
+    delegates: tuple[Any, ...]
+
+    def tool_names(self) -> frozenset[str]:
+        return frozenset(item.name for item in self.definitions)
+
+    def prepare(self, call: ToolCallItem) -> _PreparedCall:
+        if not isinstance(call, ToolCallItem):
+            raise TypeError("call must be ToolCallItem")
+        for delegate in self.delegates:
+            if call.name in {item.name for item in delegate.definitions()}:
+                inner = delegate.prepare(call)
+                return _PreparedCall(delegate, inner)
+        raise ToolConfigurationError("unknown_tool")
+
 
 class CompositeToolRegistry:
     """A read-only composition of already-built prepared registries."""
@@ -105,3 +150,50 @@ class CompositeToolRegistry:
                 if digest is not None:
                     return digest
         return None
+
+    def assert_complete(self, run_id: object) -> None:
+        """D5 CompletionGate facade (§8.9 E-stage gap).
+
+        Delegates the evidence gate to the builtin CodingToolRegistry when
+        present; a composite without any gate fails closed so AgentLoop can
+        still be constructed but cannot fabricate an empty completion.
+        """
+        for delegate in self._delegates:
+            method = getattr(delegate, "assert_complete", None)
+            if callable(method):
+                method(run_id)
+                return
+        raise ToolConfigurationError("completion_gate_unavailable")
+
+    def current_snapshot(
+        self,
+        *,
+        profiles: Mapping[str, object] | None = None,
+        resolvers: Mapping[str, object] | None = None,
+    ) -> ToolCatalogSnapshot:
+        """One frozen snapshot over CURRENT delegate maps (I6 §8.8).
+
+        profiles/resolvers are supplied by the assembly that owns policy;
+        when omitted they are empty so the snapshot still carries the
+        definitions and semantic bindings for the model round.
+        """
+        semantic: dict[str, object] = {}
+        for delegate in self._delegates:
+            method = getattr(delegate, "semantic_bindings", None)
+            if callable(method):
+                semantic.update(method())
+        epoch = None
+        for delegate in self._delegates:
+            method = getattr(delegate, "catalog_epoch_id", None)
+            if callable(method):
+                epoch = method() or epoch
+            elif getattr(delegate, "catalog_epoch_id", None) is not None:
+                epoch = delegate.catalog_epoch_id
+        return ToolCatalogSnapshot(
+            catalog_epoch_id=epoch,
+            definitions=self._definitions,
+            profiles=MappingProxyType(dict(profiles or {})),
+            resolvers=MappingProxyType(dict(resolvers or {})),
+            semantic_bindings=MappingProxyType(semantic),
+            delegates=self._delegates,
+        )

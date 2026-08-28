@@ -15,6 +15,8 @@ in a child (PYTHONSTARTUP, LD_PRELOAD, ...) are hard-denied for everyone.
 from __future__ import annotations
 
 import ctypes
+import hashlib
+import json
 import os
 import re
 from collections.abc import Mapping
@@ -77,6 +79,44 @@ def _windows_system_root() -> str:
     if not 1 <= length < 512:
         raise SubprocessEnvError("system_root_unavailable")
     return str(Path(buffer.value).resolve(strict=False))
+
+
+def environment_identities(
+    explicit: Mapping[str, str],
+) -> tuple[tuple[str, str], ...]:
+    """I6 §8.3/§8.4: digest of the configured env (sorted name, sha256(value)).
+
+    Only names and value digests are returned; values never leave this
+    module as part of a launch/config digest.  Windows keys are casefolded
+    before sorting so equal spellings cannot produce two parallel entries.
+    """
+    if not isinstance(explicit, Mapping):
+        raise TypeError("explicit must be a mapping")
+    entries: list[tuple[str, str]] = []
+    for name, value in explicit.items():
+        if not isinstance(name, str) or not name:
+            raise SubprocessEnvError("invalid_environment_name")
+        if not isinstance(value, str):
+            raise SubprocessEnvError("invalid_environment_value")
+        folded = name.casefold() if os.name == "nt" else name
+        value_digest = hashlib.sha256(value.encode("utf-8", "strict")).hexdigest()
+        entries.append((folded, value_digest))
+    entries.sort(key=lambda pair: (pair[0], pair[1]))
+    return tuple(entries)
+
+
+def environment_identity_digest(
+    explicit: Mapping[str, str],
+) -> str:
+    """Stable digest over the typed (name, value_digest) identities."""
+    identities = environment_identities(explicit)
+    canonical = json.dumps(
+        list(identities),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8", "strict")).hexdigest()
 
 
 def build_minimal_environment(

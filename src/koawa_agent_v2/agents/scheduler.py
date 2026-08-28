@@ -12,6 +12,7 @@ import threading
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
+from ..telemetry.faults import FaultPoint, adapt_fault_callback
 
 from .control import (
     AgentControlPlane,
@@ -100,6 +101,7 @@ class AgentLeaseKeeper:
         join_timeout_seconds: float = 5.0,
         wait_strategy: WaitStrategy | None = None,
         faults: FaultInjector = NO_FAULTS,
+        fault_port=None,
     ) -> None:
         if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool):
             raise ValueError("lease_seconds must be an integer")
@@ -132,7 +134,7 @@ class AgentLeaseKeeper:
         self._heartbeat_interval_seconds = float(heartbeat_interval_seconds)
         self._max_cas_retries = max_cas_retries
         self._join_timeout_seconds = join_timeout_seconds
-        self._faults = faults
+        self._faults = adapt_fault_callback(faults, fault_port)
         self._wait: WaitStrategy = wait_strategy or DefaultWaitStrategy()
         self._failed_event = threading.Event()
         self._failed_code: str | None = None
@@ -220,6 +222,7 @@ class AgentScheduler:
         tool_allowlist: frozenset[str] = D11_READ_ONLY_TOOLS,
         lease_seconds: int = 30,
         faults: FaultInjector = NO_FAULTS,
+        fault_port=None,
         keeper_wait_strategy: WaitStrategy | None = None,
     ) -> None:
         if not isinstance(lease_seconds, int) or lease_seconds < 1:
@@ -230,7 +233,7 @@ class AgentScheduler:
         self._provider = provider
         self._tool_allowlist = tool_allowlist
         self._lease_seconds = lease_seconds
-        self._faults = faults
+        self._faults = adapt_fault_callback(faults, fault_port)
         self._keeper_wait_strategy = keeper_wait_strategy
 
     def run_attempt(self, agent_id: UUID) -> AgentRunResult:
@@ -344,7 +347,7 @@ class AgentScheduler:
         )
         delivery_attempt = delivered.delivery_attempt
         self._fault(
-            "d11.provider.entered",
+            FaultPoint.D11_PROVIDER_ENTERED,
             self._facts(agent_id, message, delivered),
         )
         try:
@@ -354,7 +357,7 @@ class AgentScheduler:
             )
         except AgentError as error:
             self._fault(
-                "d11.provider.returned",
+                FaultPoint.D11_PROVIDER_RETURNED,
                 self._facts(agent_id, message, delivered),
             )
             self._control.record_message_result(
@@ -396,7 +399,7 @@ class AgentScheduler:
                 AgentState.FAILED, error.code, (result_ref,)
             )
         self._fault(
-            "d11.provider.returned",
+            FaultPoint.D11_PROVIDER_RETURNED,
             self._facts(agent_id, message, delivered),
         )
         keeper.assert_owned()

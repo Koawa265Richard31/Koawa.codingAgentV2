@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, make_dataclass
 from types import MappingProxyType
 from typing import Any
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from ..model.protocol import ToolDefinition
 from ..tools.errors import ToolConfigurationError
@@ -18,6 +19,18 @@ from ..tools.schema import ToolSpec
 
 _TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _PROPERTY_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+__all__ = [
+    "McpBinding",
+    "McpBindingError",
+    "McpCatalog",
+    "McpRegistryAdapter",
+    "PhysicalSessionFence",
+    "PreparedMcpInvocation",
+    "SemanticMcpBinding",
+    "bind_catalog",
+    "build_mcp_registry",
+]
 
 _MAX_DESCRIPTION_CHARS = 2_048
 _MAX_PROPERTIES = 64
@@ -200,6 +213,95 @@ def _schema_hash(schema: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+# ---- I6 §8.8 semantic vs physical binding ------------------------------
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class SemanticMcpBinding:
+    """Cross-process, recovery-stable binding identity.
+
+    Same approved launch + same catalog -> same semantic binding in every
+    session; excluded are the session instance / connection epoch / live
+    catalog generation (those live in PhysicalSessionFence only).
+    """
+
+    server_id: str
+    launch_identity_digest: str
+    catalog_digest: str
+    catalog_epoch_id: UUID
+    tool_name: str
+    schema_hash: str
+    binding_digest: str
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "server_id": self.server_id,
+            "launch_identity_digest": self.launch_identity_digest,
+            "catalog_digest": self.catalog_digest,
+            "catalog_epoch_id": str(self.catalog_epoch_id),
+            "tool_name": self.tool_name,
+            "schema_hash": self.schema_hash,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"SemanticMcpBinding(server_id={self.server_id!r}, "
+            f"tool_name={self.tool_name!r}, binding_digest={self.binding_digest!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalSessionFence:
+    """Live-handle guard; never enters ledger/approval/recovery identity."""
+
+    session_instance_id: UUID
+    connection_epoch: int = 0
+    catalog_generation: int = 1
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.session_instance_id, UUID):
+            raise TypeError("session_instance_id must be UUID")
+        if (
+            not isinstance(self.connection_epoch, int)
+            or isinstance(self.connection_epoch, bool)
+            or self.connection_epoch < 0
+        ):
+            raise ValueError("connection_epoch must be int >= 0")
+        if (
+            not isinstance(self.catalog_generation, int)
+            or isinstance(self.catalog_generation, bool)
+            or self.catalog_generation < 1
+        ):
+            raise ValueError("catalog_generation must be int >= 1")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class PreparedMcpInvocation:
+    """Immutable prepared handle + semantic binding + physical fence.
+
+    ``prepared_call`` is the delegate's own prepared token; the caller may
+    NOT re-query the dynamic registry by tool name after prepare (§8.8).
+    """
+
+    prepared_call: object
+    semantic_binding: SemanticMcpBinding
+    physical_fence: PhysicalSessionFence
+
+    @property
+    def early_result(self):
+        return getattr(self.prepared_call, "early_result", None)
+
+    @property
+    def binding_digest(self) -> str | None:
+        return self.semantic_binding.binding_digest
+
+    def __repr__(self) -> str:
+        return (
+            f"PreparedMcpInvocation(tool={self.semantic_binding.tool_name!r}, "
+            f"binding_digest={self.binding_digest!r})"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class McpBinding:
     """One immutable (server, generation, tool, schema) binding."""
@@ -235,12 +337,55 @@ class McpCatalog:
     generation: int
     bindings: Mapping[str, McpBinding]
     definitions: tuple[ToolDefinition, ...]
+    catalog_digest: str = ""
+    catalog_epoch_id: UUID | None = None
+    semantic_bindings: Mapping[str, SemanticMcpBinding | None] = MappingProxyType({})
+
+
+def _catalog_digest_for(
+    server_id: str,
+    tools: list[Mapping[str, Any]],
+) -> str:
+    """I6 §8.8: sorted tool names + exact schemas (generation independent)."""
+    validated: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, Mapping):
+            raise McpBindingError("invalid_mcp_tool")
+        name = tool.get("name")
+        if not isinstance(name, str) or not _TOOL_NAME.fullmatch(name):
+            raise McpBindingError("invalid_mcp_tool_name")
+        schema = tool.get("inputSchema")
+        validated.append({"name": name, "schema": _canonical_schema(schema)})
+    validated.sort(key=lambda item: item["name"])
+    return hashlib.sha256(
+        json.dumps(
+            validated,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8", "strict")
+    ).hexdigest()
+
+
+def _catalog_epoch_id(
+    server_id: str,
+    catalog_digest: str,
+    launch_identity_digest: str | None,
+) -> UUID:
+    if launch_identity_digest is None:
+        namespace = uuid5(NAMESPACE_URL, f"koawa-mcp:{server_id}")
+    else:
+        namespace = uuid5(NAMESPACE_URL, f"koawa-mcp-launch:{launch_identity_digest}")
+    return uuid5(namespace, "catalog:" + catalog_digest)
 
 
 def bind_catalog(
     server_id: str,
     generation: int,
     tools: list[Mapping[str, Any]],
+    *,
+    launch_identity_digest: str | None = None,
 ) -> McpCatalog:
     """Build the immutable generation catalog; any invalid tool fails closed."""
 
@@ -280,40 +425,128 @@ def bind_catalog(
         )
         bindings[registry_name] = binding
         definitions.append(spec.definition())
+    catalog_digest = _catalog_digest_for(server_id, tools)
+    catalog_epoch_id = _catalog_epoch_id(
+        server_id, catalog_digest, launch_identity_digest,
+    )
+    semantic: dict[str, SemanticMcpBinding | None] = {}
+    for registry_name, binding in bindings.items():
+        semantic[registry_name] = _semantic_binding(
+            binding,
+            launch_identity_digest=launch_identity_digest,
+            catalog_digest=catalog_digest,
+            catalog_epoch_id=catalog_epoch_id,
+        )
     return McpCatalog(
         generation=generation,
         bindings=MappingProxyType(bindings),
         definitions=tuple(definitions),
+        catalog_digest=catalog_digest,
+        catalog_epoch_id=catalog_epoch_id,
+        semantic_bindings=MappingProxyType(semantic),
+    )
+
+
+def _semantic_binding(
+    binding: McpBinding,
+    *,
+    launch_identity_digest: str | None,
+    catalog_digest: str,
+    catalog_epoch_id: UUID,
+) -> SemanticMcpBinding:
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "server_id": binding.server_id,
+                "launch_identity_digest": launch_identity_digest,
+                "catalog_digest": catalog_digest,
+                "catalog_epoch_id": str(catalog_epoch_id),
+                "tool_name": binding.tool_name,
+                "schema_hash": binding.schema_hash,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8", "strict")
+    ).hexdigest()
+    return SemanticMcpBinding(
+        server_id=binding.server_id,
+        launch_identity_digest=launch_identity_digest or "legacy",
+        catalog_digest=catalog_digest,
+        catalog_epoch_id=catalog_epoch_id,
+        tool_name=binding.tool_name,
+        schema_hash=binding.schema_hash,
+        binding_digest=digest,
     )
 
 
 class McpRegistryAdapter:
-    """D3 ToolExecutor facade that adds the binding digest to D7 identity."""
+    """D3 ToolExecutor facade exposing semantic + physical binding identity."""
 
     def __init__(
         self,
         registry: ToolRegistry,
         bindings: Mapping[str, McpBinding],
+        *,
+        semantic_bindings: Mapping[str, SemanticMcpBinding | None] | None = None,
+        session_instance_id: UUID | None = None,
     ) -> None:
         self._registry = registry
         self._bindings = dict(bindings)
+        self._semantic = dict(semantic_bindings or {})
+        self._session_instance_id = session_instance_id or uuid4()
+        self._catalog_generation = max(
+            (binding.session_generation for binding in self._bindings.values()),
+            default=1,
+        )
+        self._catalog_epoch_id = None
 
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return self._registry.definitions()
 
     def prepare(self, call):
-        return self._registry.prepare(call)
+        """Return an immutable prepared + semantic/physical binding (I6 §8.8).
+
+        The caller must not re-query the live registry by tool name after
+        prepare; the semantic binding is carried on the prepared token.
+        """
+        registry_name = call.name
+        prepared = self._registry.prepare(call)
+        semantic = self._semantic.get(registry_name)
+        if semantic is None and registry_name in self._bindings:
+            binding = self._bindings[registry_name]
+            semantic = _semantic_binding(
+                binding,
+                launch_identity_digest=None,
+                catalog_digest="",
+                catalog_epoch_id=uuid5(
+                    NAMESPACE_URL, "koawa-mcp:" + binding.server_id,
+                ),
+            )
+        fence = PhysicalSessionFence(
+            session_instance_id=self._session_instance_id,
+            connection_epoch=0,
+            catalog_generation=self._catalog_generation,
+        )
+        return PreparedMcpInvocation(
+            prepared_call=prepared,
+            semantic_binding=semantic,
+            physical_fence=fence,
+        )
 
     def invoke_prepared(self, prepared, *, context, authority):
         return self._registry.invoke_prepared(
-            prepared, context=context, authority=authority,
+            _unwrap(prepared), context=context, authority=authority,
         )
 
     def bind_policy_authority(self, authority) -> None:
         self._registry.bind_policy_authority(authority)
 
     def discard_prepared(self, prepared, *, authority) -> bool:
-        return self._registry.discard_prepared(prepared, authority=authority)
+        return self._registry.discard_prepared(
+            _unwrap(prepared), authority=authority,
+        )
 
     def execute(self, call, *, context):
         return self._registry.execute(call, context=context)
@@ -321,6 +554,15 @@ class McpRegistryAdapter:
     def binding_digest(self, tool_name: str) -> str | None:
         binding = self._bindings.get(tool_name)
         return None if binding is None else binding.binding_digest
+
+    def semantic_bindings(self) -> Mapping[str, SemanticMcpBinding | None]:
+        return MappingProxyType(self._semantic)
+
+    def set_catalog_epoch_id(self, epoch_id: UUID | None) -> None:
+        self._catalog_epoch_id = epoch_id
+
+    def catalog_epoch_id(self) -> UUID | None:
+        return self._catalog_epoch_id
 
 
 def build_mcp_registry(session, catalog: McpCatalog) -> McpRegistryAdapter:
@@ -332,4 +574,19 @@ def build_mcp_registry(session, catalog: McpCatalog) -> McpRegistryAdapter:
         binding = catalog.bindings[registry_name]
         registry.register(binding.spec, session.handler(binding))
         bindings[registry_name] = binding
-    return McpRegistryAdapter(registry, bindings)
+    session_instance_id = getattr(session, "session_instance_id", None)
+    adapter = McpRegistryAdapter(
+        registry,
+        bindings,
+        semantic_bindings=catalog.semantic_bindings,
+        session_instance_id=session_instance_id,
+    )
+    adapter.set_catalog_epoch_id(catalog.catalog_epoch_id)
+    return adapter
+
+
+def _unwrap(prepared):
+    """Return the raw delegate prepared token from an I6 wrapper."""
+    if isinstance(prepared, PreparedMcpInvocation):
+        return prepared.prepared_call
+    return prepared

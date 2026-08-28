@@ -23,7 +23,8 @@ from ..control.runtime import ThreadRuntime
 from ..control.sqlite_store import SqliteEventStore
 from ..ledger import ToolLedgerStore
 from ..context.index import RepositoryIndex
-from ..telemetry.trace import TraceStore
+from ..telemetry.trace import BestEffortTraceSink, TraceProbe, TraceStore
+from .truth import RuntimeTruthDocument, RuntimeTruthVerifier
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,9 @@ class UnifiedResult:
     child_states: tuple[str, ...]
     compacted: str
     trace_streams: tuple[str, ...]
+    thread_id: UUID | None = None
+    run_id: UUID | None = None
+    evidence_digest: str | None = None
 
 
 class UnifiedAgentRuntime:
@@ -49,6 +53,7 @@ class UnifiedAgentRuntime:
             self.store, self.ledger, budget_action_limits={"root": 20}
         )
         self.trace = TraceStore(self.store)
+        self.trace_sink = BestEffortTraceSink(self.trace)
         self.correlation_id = uuid4()
         self.control = AgentControlPlane(
             self.store,
@@ -66,19 +71,23 @@ class UnifiedAgentRuntime:
         )
 
     def execute(self, goal: str) -> UnifiedResult:
-        self.trace.append(
-            correlation_id=self.correlation_id,
-            stream="model",
-            kind="run",
-            fields={"kind": "run", "result_code": "ok"},
+        self.trace_sink.emit(
+            TraceProbe(
+                self.correlation_id,
+                "model",
+                "run",
+                {"kind": "run", "result_code": "ok"},
+            )
         )
         files = self.index.list_files()
         context_items = self.retriever.retrieve(query=goal, files=files)
-        self.trace.append(
-            correlation_id=self.correlation_id,
-            stream="subagent",
-            kind="spawn",
-            fields={"kind": "spawn", "attempt": 1},
+        self.trace_sink.emit(
+            TraceProbe(
+                self.correlation_id,
+                "subagent",
+                "spawn",
+                {"kind": "spawn", "attempt": 1},
+            )
         )
         root = self.control.spawn_agent(
             parent_agent_id=None,
@@ -130,20 +139,26 @@ class UnifiedAgentRuntime:
             projection=projection,
             tail_events=("agent.completed.v1",),
         )
-        turn = self._durable_turn(goal)
+        truth = self._durable_turn(goal)
         streams = tuple(
             sorted({record.stream for record in self.trace.read(self.correlation_id)})
         )
         return UnifiedResult(
-            turn_id=turn,
-            turn_status="completed",
+            turn_id=truth.turn.turn_id,
+            turn_status=truth.turn.status.value,
             context_items=tuple(item.path for item in context_items),
             child_states=child_states,
             compacted=compacted,
             trace_streams=streams,
+            thread_id=truth.thread.thread_id,
+            run_id=None if truth.run is None else truth.run.run_id,
+            evidence_digest=(
+                None if truth.completion_evidence is None
+                else truth.completion_evidence.evidence_digest
+            ),
         )
 
-    def _durable_turn(self, goal: str) -> UUID:
+    def _durable_turn(self, goal: str) -> RuntimeTruthDocument:
         thread = self.runtime.create_thread("unified-task")
         queued = self.runtime.create_turn(
             thread.thread_id,
@@ -151,4 +166,15 @@ class UnifiedAgentRuntime:
             expected_thread_version=thread.version,
         )
         running = self.runtime.start_turn(queued.turn_id, queued.version)
-        return queued.turn_id
+        if running.current_run_id is None:
+            raise RuntimeError("unified running Turn has no Run")
+        evidence = self.runtime.record_completion_evidence(
+            running.turn_id, run_id=running.current_run_id,
+            final_text=f"completed:{goal}",
+        )
+        self.runtime.complete_turn(
+            running.turn_id, f"completed:{goal}",
+            expected_version=running.version, run_id=running.current_run_id,
+            evidence_ref=evidence,
+        )
+        return RuntimeTruthVerifier(self.runtime, self.store).read(running.turn_id)

@@ -405,6 +405,19 @@ class CanonicalSeedWorkerTest(unittest.TestCase):
         self.runtime = ThreadRuntime(self.store, actor="canonical-worker")
         self.checkpoints = CheckpointStore(self.store)
 
+    def _expire_recoverable(self, turn_id) -> None:
+        # The crashed worker lease is still nominally live; expire the
+        # recoverable projection entry deterministically so stale discovery
+        # never depends on a wall clock.
+        from contextlib import closing
+        import sqlite3
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute(
+                "UPDATE recoverable_turns SET lease_expires_at=? WHERE turn_id=?",
+                ("2000-01-01T00:00:00.000000Z", str(turn_id)),
+            )
+            connection.commit()
     def create_queued(self, text: str = "investigate the failing test"):
         thread = self.runtime.create_thread("D:/work/repository")
         queued = self.runtime.create_turn(
@@ -476,6 +489,7 @@ class CanonicalSeedWorkerTest(unittest.TestCase):
         fresh_thread, fresh_queued = self.create_queued("resume this exact task")
         uninterrupted_worker.execute(fresh_queued.turn_id, fresh_queued.version)
         del fresh_thread
+        self._expire_recoverable(queued.turn_id)
         coordinator = RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="recovery")
         candidate = coordinator.list_recoverable_turns()[0]
         claim = coordinator.claim_stale(candidate, force=True)
@@ -498,25 +512,13 @@ class CanonicalSeedWorkerTest(unittest.TestCase):
             StreamWrite,
         )
 
+        from koawa_agent_v2.recovery import execution_seed
+        from koawa_agent_v2.model.protocol import UserMessage
+
         thread, queued = self.create_queued("atomic task")
-        seed_one = {
-            "context": [
-                {
-                    "kind": "user",
-                    "input_id": f"turn:{queued.turn_id}:original",
-                    "content": "atomic task",
-                    "source_interrupt_id": None,
-                }
-            ],
-            "model_round": 0,
-            "tool_count": 0,
-            "output_chars": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "phase": "ready_for_model",
-            "pending_tool_calls": [],
-            "final_text": None,
-        }
+        seed_one = execution_seed(
+            (UserMessage(f"turn:{queued.turn_id}:original", "atomic task"),),
+        )
         running = self.runtime.start_turn(
             queued.turn_id,
             queued.version,
@@ -643,6 +645,7 @@ class CanonicalSeedWorkerTest(unittest.TestCase):
         )
         with self.assertRaises(KeyboardInterrupt):
             first_worker.execute(queued.turn_id, queued.version)
+        self._expire_recoverable(queued.turn_id)
         coordinator = RecoveryCoordinator(self.runtime, self.checkpoints, owner_id="recovery")
         candidate = coordinator.list_recoverable_turns()[0]
         claim = coordinator.claim_stale(candidate, force=True)

@@ -299,7 +299,7 @@ class ThreadRuntimeTest(unittest.TestCase):
                 command_id=start_command,
             ),
         )
-        self.assertEqual(6, len(self.store.read_all()))
+        self.assertEqual(8, len(self.store.read_all()))
 
     def test_first_call_returns_its_receipt_version_not_a_competing_future(self) -> None:
         """提交后发生并发推进时，首次调用也只能返回本命令对应版本。"""
@@ -473,14 +473,14 @@ class ThreadRuntimeTest(unittest.TestCase):
         after = self.store.read_all(after_position=before[-1].global_position)
 
         self.assertEqual(TurnStatus.COMPLETED, completed.status)
-        self.assertEqual(2, len(after))
+        self.assertEqual(3, len(after))
         self.assertEqual(
-            {"turn.completed.v1", "thread.turn-detached.v1"},
+            {"turn.completed.v1", "thread.turn-detached.v1", "run.completed.v1"},
             {event.event_type for event in after},
         )
         self.assertEqual({after[0].commit_id}, {event.commit_id for event in after})
-        self.assertEqual([0, 1], [event.commit_index for event in after])
-        self.assertEqual([2, 2], [event.commit_size for event in after])
+        self.assertEqual([0, 1, 2], [event.commit_index for event in after])
+        self.assertEqual([3, 3, 3], [event.commit_size for event in after])
 
     def test_replay_fails_closed_on_unknown_schema_version(self) -> None:
         """未知事件版本必须 fail closed，不能按旧结构侥幸解析。"""

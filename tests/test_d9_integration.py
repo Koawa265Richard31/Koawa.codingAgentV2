@@ -663,7 +663,7 @@ class D9PolicyIntegrationTest(unittest.TestCase):
         error = json.loads(results[0].content)
         self.assertEqual("policy_denied", error["error"])
         self.assertEqual(ApprovalStatus.DENIED, self.approvals.load(record.execution_id).status)
-        self.assertEqual(ToolExecutionState.PREPARED, self.ledger.load(record.execution_id).state)
+        self.assertEqual(ToolExecutionState.FAILED, self.ledger.load(record.execution_id).state)
 
     def test_resolver_drift_after_grant_creates_fresh_ask(self) -> None:
         _, queued = self.create_turn("resolver-drift")

@@ -31,6 +31,12 @@ from .connection_manager import (
     McpSessionError,
     bind_tool_handler,
 )
+from .activation import ActivationService, McpActivationError
+from .launcher import (
+    HostTrustedLauncher,
+    McpProcessLauncher,
+    SandboxedLauncher,
+)
 
 __all__ = [
     "INITIALIZE",
@@ -59,4 +65,9 @@ __all__ = [
     "McpSession",
     "McpSessionError",
     "bind_tool_handler",
+    "ActivationService",
+    "McpActivationError",
+    "HostTrustedLauncher",
+    "McpProcessLauncher",
+    "SandboxedLauncher",
 ]

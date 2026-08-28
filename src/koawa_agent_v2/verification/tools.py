@@ -210,6 +210,7 @@ def build_verified_coding_tool_registry(
     verification_limits: VerificationLimits | None = None,
     tool_limits: D5ToolLimits | None = None,
     fault_injector: FaultInjector | None = None,
+    git_facade: GitFacade | None = None,
 ) -> CodingToolRegistry:
     """构建 D3 read/search + D4 patch + D5 test/git/finalize 的完整目录。"""
     repository_limits = repository_limits or RepositoryToolLimits()
@@ -223,7 +224,9 @@ def build_verified_coding_tool_registry(
         hard_max_directory_scan_entries=repository_limits.max_directory_scan_entries,
     )
     try:
-        git = GitFacade(workspace_root, resolver, limits=git_limits)
+        if git_facade is not None and not isinstance(git_facade, GitFacade):
+            raise TypeError("git_facade must be GitFacade or None")
+        git = git_facade or GitFacade(workspace_root, resolver, limits=git_limits)
         verification = VerificationLedger(git, limits=verification_limits)
         if command_runner is not None:
             if command_profiles is not None:

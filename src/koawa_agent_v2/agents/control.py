@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+from ..telemetry.faults import FaultPoint, adapt_fault_callback
 
 from .graph import (
     AgentError,
@@ -237,6 +238,7 @@ class AgentControlPlane:
         limits: AgentBudgetLimits | None = None,
         clock: Callable[[], datetime] | None = None,
         faults: FaultInjector = NO_FAULTS,
+        fault_port=None,
     ) -> None:
         for method in ("append_batch", "read_stream", "read_all", "current_global_position"):
             if not callable(getattr(event_store, method, None)):
@@ -256,7 +258,7 @@ class AgentControlPlane:
         self.mailbox = AgentMailbox(event_store)
         self.limits = limits or AgentBudgetLimits()
         self._clock = clock
-        self._faults = faults
+        self._faults = adapt_fault_callback(faults, fault_port)
 
     def now(self) -> datetime:
         value = self._clock()
@@ -396,7 +398,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 raise AgentError("agent_spawn_idempotency_conflict") from None
             self._fault(
-                "d11.spawn.after_commit",
+                FaultPoint.D11_SPAWN_AFTER_COMMIT,
                 _facts(child_id, 1, version=0),
             )
             return self._rebuilt_agent(child_id)
@@ -557,11 +559,11 @@ class AgentControlPlane:
                 ),
             )
             self._fault(
-                "d11.spawn.after_read",
+                FaultPoint.D11_SPAWN_AFTER_READ,
                 _facts(parent_agent_id, parent.attempt, version=parent.version),
             )
             self._fault(
-                "d11.spawn.before_append",
+                FaultPoint.D11_SPAWN_BEFORE_APPEND,
                 _facts(parent_agent_id, parent.attempt, version=parent.version),
             )
             try:
@@ -575,7 +577,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 raise AgentError("agent_spawn_idempotency_conflict") from None
             self._fault(
-                "d11.spawn.after_commit",
+                FaultPoint.D11_SPAWN_AFTER_COMMIT,
                 _facts(parent_agent_id, parent.attempt),
             )
             return self._rebuilt_agent(child_id)
@@ -760,7 +762,7 @@ class AgentControlPlane:
             if receipt is not None:
                 return self._rebuilt_agent(agent_id)
             self._fault(
-                "d11.takeover.before_append",
+                FaultPoint.D11_TAKEOVER_BEFORE_APPEND,
                 _facts(
                     agent_id,
                     new_attempt,
@@ -779,7 +781,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 return self._rebuilt_agent(agent_id)
             self._fault(
-                "d11.takeover.after_commit",
+                FaultPoint.D11_TAKEOVER_AFTER_COMMIT,
                 _facts(
                     agent_id,
                     new_attempt,
@@ -788,7 +790,7 @@ class AgentControlPlane:
             )
             if candidates:
                 self._fault(
-                    "d11.unresolved.after_commit",
+                    FaultPoint.D11_UNRESOLVED_AFTER_COMMIT,
                     _facts(
                         agent_id,
                         new_attempt,
@@ -887,6 +889,15 @@ class AgentControlPlane:
                 occurred_at=observed_at,
                 correlation_id=_correlation(command_id),
             )
+            self._fault(
+                FaultPoint.D11_RESUME_BEFORE_APPEND,
+                _facts(
+                    agent_id,
+                    new_attempt,
+                    message_ids=tuple(message.message_id for message in blockers),
+                    version=current.version,
+                ),
+            )
             try:
                 self.event_store.append_batch(
                     (
@@ -910,7 +921,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 return self._rebuilt_agent(agent_id)
             self._fault(
-                "d11.resume.after_commit",
+                FaultPoint.D11_RESUME_AFTER_COMMIT,
                 _facts(
                     agent_id,
                     new_attempt,
@@ -959,7 +970,7 @@ class AgentControlPlane:
             observed_at = self.now()
             lease = observed_at + timedelta(seconds=lease_seconds)
             self._fault(
-                "d11.heartbeat.before_append",
+                FaultPoint.D11_HEARTBEAT_BEFORE_APPEND,
                 _facts(agent_id, attempt, version=record.version),
             )
             try:
@@ -993,7 +1004,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 return self._rebuilt_agent(agent_id)
             self._fault(
-                "d11.heartbeat.after_commit",
+                FaultPoint.D11_HEARTBEAT_AFTER_COMMIT,
                 _facts(agent_id, attempt),
             )
             return self._rebuilt_agent(agent_id)
@@ -1062,7 +1073,7 @@ class AgentControlPlane:
             mailbox_events = self._read_all(StreamId("mailbox", to_agent_id))
             mailbox_version = -1 if not mailbox_events else mailbox_events[-1].stream_version
             self._fault(
-                "d11.enqueue.before_append",
+                FaultPoint.D11_ENQUEUE_BEFORE_APPEND,
                 _facts(to_agent_id, target.attempt, version=mailbox_version),
             )
             try:
@@ -1085,7 +1096,7 @@ class AgentControlPlane:
                     )
                 continue
             self._fault(
-                "d11.enqueue.after_commit",
+                FaultPoint.D11_ENQUEUE_AFTER_COMMIT,
                 _facts(to_agent_id, target.attempt, message_ids=(message_id,)),
             )
             rebuilt = self.mailbox.load(to_agent_id)
@@ -1153,7 +1164,7 @@ class AgentControlPlane:
                 "lease_seconds": lease_seconds,
             })
             self._fault(
-                "d11.deliver.before_append",
+                FaultPoint.D11_DELIVER_BEFORE_APPEND,
                 _facts(
                     agent_id,
                     record.attempt,
@@ -1185,7 +1196,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 return message
             self._fault(
-                "d11.deliver.after_commit",
+                FaultPoint.D11_DELIVER_AFTER_COMMIT,
                 _facts(
                     agent_id,
                     record.attempt,
@@ -1291,7 +1302,7 @@ class AgentControlPlane:
                 correlation_id=_correlation(command_id),
             )
             self._fault(
-                "d11.result.before_append",
+                FaultPoint.D11_RESULT_BEFORE_APPEND,
                 _facts(
                     agent_id,
                     record.attempt,
@@ -1323,7 +1334,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 raise AgentError("message_result_identity_conflict") from None
             self._fault(
-                "d11.result.after_commit",
+                FaultPoint.D11_RESULT_AFTER_COMMIT,
                 _facts(
                     agent_id,
                     record.attempt,
@@ -1396,7 +1407,7 @@ class AgentControlPlane:
                 correlation_id=_correlation(command_id),
             )
             self._fault(
-                "d11.ack.before_append",
+                FaultPoint.D11_ACK_BEFORE_APPEND,
                 _facts(
                     agent_id,
                     record.attempt,
@@ -1428,7 +1439,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 return message
             self._fault(
-                "d11.ack.after_commit",
+                FaultPoint.D11_ACK_AFTER_COMMIT,
                 _facts(
                     agent_id,
                     record.attempt,
@@ -1535,7 +1546,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 return message
             self._fault(
-                "d11.unresolved.after_commit",
+                FaultPoint.D11_UNRESOLVED_AFTER_COMMIT,
                 _facts(
                     agent_id,
                     record.attempt,
@@ -1723,7 +1734,7 @@ class AgentControlPlane:
                     correlation_id=_correlation(command_id),
                 )
                 self._fault(
-                    "d11.cancel.before_append",
+                    FaultPoint.D11_CANCEL_BEFORE_APPEND,
                     _facts(
                         agent_id,
                         record.attempt,
@@ -1758,7 +1769,7 @@ class AgentControlPlane:
                 except IdempotencyConflict:
                     return message
                 self._fault(
-                    "d11.cancel.after_commit",
+                    FaultPoint.D11_CANCEL_AFTER_COMMIT,
                     _facts(
                         agent_id,
                         record.attempt,
@@ -1798,7 +1809,7 @@ class AgentControlPlane:
                 correlation_id=_correlation(command_id),
             )
             self._fault(
-                "d11.cancel.before_append",
+                FaultPoint.D11_CANCEL_BEFORE_APPEND,
                 _facts(
                     agent_id,
                     record.attempt,
@@ -1833,7 +1844,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 return message
             self._fault(
-                "d11.cancel.after_commit",
+                FaultPoint.D11_CANCEL_AFTER_COMMIT,
                 _facts(
                     agent_id,
                     record.attempt,
@@ -1926,7 +1937,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 return self._rebuilt_agent(agent_id)
             self._fault(
-                "d11.waiting.after_commit",
+                FaultPoint.D11_WAITING_AFTER_COMMIT,
                 _facts(
                     agent_id,
                     attempt,
@@ -2188,11 +2199,11 @@ class AgentControlPlane:
             ):
                 raise AgentError("agent_result_identity_conflict")
             self._fault(
-                "d11.terminal.after_read",
+                FaultPoint.D11_TERMINAL_AFTER_READ,
                 _facts(agent_id, expected_attempt, version=record.version),
             )
             self._fault(
-                "d11.terminal.before_append",
+                FaultPoint.D11_TERMINAL_BEFORE_APPEND,
                 _facts(agent_id, expected_attempt, version=record.version),
             )
             try:
@@ -2207,7 +2218,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 return self._rebuilt_agent(agent_id)
             self._fault(
-                "d11.terminal.after_commit",
+                FaultPoint.D11_TERMINAL_AFTER_COMMIT,
                 _facts(agent_id, expected_attempt, version=record.version),
             )
             return self._rebuilt_agent(agent_id)
@@ -2242,7 +2253,7 @@ class AgentControlPlane:
                 )
                 observed_at = self.now()
                 self._fault(
-                    "d11.orphan.before_append",
+                    FaultPoint.D11_ORPHAN_BEFORE_APPEND,
                     _facts(
                         record.agent_id,
                         record.attempt,
@@ -2275,7 +2286,7 @@ class AgentControlPlane:
                 except WrongExpectedVersion:
                     continue
                 self._fault(
-                    "d11.orphan.after_commit",
+                    FaultPoint.D11_ORPHAN_AFTER_COMMIT,
                     _facts(record.agent_id, record.attempt),
                 )
                 orphans.append(self.graph.load(record.agent_id))
@@ -2336,7 +2347,7 @@ class AgentControlPlane:
                 correlation_id=_correlation(command_id),
             )
             self._fault(
-                "d11.resources.baseline.before_append",
+                FaultPoint.D11_RESOURCES_BASELINE_BEFORE_APPEND,
                 _facts(parent_agent_id, 1, version=high_water),
             )
             try:
@@ -2368,7 +2379,7 @@ class AgentControlPlane:
             except IdempotencyConflict:
                 raise AgentError("agent_capacity_projection_corrupt") from None
             self._fault(
-                "d11.resources.baseline.after_commit",
+                FaultPoint.D11_RESOURCES_BASELINE_AFTER_COMMIT,
                 _facts(parent_agent_id, 1),
             )
             return self._parent_capacity(parent_agent_id)

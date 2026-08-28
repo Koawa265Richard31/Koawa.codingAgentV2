@@ -210,7 +210,7 @@ class D9DurableApprovalTest(unittest.TestCase):
         self.assertEqual("approval.requested.v1", approval_event.event_type)
         self.assertEqual("turn.waiting-for-approval.v1", turn_event.event_type)
         self.assertEqual(approval_event.commit_id, turn_event.commit_id)
-        self.assertEqual(2, approval_event.commit_size)
+        self.assertEqual(3, approval_event.commit_size)
         self.assertEqual(str(pending.request_id), turn_event.payload["approval_request_id"])
         self.assertEqual(action.action_digest, approval_event.payload["action_digest"])
 
@@ -629,7 +629,7 @@ class D9DurableApprovalTest(unittest.TestCase):
         self.assertEqual("approval.expired.v1", expired.event_type)
         self.assertEqual("approval.requested.v1", requested.event_type)
         self.assertEqual({expired.commit_id, requested.commit_id, turn_event.commit_id}, {expired.commit_id})
-        self.assertEqual(3, expired.commit_size)
+        self.assertEqual(4, expired.commit_size)
 
 
 if __name__ == "__main__":
