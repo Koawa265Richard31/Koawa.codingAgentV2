@@ -28,6 +28,7 @@ for directory in (REPO, REPO / "src"):
 from scripts import stability_scenarios as scenarios
 from scripts import stability_load as load
 from scripts import stability_resources as resources
+from scripts import stability_reference as reference
 
 PROTOCOL_VERSION = "stability-benchmark-v1"
 DATA_SEED = 0x4B4F4157415632
@@ -116,13 +117,34 @@ def _memory_bytes() -> int | None:
     return None
 
 
+def _affinity_cpus() -> list[int] | None:
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return sorted(os.sched_getaffinity(0))
+        except OSError:
+            return None
+    if os.name == "nt":
+        import ctypes
+        # Python 3.14 removed ctypes.wintypes.DWORD_PTR; a pointer-sized mask
+        # is equivalent for GetProcessAffinityMask.
+        mask_type = getattr(ctypes, "c_size_t")
+        process_mask, system_mask = mask_type(), mask_type()
+        if ctypes.windll.kernel32.GetProcessAffinityMask(
+            ctypes.windll.kernel32.GetCurrentProcess(),
+            ctypes.byref(process_mask), ctypes.byref(system_mask),
+        ):
+            return [index for index in range(process_mask.value.bit_length())
+                    if process_mask.value & (1 << index)]
+    return None
+
+
 def _git_commit(repo: Path) -> str | None:
     result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True)
     value = result.stdout.strip().lower()
     return value if len(value) == 40 and all(c in "0123456789abcdef" for c in value) else None
 
 
-def _environment(sample_seconds: float) -> dict:
+def _environment(sample_seconds: float, *, reference_attestation: dict | None = None) -> dict:
     first = _cpu_times()
     started = time.perf_counter()
     deadline = started + sample_seconds
@@ -132,14 +154,16 @@ def _environment(sample_seconds: float) -> dict:
     busy_ratio = None
     if first is not None and last is not None and last[1] > first[1]:
         busy_ratio = (last[0] - first[0]) / (last[1] - first[1])
-    identity = {
+    identity = reference.merge_identity({
         "python": platform.python_version(), "python_implementation": platform.python_implementation(),
         "python_build": list(platform.python_build()), "python_debug": hasattr(sys, "gettotalrefcount"),
         "os": platform.platform(), "machine": platform.machine(), "processor": platform.processor(),
         "logical_cpu_count": os.cpu_count(), "memory_bytes": _memory_bytes(),
+        "affinity_cpus": _affinity_cpus(),
+        "affinity_cpus": _affinity_cpus(),
         "sqlite_version": sqlite3.sqlite_version,
         "filesystem": None, "power_profile": None, "local_ssd": None, "exclusive_cpus": None,
-    }
+    }, reference_attestation)
     return {"identity": identity,
             "environment_digest": hashlib.sha256(canonical_bytes(identity)).hexdigest(),
             "background_system_cpu_ratio": busy_ratio,
@@ -183,12 +207,64 @@ def _cold_sample(name: str, path: Path, manifest: dict) -> int:
     return document["duration_ns"]
 
 
-def run(repo: Path, *, quick: bool, reference_digest: str | None) -> dict:
+def _qualification_reasons(
+    environment: dict,
+    *,
+    quick: bool,
+    reference_digest: str | None,
+    reference_attestation: dict | None,
+) -> list[str]:
+    reasons = reference.identity_qualification_reasons(
+        environment["identity"],
+        reference_digest=reference_digest,
+        environment_digest=environment["environment_digest"],
+        attestation=reference_attestation,
+    )
+    if quick:
+        reasons.append("quick_test_shape")
+    if (
+        environment["background_sample_seconds"] < 60
+        or environment["background_system_cpu_ratio"] is None
+        or environment["background_system_cpu_ratio"] >= .05
+    ):
+        reasons.append("background_cpu_not_qualified")
+    if environment["disk_free_bytes"] < 5 * environment["dataset_bytes"]:
+        reasons.append("insufficient_disk_space")
+    return reasons
+
+
+def _apply_result_gates(results: dict, *, threshold_enforced: bool, batches: int) -> None:
+    for result in results.values():
+        if not threshold_enforced:
+            result["passed"] = None
+            continue
+        modes_complete = all(
+            len(mode["batches"]) == batches and all(batch["samples"] > 0 for batch in mode["batches"])
+            for mode in result["modes"].values()
+        )
+        threshold = result["threshold_ms"]
+        under_threshold = threshold is None or all(
+            mode["median_batch_p95_ms"] is not None
+            and mode["median_batch_p95_ms"] < threshold
+            for mode in result["modes"].values()
+        )
+        result["passed"] = bool(modes_complete and under_threshold)
+
+
+def run(
+    repo: Path,
+    *,
+    quick: bool,
+    reference_digest: str | None,
+    reference_attestation: dict | None = None,
+) -> dict:
     if os.environ.get("PYTHONHASHSEED") != "0":
         raise RuntimeError("PYTHONHASHSEED must be explicitly set to 0 before interpreter startup")
     shape = (Shape(40, 5, 4, 5, 3, 3, 1, 1, 4, 3, 4, 128) if quick
              else Shape(10000, 1000, 100, 100, 30, 20, 3, 5, 100, 1000, 100, 2048))
-    environment = _environment(.2 if quick else 60)
+    environment = _environment(
+        .2 if quick else 60, reference_attestation=reference_attestation,
+    )
     results, datasets, errors = {}, {}, []
     with tempfile.TemporaryDirectory(prefix="koawa-stability-benchmark-") as directory:
         root = Path(directory)
@@ -283,23 +359,26 @@ def run(repo: Path, *, quick: bool, reference_digest: str | None) -> dict:
             }}}
         resource_samples.append(resources.snapshot(time.perf_counter() - resource_started,
                                                     tuple(root.glob("*.sqlite3"))))
-    reasons = ["required_scenarios_incomplete", "hardware_attestation_missing"]
-    if quick:
-        reasons.append("quick_test_shape")
-    if reference_digest != environment["environment_digest"]:
-        reasons.append("reference_environment_mismatch")
-    if not environment["identity"]["python"].startswith("3.12."):
-        reasons.append("python_not_3_12")
-    if environment["background_sample_seconds"] < 60 or environment["background_system_cpu_ratio"] is None or environment["background_system_cpu_ratio"] >= .05:
-        reasons.append("background_cpu_not_qualified")
-    if environment["disk_free_bytes"] < 5 * environment["dataset_bytes"]:
-        reasons.append("insufficient_disk_space")
+    reasons = _qualification_reasons(
+        environment,
+        quick=quick,
+        reference_digest=reference_digest,
+        reference_attestation=reference_attestation,
+    )
+    environment_qualified = not reasons
+    threshold_enforced = environment_qualified and not quick
+    _apply_result_gates(results, threshold_enforced=threshold_enforced, batches=shape.batches)
     document = {
         "protocol_version": PROTOCOL_VERSION, "measurement_mode": "quick_test" if quick else "full",
         "commit": _git_commit(repo), "generated_at": datetime.now(timezone.utc).isoformat(),
         "environment": environment, "reference_environment_digest": reference_digest,
-        "environment_qualified": False, "qualification_reasons": reasons,
-        "threshold_enforced": False, "release_pass": None,
+        "environment_qualified": environment_qualified, "qualification_reasons": reasons,
+        "threshold_enforced": threshold_enforced, "release_pass": None,
+        "reference_attestation_digest": (
+            environment["identity"].get("reference_attestation_digest")
+        ),
+        "reference_attestation": reference_attestation,
+        "reference_attestation": reference_attestation,
         "dataset": {"seed": DATA_SEED, **asdict(shape)}, "datasets": datasets,
         "dataset_digest": hashlib.sha256(canonical_bytes(datasets)).hexdigest(),
         "sqlite_pragmas": pragmas, "results": results, "errors": errors,
@@ -317,6 +396,7 @@ def main() -> int:
     parser.add_argument("--report", type=Path)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--reference-environment-digest")
+    parser.add_argument("--reference-attestation", type=Path)
     parser.add_argument("--sample", action="store_true", help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     if arguments.sample:
@@ -326,7 +406,16 @@ def main() -> int:
         return 0
     if arguments.report is None:
         parser.error("--report is required")
-    document = run(REPO, quick=arguments.quick, reference_digest=arguments.reference_environment_digest)
+    attestation = (
+        reference.load_attestation(arguments.reference_attestation)
+        if arguments.reference_attestation is not None else None
+    )
+    document = run(
+        REPO,
+        quick=arguments.quick,
+        reference_digest=arguments.reference_environment_digest,
+        reference_attestation=attestation,
+    )
     atomic_json(arguments.report, document)
     print(json.dumps({"report": str(arguments.report.resolve()), "digest": document["report_digest"],
                       "threshold_enforced": document["threshold_enforced"], "errors": document["errors"]}, sort_keys=True))

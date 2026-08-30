@@ -14,6 +14,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 from scripts import stability_benchmark as benchmark
+from scripts import stability_reference as reference
 from scripts import stability_scenarios as scenarios
 from koawa_agent_v2.control.event_store import StreamId
 
@@ -54,6 +55,89 @@ class CapacityStatisticsTest(unittest.TestCase):
         self.assertEqual(.1, first["background_system_cpu_ratio"])
         self.assertEqual(.8, second["background_system_cpu_ratio"])
         self.assertEqual(first["environment_digest"], second["environment_digest"])
+
+
+class ReferenceAttestationTest(unittest.TestCase):
+    def _document(self):
+        return {
+            "protocol_version": reference.PROTOCOL_VERSION,
+            "facts": {
+                "filesystem": "NTFS",
+                "power_profile": "balanced-audited",
+                "local_ssd": True,
+                "exclusive_cpus": [3, 2, 1, 0],
+            },
+            "evidence": {
+                "audited_at": "2026-08-30T00:00:00Z",
+                "filesystem": "volume-audit-1",
+                "power_profile": "power-audit-1",
+                "local_ssd": "storage-audit-1",
+                "exclusive_cpus": "cpu-reservation-1",
+            },
+        }
+
+    def test_attestation_is_strict_bounded_and_canonical(self):
+        checked = reference.validate_attestation(self._document(), logical_cpu_count=8)
+        self.assertEqual([0, 1, 2, 3], checked["facts"]["exclusive_cpus"])
+        self.assertEqual(64, len(checked["attestation_digest"]))
+        for mutation in (
+            lambda value: value.update({"unknown": True}),
+            lambda value: value["facts"].update({"local_ssd": False}),
+            lambda value: value["facts"].update({"exclusive_cpus": [0, 1, 2]}),
+            lambda value: value["evidence"].pop("filesystem"),
+        ):
+            with self.subTest(mutation=mutation):
+                document = self._document()
+                mutation(document)
+                with self.assertRaises(reference.ReferenceAttestationError):
+                    reference.validate_attestation(document, logical_cpu_count=8)
+
+    def test_digest_alone_never_qualifies(self):
+        identity = {
+            "python": "3.12.13", "python_implementation": "CPython", "python_debug": False,
+            "machine": "AMD64", "memory_bytes": 16 * 1024**3,
+            "filesystem": None, "power_profile": None, "local_ssd": None,
+            "exclusive_cpus": None,
+        }
+        reasons = reference.identity_qualification_reasons(
+            identity,
+            reference_digest="a" * 64,
+            environment_digest="a" * 64,
+            attestation=None,
+        )
+        self.assertIn("hardware_attestation_missing", reasons)
+        self.assertIn("filesystem_not_attested", reasons)
+
+    def test_structured_attestation_and_matching_digest_qualify_identity(self):
+        attestation = reference.validate_attestation(self._document(), logical_cpu_count=8)
+        identity = reference.merge_identity({
+            "python": "3.12.13", "python_implementation": "CPython", "python_debug": False,
+            "machine": "AMD64", "memory_bytes": 16 * 1024**3,
+            "logical_cpu_count": 8,
+            # Local affinity equals the attested exclusive CPUs, so no
+            # exclusive_cpu_affinity_mismatch is reported.
+            "affinity_cpus": [0, 1, 2, 3],
+        }, attestation)
+        digest = hashlib.sha256(reference.canonical_bytes(identity)).hexdigest()
+        self.assertEqual([], reference.identity_qualification_reasons(
+            identity,
+            reference_digest=digest,
+            environment_digest=digest,
+            attestation=attestation,
+        ))
+
+    def test_thresholds_only_apply_to_complete_reference_batches(self):
+        results = {"read": {"threshold_ms": 10.0, "passed": None, "modes": {
+            "cold": {"batches": [benchmark.summary([1_000_000])] * 3,
+                     "median_batch_p95_ms": 1.0},
+        }}}
+        benchmark._apply_result_gates(results, threshold_enforced=True, batches=3)
+        self.assertTrue(results["read"]["passed"])
+        results["read"]["modes"]["cold"]["median_batch_p95_ms"] = 10.0
+        benchmark._apply_result_gates(results, threshold_enforced=True, batches=3)
+        self.assertFalse(results["read"]["passed"])
+        benchmark._apply_result_gates(results, threshold_enforced=False, batches=3)
+        self.assertIsNone(results["read"]["passed"])
 
 
 class CapacityProductionDatasetsTest(unittest.TestCase):
