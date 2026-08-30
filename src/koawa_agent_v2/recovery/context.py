@@ -677,20 +677,34 @@ def _apply_compaction(
     """
     if not source_ranges:
         raise ReconstructionError("compaction source range empty")
-    start = None
-    end = None
+    # Select the version-contiguous run covering [source_first, source_last].
+    # An earlier compaction's replacement carries a version that may fall
+    # inside the range yet sits BEFORE it in the list; such anchors are
+    # skipped, and the run must end exactly at source_last.
+    indices: list[int] = []
+    previous_last: int | None = None
     for index, (first, last) in enumerate(source_ranges):
-        if last < source_first:
-            continue
-        if first > source_last:
-            break
-        if start is None:
-            start = index
-        end = index + 1
+        if last < source_first or first > source_last:
+            continue  # fully outside the declared range
+        if index < len(context) and context[index].get("kind") in {
+            "instruction", "user",
+        }:
+            continue  # earlier replacement (anchor): never a source
+        if previous_last is not None and first < previous_last:
+            raise ReconstructionError("compaction source range not contiguous")
+        indices.append(index)
+        previous_last = last
+    if not indices or indices != list(range(indices[0], indices[-1] + 1)):
+        raise ReconstructionError("compaction source range not found")
+    start, end = indices[0], indices[-1] + 1
+    for index in indices:
+        first, last = source_ranges[index]
         if first < source_first or last > source_last:
             raise ReconstructionError("compaction source range misaligned")
-    if start is None or end is None:
-        raise ReconstructionError("compaction source range not found")
+    if source_ranges[indices[0]][0] != source_first:
+        raise ReconstructionError("compaction source range not contiguous")
+    if source_ranges[indices[-1]][1] != source_last:
+        raise ReconstructionError("compaction source range not contiguous")
     selected = context[start:end]
     for item in selected:
         if item.get("kind") in {"instruction", "user"}:

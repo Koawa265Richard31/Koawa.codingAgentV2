@@ -669,17 +669,19 @@ class DurableExecutionRecorder:
         epoch: int,
         source_first_version: int,
         source_last_version: int,
-        source_event_ids_digest: str,
         replacement: Mapping[str, Any],
         resulting_context_digest: str,
         target_chars: int,
         summary_receipt_digest: str | None = None,
+        source_event_ids_digest: str | None = None,
     ) -> None:
         """D23 §5.7: record an in-run compaction (intended + compacted).
 
         Both facts are appended on the run-execution stream with exact
         expected versions and deterministic command identities; a response
         loss retry returns the same receipts without duplicating facts.
+        ``source_event_ids_digest`` is computed by the recorder from its own
+        source-range context when the caller omits it.
         """
         if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:
             raise ValueError("epoch must be a positive integer")
@@ -695,12 +697,8 @@ class DurableExecutionRecorder:
             or source_last_version < source_first_version
         ):
             raise ValueError("source_last_version must cover source_first_version")
-        if not isinstance(source_event_ids_digest, str) or not source_event_ids_digest:
-            raise ValueError("source_event_ids_digest must be non-empty")
         if not isinstance(replacement, Mapping):
             raise TypeError("replacement must be a context document")
-        if not isinstance(resulting_context_digest, str) or not resulting_context_digest:
-            raise ValueError("resulting_context_digest must be non-empty")
         if not isinstance(target_chars, int) or isinstance(target_chars, bool) or target_chars < 1:
             raise ValueError("target_chars must be a positive integer")
         if summary_receipt_digest is not None and (
@@ -708,6 +706,18 @@ class DurableExecutionRecorder:
             or not summary_receipt_digest
         ):
             raise ValueError("summary_receipt_digest must be non-empty or None")
+        if source_event_ids_digest is None:
+            source_event_ids_digest = self._range_identity_digest(
+                source_first_version, source_last_version
+            )
+        if not isinstance(source_event_ids_digest, str) or not source_event_ids_digest:
+            raise ValueError("source_event_ids_digest must be non-empty")
+        if not resulting_context_digest:
+            resulting_context_digest = self._range_resulting_digest(
+                source_first_version, source_last_version, replacement
+            )
+        if not isinstance(resulting_context_digest, str) or not resulting_context_digest:
+            raise ValueError("resulting_context_digest must be non-empty")
 
         prior_context_digest = _context_digest_document(self.context)
         stream = StreamId("run-execution", self.turn_id)
@@ -776,20 +786,142 @@ class DurableExecutionRecorder:
 
         # Replace exactly the source-range items in the in-memory projection so
         # the live state matches what the reducer reproduces from the facts
-        # (seed anchors before the range are preserved).
-        start = end = None
-        for index, version_at in enumerate(self._source_versions):
+        # (seed anchors before the range are preserved).  Items are selected by
+        # version membership, not by positional break: a replacement item
+        # already carries a LATER version than the range yet may sit BEFORE it
+        # in the list (older compaction), so ordering by version is unsafe.
+        # Select the version-contiguous run covering [source_first_version,
+        # source_last_version].  An earlier replacement may sit before the
+        # range in the list with a version inside it; it is an anchor and must
+        # be skipped, never swept into the source.  Version gaps caused by
+        # phase-advance facts are fine; the run ends at source_last_version.
+        indices: list[int] = []
+        previous: int | None = None
+        for index, (item, version_at) in enumerate(
+            zip(self.context, self._source_versions)
+        ):
+            if item.get("kind") in {"instruction", "user"}:
+                continue  # anchors (earlier replacements) are never sources
             if version_at < source_first_version:
                 continue
             if version_at > source_last_version:
-                break
-            if start is None:
-                start = index
-            end = index + 1
-        if start is None or end is None or not self.context[start:end]:
+                continue  # a later fact or replacement outside the range
+            if previous is not None and version_at < previous:
+                raise CheckpointError("compaction_source_range_not_contiguous")
+            indices.append(index)
+            previous = version_at
+        if not indices or indices != list(range(indices[0], indices[-1] + 1)):
             raise CheckpointError("compaction_source_range_missing")
+        start, end = indices[0], indices[-1] + 1
+        if self._source_versions[indices[0]] != source_first_version:
+            raise CheckpointError("compaction_source_range_missing")
+        if self._source_versions[indices[-1]] != source_last_version:
+            raise CheckpointError("compaction_source_range_missing")
+        if not self.context[start:end]:
+            raise CheckpointError("compaction_source_range_missing")
+        # Mirror the reducer's anchor rule: the source may never contain an
+        # instruction/user item (an earlier replacement) or an unpaired call.
+        for item in self.context[start:end]:
+            if item.get("kind") in {"instruction", "user"}:
+                raise CheckpointError("compaction_source_contains_anchor")
+        calls = {
+            (item.get("model_turn_id"), item.get("call_id"))
+            for item in self.context[start:end]
+            if item.get("kind") == "tool_call"
+        }
+        for item in self.context[start:end]:
+            if item.get("kind") == "tool_result":
+                calls.discard((item.get("model_turn_id"), item.get("call_id")))
+        if calls:
+            raise CheckpointError("compaction_source_contains_open_call")
         self.context[start:end] = [dict(replacement)]
-        self._source_versions[start:end] = [head + 1]
+        # The replacement occupies the COMPACTED event version (intended is
+        # head+1, compacted is head+2), so later facts keep larger versions
+        # and the source-range ordering stays monotonic.
+        self._source_versions[start:end] = [head + 2]
+        return start, end
+
+    def source_versions_for(self, first: int, last: int) -> tuple[int, int]:
+        """Map projection indices to the recorder's own stream versions.
+
+        The loop projection and the recorder projection are identical at the
+        pre-request safe point (the recorder has recorded every item the loop
+        sees), so the caller's indices apply directly to ``_source_versions``.
+        The span is clamped to the version-contiguous run starting at
+        ``first``: an earlier compaction's replacement may carry a version
+        larger than later items, and sweeping it in would violate the
+        reducer's anchor rule.
+        """
+        if (
+            not isinstance(first, int) or isinstance(first, bool) or first < 0
+            or not isinstance(last, int) or isinstance(last, bool)
+            or last < first or last >= len(self._source_versions)
+        ):
+            raise CheckpointError("compaction_source_range_missing")
+        first_version = self._source_versions[first]
+        end = first
+        previous = first_version
+        for index in range(first + 1, last + 1):
+            if self._source_versions[index] < previous:
+                break
+            previous = self._source_versions[index]
+            end = index
+        return first_version, self._source_versions[end]
+
+    def synced_context(self):
+        """The authoritative projection context as ModelContextItems."""
+        return [context_from_document(doc) for doc in self.context]
+
+    def _range_identity_digest(
+        self, source_first_version: int, source_last_version: int
+    ) -> str:
+        """Identity digest of the source-range context items (D23 §5.7).
+
+        Mirrors the reducer's _selected_event_ids_digest over the same
+        documents so the intended/compacted facts verify on replay.  Anchors
+        (earlier replacements) inside the version span are excluded exactly
+        like the reducer excludes them.
+        """
+        selected = [
+            item
+            for item, version_at in zip(self.context, self._source_versions)
+            if source_first_version <= version_at <= source_last_version
+            and item.get("kind") not in {"instruction", "user"}
+        ]
+        identities = [
+            (item.get("kind"), item.get("model_turn_id"), item.get("call_id"))
+            for item in selected
+        ]
+        return hashlib.sha256(
+            canonical_json_bytes_v1(identities, path="compaction-source")
+        ).hexdigest()
+
+    def _range_resulting_digest(
+        self,
+        source_first_version: int,
+        source_last_version: int,
+        replacement: Mapping[str, Any],
+    ) -> str:
+        """Resulting-context digest after replacing the source range (D23 §5.7).
+
+        Mirrors the reducer's resulting-context verification so the compacted
+        fact matches replay: the replacement occupies the position of the
+        first removed non-anchor item; anchors inside the version span are
+        left untouched.
+        """
+        updated: list[dict[str, Any]] = []
+        replaced = False
+        for item, version_at in zip(self.context, self._source_versions):
+            in_range = source_first_version <= version_at <= source_last_version
+            if in_range and item.get("kind") not in {"instruction", "user"}:
+                if not replaced:
+                    updated.append(dict(replacement))
+                    replaced = True
+                continue
+            updated.append(dict(item))
+        if not replaced:
+            updated.append(dict(replacement))
+        return _context_digest_document(updated)
 
     def _stream_head_version(self, stream: StreamId) -> int:
         cursor = -1

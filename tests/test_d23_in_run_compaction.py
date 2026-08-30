@@ -186,7 +186,7 @@ class CompactionReducerTest(unittest.TestCase):
         self._record_one_group()
         replacement = {"kind": "user", "input_id": "c", "content": "x"}
         self.recorder.compact(
-            epoch=1, source_first_version=1, source_last_version=2,
+            epoch=1, source_first_version=1, source_last_version=3,
             source_event_ids_digest="x", replacement=replacement,
             resulting_context_digest="unused", target_chars=32_000,
         )

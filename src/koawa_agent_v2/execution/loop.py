@@ -330,51 +330,76 @@ class AgentLoop:
             select_compressible,
         )
 
-        try:
-            groups = parse_closed_groups(context)
-            selected = select_compressible(groups, keep_recent=memory.in_run_keep_groups)
-        except CompactionError:
-            raise AgentLoopError("compaction_source_invalid") from None
-        if not selected:
-            raise AgentLoopError("context_capacity_exhausted")
-        if not anchors_are_preserved(groups, selected):
-            raise AgentLoopError("compaction_anchor_violation")
-        # Replacement is a bounded, marked user projection (D23 §5.5).
-        first = selected[0].first_context_index
-        last = selected[-1].last_context_index
-        # Map context indices to the run-execution stream versions the durable
-        # recorder tracks (recorder.compact replaces by version range).
-        source_versions = getattr(self._compaction_sink, "_source_versions", None)
-        if source_versions is None:
+        map_fn = getattr(self._compaction_sink, "source_versions_for", None)
+        if map_fn is None:
             raise AgentLoopError("compaction_source_versions_unavailable")
-        first_version = source_versions[first]
-        last_version = source_versions[last]
-        content = "\n".join(
-            (
-                "[run-history-compaction epoch=%d]" % (self._compaction_epoch + 1),
-                "[untrusted-history-summary]compacted closed tool groups: %d calls"
-                % sum(len(group.calls) for group in selected),
-                "[/untrusted-history-summary]",
-                "[authoritative-execution-state]tool_count=%d[/authoritative-execution-state]"
-                % self._tool_count_known(),
-                "[/run-history-compaction]",
+        # D23 §5.4: compact repeatedly (bounded by epoch cap) until the soft
+        # budget is met; any single overrun of the hard budget fails closed.
+        while self._compaction_epoch < memory.max_compaction_epochs_per_run:
+            try:
+                groups = parse_closed_groups(context)
+                selected = select_compressible(
+                    groups, keep_recent=memory.in_run_keep_groups
+                )
+            except CompactionError:
+                raise AgentLoopError("compaction_source_invalid") from None
+            if not selected:
+                if self.context_chars(context) + reserve > hard:
+                    raise AgentLoopError("context_capacity_exhausted")
+                return
+            if not anchors_are_preserved(groups, selected):
+                raise AgentLoopError("compaction_anchor_violation")
+            # Compact up to a bounded batch of the oldest closed groups.  The
+            # batch never crosses an earlier replacement (parse_closed_groups
+            # treats replacements as boundaries), and source_versions_for
+            # clamps the range to the version-contiguous run.
+            batch = selected[:8]
+            first = batch[0].first_context_index
+            last = batch[-1].last_context_index
+            content = "\n".join(
+                (
+                    "[run-history-compaction epoch=%d]" % (self._compaction_epoch + 1),
+                    "[untrusted-history-summary]compacted closed tool groups: %d (%s)"
+                    % (
+                        len(batch),
+                        ",".join(
+                            sorted({
+                                call.item.name
+                                for group in batch
+                                for call in group.calls
+                            })
+                        ),
+                    ),
+                    "[/untrusted-history-summary]",
+                    "[authoritative-execution-state]tool_count=%d[/authoritative-execution-state]"
+                    % self._tool_count_known(),
+                    "[/run-history-compaction]",
+                )
             )
-        )
-        replacement = UserMessage(
-            input_id=f"run:compact:{self._compaction_epoch + 1}",
-            content=content,
-        )
-        self._compaction_epoch += 1
-        self._compaction_sink.compact(
-            epoch=self._compaction_epoch,
-            source_first_version=first_version,
-            source_last_version=last_version,
-            source_event_ids_digest="",
-            replacement=replacement,
-            resulting_context_digest="",
-            target_chars=target,
-        )
-        context[first:last + 1] = [replacement]
+            replacement = UserMessage(
+                input_id=f"run:compact:{self._compaction_epoch + 1}",
+                content=content,
+            )
+            self._compaction_epoch += 1
+            first_version, last_version = map_fn(first, last)
+            self._compaction_sink.compact(
+                epoch=self._compaction_epoch,
+                source_first_version=first_version,
+                source_last_version=last_version,
+                source_event_ids_digest="",
+                replacement=replacement,
+                resulting_context_digest="",
+                target_chars=target,
+            )
+            # The durable sink replaced its own projection by version range;
+            # adopt its authoritative context so loop/recorder stay aligned.
+            sync = getattr(self._compaction_sink, "synced_context", None)
+            if sync is None:
+                raise AgentLoopError("compaction_source_versions_unavailable")
+            context[:] = list(sync())
+            if self.context_chars(context) + reserve <= soft:
+                return
+        # Epoch cap reached while still over budget -> fail closed.
         if self.context_chars(context) + reserve > hard:
             raise AgentLoopError("context_capacity_exhausted")
 

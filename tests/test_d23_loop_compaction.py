@@ -59,8 +59,21 @@ class RecordingCompactionSink:
         self.context = []
         self._source_versions = [0]
 
+    def source_versions_for(self, first: int, last: int):
+        if last >= len(self._source_versions):
+            from koawa_agent_v2.execution.loop import AgentLoopError
+            raise AgentLoopError("compaction_source_versions_unavailable")
+        return self._source_versions[first], self._source_versions[last]
+
+    def synced_context(self):
+        if not self.calls:
+            return list(self.context)
+        last = self.calls[-1]
+        return [last["replacement"]]
+
     def compact(self, **kwargs):
         self.calls.append(kwargs)
+        return (0, 0)
 
 
 class CompactionTriggerTest(unittest.TestCase):
@@ -85,10 +98,31 @@ class CompactionTriggerTest(unittest.TestCase):
         return UserMessage(f"u{uuid4()}", "x" * 800)
 
     def test_soft_budget_without_closed_groups_fails_closed(self):
-        # Above soft budget but nothing compressible -> exhausted, never sent.
+        # Above soft budget, nothing compressible, but under hard: compaction
+        # simply does nothing and the request proceeds (deterministic fallback).
         context = [self._big_user()]
+        self.loop._maybe_compact(context)
+        self.assertEqual(len(self.sink.calls), 0)
+
+    def test_above_hard_without_closed_groups_fails_closed(self):
+        # Over hard with nothing compressible: never send the oversized
+        # request; fail closed instead.
+        loop = AgentLoop(
+            ScriptedClient(),
+            memory=MemoryConfig.from_mapping({
+                "request_context_soft_chars": 100,
+                "request_context_hard_chars": 500,
+                "request_context_reserve_chars": 50,
+                "compaction_target_chars": 60,
+                "conclusion_max_chars": 400,
+                "compaction_summary_max_chars": 400,
+                "in_run_keep_groups": 1,
+            }),
+            compaction_sink=self.sink,
+        )
+        context = [UserMessage("u1", "x" * 800)]
         with self.assertRaises(AgentLoopError) as raised:
-            self.loop._maybe_compact(context)
+            loop._maybe_compact(context)
         self.assertEqual(raised.exception.code, "context_capacity_exhausted")
         self.assertEqual(len(self.sink.calls), 0)
 
@@ -118,14 +152,28 @@ class CompactionTriggerTest(unittest.TestCase):
 
     def test_open_pending_call_never_compresses(self):
         self.sink.pending_calls = ({"kind": "tool_call"},)
-        context = [self._big_user()]
+        context = [UserMessage("u1", "x" * 800)]
         turn = _tool_turn("c1")
         echo = ToolCallEcho(
             "test", ModelCallRef(turn.model_turn_id, "c1"), turn.output_items[1],
         )
         context.append(echo)  # no result -> open group
+        # Over hard, open group present, nothing compressible -> fail closed.
+        loop = AgentLoop(
+            ScriptedClient(),
+            memory=MemoryConfig.from_mapping({
+                "request_context_soft_chars": 100,
+                "request_context_hard_chars": 500,
+                "request_context_reserve_chars": 50,
+                "compaction_target_chars": 60,
+                "conclusion_max_chars": 400,
+                "compaction_summary_max_chars": 400,
+                "in_run_keep_groups": 1,
+            }),
+            compaction_sink=self.sink,
+        )
         with self.assertRaises(AgentLoopError) as raised:
-            self.loop._maybe_compact(context)
+            loop._maybe_compact(context)
         self.assertEqual(raised.exception.code, "context_capacity_exhausted")
         self.assertEqual(len(self.sink.calls), 0)
 
