@@ -32,6 +32,7 @@ from ..model.protocol import (
     ToolCallItem,
     ToolDefinition,
     ToolResultMessage,
+    UserMessage,
 )
 from ..model.stream import ModelStreamAssembler, StreamLimits
 
@@ -224,6 +225,8 @@ class AgentLoop:
         trace_sink: TraceSink | None = None,
         trace_store: object | None = None,
         correlation_id: object | None = None,
+        memory: object | None = None,
+        compaction_sink: object | None = None,
     ) -> None:
         if not hasattr(client, "stream"):
             raise TypeError("client must implement ModelClient")
@@ -269,6 +272,119 @@ class AgentLoop:
         self._trace_sink = trace_sink
         self._legacy_trace_store = trace_store
         self._correlation_id = correlation_id
+        if memory is not None:
+            from ..runtime.memory import MemoryConfig
+
+            if not isinstance(memory, MemoryConfig):
+                raise TypeError("memory must be MemoryConfig or None")
+        if compaction_sink is not None and not callable(
+            getattr(compaction_sink, "compact", None)
+        ):
+            raise TypeError("compaction_sink must implement compact() or None")
+        self._memory = memory
+        self._compaction_sink = compaction_sink
+        self._compaction_epoch = 0
+
+    def context_chars(self, context: Sequence[ModelContextItem]) -> int:
+        """Canonical UTF-8 byte+char budget of the request projection (D23 §5.4)."""
+        chars = 0
+        for item in context:
+            if isinstance(item, (UserMessage, AssistantMessage)):
+                chars += len(item.content)
+            elif isinstance(item, ReasoningSummaryEcho):
+                chars += len(item.item.summary)
+            elif isinstance(item, ToolCallEcho):
+                chars += len(item.item.arguments_json)
+            elif isinstance(item, ToolResultMessage):
+                chars += len(item.content)
+        return chars
+
+    def _maybe_compact(self, context: list[ModelContextItem]) -> None:
+        """D23 §5.3/§5.4 safe-point preflight before the next model request.
+
+        When the projected context exceeds the soft budget and every safety
+        condition holds (no pending calls, durable sink present, compaction
+        enabled), the oldest closed groups are replaced through the durable
+        compaction sink.  If no safe group exists or the result still exceeds
+        the hard budget, the run fails closed with
+        ``context_capacity_exhausted`` instead of sending an oversized request.
+        """
+        memory = self._memory
+        if memory is None or not memory.in_run_compaction_enabled:
+            return
+        if self._compaction_sink is None:
+            return
+        if self.durable_tool_execution and self._pending_tool_calls:
+            return  # open calls may never be compressed
+        current = self.context_chars(context)
+        reserve = memory.request_context_reserve_chars
+        soft = memory.request_context_soft_chars
+        hard = memory.request_context_hard_chars
+        target = memory.compaction_target_chars
+        if current + reserve <= soft:
+            return
+        from ..execution.compaction import (
+            CompactionError,
+            anchors_are_preserved,
+            parse_closed_groups,
+            select_compressible,
+        )
+
+        try:
+            groups = parse_closed_groups(context)
+            selected = select_compressible(groups, keep_recent=memory.in_run_keep_groups)
+        except CompactionError:
+            raise AgentLoopError("compaction_source_invalid") from None
+        if not selected:
+            raise AgentLoopError("context_capacity_exhausted")
+        if not anchors_are_preserved(groups, selected):
+            raise AgentLoopError("compaction_anchor_violation")
+        # Replacement is a bounded, marked user projection (D23 §5.5).
+        first = selected[0].first_context_index
+        last = selected[-1].last_context_index
+        # Map context indices to the run-execution stream versions the durable
+        # recorder tracks (recorder.compact replaces by version range).
+        source_versions = getattr(self._compaction_sink, "_source_versions", None)
+        if source_versions is None:
+            raise AgentLoopError("compaction_source_versions_unavailable")
+        first_version = source_versions[first]
+        last_version = source_versions[last]
+        content = "\n".join(
+            (
+                "[run-history-compaction epoch=%d]" % (self._compaction_epoch + 1),
+                "[untrusted-history-summary]compacted closed tool groups: %d calls"
+                % sum(len(group.calls) for group in selected),
+                "[/untrusted-history-summary]",
+                "[authoritative-execution-state]tool_count=%d[/authoritative-execution-state]"
+                % self._tool_count_known(),
+                "[/run-history-compaction]",
+            )
+        )
+        replacement = UserMessage(
+            input_id=f"run:compact:{self._compaction_epoch + 1}",
+            content=content,
+        )
+        self._compaction_epoch += 1
+        self._compaction_sink.compact(
+            epoch=self._compaction_epoch,
+            source_first_version=first_version,
+            source_last_version=last_version,
+            source_event_ids_digest="",
+            replacement=replacement,
+            resulting_context_digest="",
+            target_chars=target,
+        )
+        context[first:last + 1] = [replacement]
+        if self.context_chars(context) + reserve > hard:
+            raise AgentLoopError("context_capacity_exhausted")
+
+    def _tool_count_known(self) -> int:
+        sink = self._compaction_sink
+        return int(getattr(sink, "tool_count", 0) or 0)
+
+    def _pending_tool_calls(self) -> bool:
+        sink = self._compaction_sink
+        return bool(getattr(sink, "pending_calls", ()))
 
     @property
     def durable_tool_execution(self) -> bool:
@@ -433,6 +549,10 @@ class AgentLoop:
             token.raise_if_cancelled()
             if ownership_guard is not None:
                 ownership_guard()
+            # D23 §5.3/§5.4: compact at the safe point BEFORE the next request
+            # is constructed; an oversized context fails closed instead of
+            # being sent.
+            self._maybe_compact(context)
             # I6 §8.8: ONE snapshot pins definitions for this request and
             # every tool call produced by this response.
             snapshot = self._take_snapshot()
