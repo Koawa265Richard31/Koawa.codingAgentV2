@@ -1,7 +1,8 @@
 # D23：长任务记忆闭环（跨回合结论 / 回合内成组压缩 / 检索 / journal）
 
-> 状态：IMPLEMENTED（2026-08-30，D23-A~G 全部实现；§12.2 真实 provider 验证待人工 opt-in，
-> 通过后按 §13 DoD 标记 COMPLETE）。
+> 状态：COMPLETE（2026-08-30，D23-A~G 全部实现；§12.1 scripted golden 通过；
+> §12.2 真实 provider 双场景验证通过（证据 examples/d23-provider-evidence.md，
+> 绑定 commit 266f583））。
 > 北极星：让同一 coding 任务在长回合、进程重启和多次交互回合后，仍能基于可重放事实继续工作，
 > 而不是依赖无限增长的 prompt 或模型“自己记住”。
 > 背景案例：DSH 逐字投影会话容量事故（session-b16565ec 导出）。本项目坚持“用记忆换上下文”，

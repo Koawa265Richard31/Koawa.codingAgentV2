@@ -112,7 +112,7 @@ python -W error::ResourceWarning -B -m unittest discover -s tests -v
 | D20 | COMPLETE | 工具错误增强（patch detail + 参数 expected/example，错误码稳定）：6 个 D20 tests；Part B 全会话真模型验证（35B×5 + 122B 对比×2，11/14 断言），证据 examples/d20_session_verification.md；归因：模型能力 ×2（F1 幻觉完成 / F5 记忆遵循）、运行时 ×3（F2 UPDATE 基线瞬态误判 / F3 错误无指引 / F4 files= 缺口）、端点 ×1（F6 invalid_completed_snapshot），建议 D22 专项 |
 | D21 | COMPLETE | Agent 安全真实性包：威胁模型 docs/agent-security-threat-model.md（T1-T6 映射 OWASP + 诚实边界）、评估矩阵 tests/test_d21_agent_security.py（8 确定性用例全绿）、事故加固实录 docs/agent-security-engineering.md、逃逸演示 examples/day21_escape_demo.py。落地文档 day-21-detailed-implementation.md |
 | D22 | COMPLETE | 真实会话健壮性加固（参考 codex-cli-code / deepseekharness）：F2 UPDATE 授权改内容锚定（根因：facade 置空配置使 autocrlf 失效 → CRLF 文件被确定性判脏，改为 git diff --ignore-space-at-eol）、F6 空完成归一+零输出单次重试、F6b 收尾摘要（确定性 + 可选 fallback_summary_model，request-scoped 不切换会话模型）、F1 交互完成门（claimed_change_without_tool）、F4 changed_files 权威来源改 apply_patch 结果、F3 baseline_dirty 补 detail。设计 day-22-robustness-hardening.md；30 新用例全绿 |
-| D23 | NEXT | 长任务记忆闭环：基于 I7 RuntimeTruth 的 TurnConclusion、失败回显、active Run ClosedExecutionGroup 成组压缩、D6 durable 重建、统一 MemoryEnvelope 预算、确定性 IDF/时效 recall、JOURNAL_EXPORT 提醒与写入；设计 day-23-memory-layer-upgrade.md，按 D23-A～G 串行实现 |
+| D23 | COMPLETE | 长任务记忆闭环：基于 I7 RuntimeTruth 的 TurnConclusion、失败回显、active Run ClosedExecutionGroup 成组压缩、D6 durable 重建、统一 MemoryEnvelope 预算、确定性 IDF/时效 recall、JOURNAL_EXPORT 提醒与写入；设计 day-23-memory-layer-upgrade.md，按 D23-A～G 串行实现；100 轮 golden（≥3 压缩 + 重启 byte-equivalent）＋真实 provider 双场景验证（失败回显命中权威错误码/文件；压缩后跨轮记忆保留），证据 examples/d23-provider-evidence.md |
 
 状态变更规则：只有当该日的 Definition of Done 全部成立，才允许把该行改为
 `COMPLETE`，并把下一行改为 `NEXT`。
