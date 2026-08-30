@@ -255,14 +255,19 @@ class SessionHistoryTest(unittest.TestCase):
             )
         )
         items = history.context_items()
-        self.assertEqual(3, len(items))
+        # D23 §4.4: a failed turn now leaves a reconstructed outcome echo
+        # instead of no assistant item (still whitelisted, no raw content).
+        self.assertEqual(4, len(items))
         self.assertIsInstance(items[0], UserMessage)
         self.assertEqual("read the repo", items[0].content)
         self.assertIsInstance(items[1], AssistantMessage)
         self.assertEqual("done reading", items[1].item.text)
-        # interrupted turn leaves no assistant echo, only its user request
+        # failed turn: its user request plus the reconstructed echo
         self.assertIsInstance(items[2], UserMessage)
         self.assertEqual("change add()", items[2].content)
+        self.assertIsInstance(items[3], AssistantMessage)
+        self.assertIn("[reconstructed-turn-outcome]", items[3].item.text)
+        self.assertIn("errors=d2:model_client_failed", items[3].item.text)
 
     def test_truncation_drops_oldest_turns_and_chars(self) -> None:
         history = SessionHistory(

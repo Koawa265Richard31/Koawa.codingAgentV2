@@ -584,12 +584,16 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
         SessionTurn,
         summarize_via_client,
     )
+    from .turn_conclusion import TurnConclusionStore
 
     config = app.config
     limits = SessionHistoryLimits(
         max_turns=config.history_max_turns,
         max_chars=config.history_max_chars,
         compact_min_turns=config.compact_min_turns,
+    )
+    conclusions = TurnConclusionStore(
+        app.assembled.store, app.assembled.runtime
     )
     summarize = None
     if hasattr(app.assembled.client, "_endpoint"):
@@ -621,6 +625,8 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
         provider=config.provider.provider,
         limits=limits,
         summarize=summarize,
+        conclusions=conclusions,
+        memory=config.memory,
     )
     if thread_id is not None:
         try:
@@ -631,6 +637,8 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
                 provider=config.provider.provider,
                 limits=limits,
                 summarize=summarize,
+                conclusions=conclusions,
+                memory=config.memory,
             )
         except SessionHistoryError:
             thread_id = None

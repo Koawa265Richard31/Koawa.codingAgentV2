@@ -45,6 +45,7 @@ from ..workspace.effects import (
     WorkspaceEffectStore,
     workspace_effect_id,
 )
+from .memory import MemoryConfig
 
 _SESSION_ERROR = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _UNTRUSTED_MARKER = "[untrusted-session-summary]"
@@ -145,6 +146,9 @@ class SessionHistory:
 
     provider names the model source used to build AssistantMessage items;
     summarize is an optional callable(text) -> summary for compaction.
+    conclusions is an optional TurnConclusionStore used for D23 failed-turn
+    echo and window-out conclusion blocks; when absent both features degrade
+    to the previous projection behavior (failed turns leave no echo).
     """
 
     def __init__(
@@ -153,14 +157,22 @@ class SessionHistory:
         provider: str,
         limits: SessionHistoryLimits | None = None,
         summarize: Callable[[str], str] | None = None,
+        conclusions: object | None = None,
+        memory: MemoryConfig | None = None,
     ) -> None:
         if not isinstance(provider, str) or not provider.strip():
             raise ValueError("provider must be non-empty")
         if summarize is not None and not callable(summarize):
             raise TypeError("summarize must be callable or None")
+        if conclusions is not None and not (
+            hasattr(conclusions, "build") and hasattr(conclusions, "load")
+        ):
+            raise TypeError("conclusions must implement TurnConclusionStore or None")
         self._provider = provider
         self._limits = limits or SessionHistoryLimits()
         self._summarize = summarize
+        self._conclusions = conclusions
+        self._memory = memory or MemoryConfig()
         self._turns: list[SessionTurn] = []
         self._compacted: list[CompactionResult] = []
         self._compacted_up_to = 0
@@ -243,7 +255,13 @@ class SessionHistory:
         return tuple(self._compacted)
 
     def context_items(self) -> tuple[ModelContextItem, ...]:
-        """Bounded projection: compaction blocks first, then recent turns."""
+        """Bounded projection: compaction blocks, conclusion blocks, recent turns.
+
+        D23 §4.5 dedup: in-window successful turns keep only their original
+        projection; in-window failed/interrupted/UNKNOWN turns appear only as
+        failed-turn echoes; out-of-window turns with a conclusion appear in the
+        conclusion block. A turn_id + authoritative_digest appears at most once.
+        """
         self.maybe_compact()
         items: list[ModelContextItem] = []
         for index, block in enumerate(self._compacted):
@@ -258,6 +276,11 @@ class SessionHistory:
             )
         recent = self._bounded_recent()
         offset = len(self._compacted)
+        window_out = self._turns[: len(self._turns) - len(recent)]
+        conclusion_items = self._conclusion_items(window_out, offset)
+        items.extend(conclusion_items)
+        offset += len(conclusion_items)
+        failed_echoes: list[str] = []
         for local_index, turn in enumerate(recent):
             items.append(
                 UserMessage(
@@ -265,20 +288,88 @@ class SessionHistory:
                     content=turn.user_input,
                 )
             )
-            if turn.final_text is None:
-                continue  # failed/interrupted turns leave no assistant echo
+            if turn.final_text is not None:
+                items.append(
+                    AssistantMessage(
+                        source_provider=self._provider,
+                        model_turn_id=uuid4(),
+                        item=AssistantTextItem(
+                            0,
+                            f"session:{offset + local_index}:assistant",
+                            turn.final_text,
+                        ),
+                    )
+                )
+            else:
+                echo = _failed_turn_text(turn)
+                if echo is not None:
+                    failed_echoes.append(echo)
+        # D23 §4.4: at most the NEWEST failed_echo_max_turns echoes are shown.
+        limit = self._memory.failed_echo_max_turns
+        for local_index, echo in enumerate(failed_echoes[-limit:]):
             items.append(
                 AssistantMessage(
                     source_provider=self._provider,
                     model_turn_id=uuid4(),
                     item=AssistantTextItem(
                         0,
-                        f"session:{offset + local_index}:assistant",
-                        turn.final_text,
+                        f"session:echo:{local_index}",
+                        echo,
                     ),
                 )
             )
         return tuple(items)
+
+    def _conclusion_items(
+        self,
+        window_out: Sequence[SessionTurn],
+        offset: int,
+    ) -> list[ModelContextItem]:
+        """Out-of-window conclusions as a bounded, deduped block (D23 §4.5).
+
+        Only turns with a recorded conclusion participate; identical
+        (turn_id, authoritative_digest) never repeats; the newest turns are
+        kept first when the block exceeds conclusion_recent_limit or the
+        character budget, and a conclusion is never cut mid-way.
+        """
+        if self._conclusions is None or not window_out:
+            return []
+        items: list[ModelContextItem] = []
+        seen: set[tuple[str, str]] = set()
+        chars = 0
+        for index, turn in enumerate(reversed(window_out)):
+            conclusion = self._load_conclusion(turn)
+            if conclusion is None:
+                continue
+            key = (str(conclusion.turn_id), conclusion.authoritative_digest)
+            if key in seen:
+                continue
+            seen.add(key)
+            content = _conclusion_text(conclusion)
+            if chars + len(content) > self._memory.conclusion_max_chars and items:
+                break  # keep newest first; oldest are dropped whole
+            items.append(
+                UserMessage(
+                    input_id=f"session:conclusion:{offset + index}",
+                    content=content,
+                )
+            )
+            chars += len(content)
+            if len(items) >= self._memory.conclusion_recent_limit:
+                break
+        return list(reversed(items))
+
+    def _load_conclusion(self, turn: SessionTurn):
+        """Best-effort recorded conclusion for one turn; None on any failure."""
+        if turn.turn_id is None or self._conclusions is None:
+            return None
+        try:
+            recorded = self._conclusions.load(turn.turn_id)
+        except Exception:
+            return None
+        if not recorded:
+            return None
+        return recorded[-1]
 
     @classmethod
     def from_thread(
@@ -290,6 +381,8 @@ class SessionHistory:
         provider: str,
         limits: SessionHistoryLimits | None = None,
         summarize: Callable[[str], str] | None = None,
+        conclusions: object | None = None,
+        memory: MemoryConfig | None = None,
     ) -> "SessionHistory":
         """Rebuild session history from the durable thread records."""
         resolved = UUID(str(thread_id))
@@ -314,7 +407,10 @@ class SessionHistory:
             if len(page) < 500:
                 break
             cursor = page[-1].global_position
-        history = cls(provider=provider, limits=limits, summarize=summarize)
+        history = cls(
+            provider=provider, limits=limits, summarize=summarize,
+            conclusions=conclusions, memory=memory,
+        )
         for turn_id in turn_ids:
             state = runtime.get_turn(turn_id)
             if not state.is_terminal:
@@ -348,6 +444,51 @@ def _authoritative_projection(turns: Sequence[SessionTurn]) -> str:
             prefix += " files=" + ",".join(turn.changed_files)
         prefix += f" request={turn.user_input[:160]!r}"
         lines.append(prefix)
+    return "\n".join(lines)
+
+
+def _conclusion_text(conclusion) -> str:
+    """D23 §4.5 conclusion-block projection of one recorded conclusion.
+
+    Only authoritative bounded fields and an explicitly marked untrusted
+    summary are rendered; raw arguments, results, reasoning and credentials
+    never enter the projection.
+    """
+    lines = [
+        "[reconstructed-turn-conclusion]",
+        f"turn_id={conclusion.turn_id}",
+        f"status={conclusion.turn_status}",
+    ]
+    if conclusion.run_status is not None:
+        lines.append(f"run_status={conclusion.run_status}")
+    if conclusion.error_codes:
+        lines.append("errors=" + ",".join(conclusion.error_codes))
+    if conclusion.successful_tools:
+        lines.append("tools=" + ",".join(conclusion.successful_tools))
+    if conclusion.changed_files:
+        lines.append("files=" + ",".join(conclusion.changed_files))
+    if conclusion.uncertainty_codes:
+        lines.append("uncertainty=" + ",".join(conclusion.uncertainty_codes))
+    if conclusion.open_obligations:
+        lines.append("obligations=" + ",".join(conclusion.open_obligations))
+    lines.append("[/reconstructed-turn-conclusion]")
+    if conclusion.untrusted_summary:
+        lines.append(
+            f"{_UNTRUSTED_MARKER}\n{conclusion.untrusted_summary}"
+        )
+    return "\n".join(lines)
+
+
+def _failed_turn_text(turn: SessionTurn) -> str | None:
+    """D23 §4.4 deterministic failed-turn echo (never claims model's words)."""
+    status = turn.status or "unknown"
+    lines = ["[reconstructed-turn-outcome]"]
+    lines.append(f"status={status}")
+    if turn.error is not None:
+        lines.append(f"errors={turn.error}")
+    if turn.changed_files:
+        lines.append("files=" + ",".join(turn.changed_files))
+    lines.append("[/reconstructed-turn-outcome]")
     return "\n".join(lines)
 
 

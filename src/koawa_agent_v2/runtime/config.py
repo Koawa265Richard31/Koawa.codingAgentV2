@@ -30,6 +30,7 @@ from ..control.durable_json import (
 from ..recovery.redaction import _ASSIGNMENT, _BEARER, _OPENAI_KEY, _SENSITIVE_KEY
 from ..model.openai_client import ReasoningEffort, reasoning_family
 from ..policy import Decision
+from .memory import MemoryConfig, MemoryConfigError
 
 _CONFIG_ERROR = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -640,6 +641,8 @@ class RuntimeConfig:
     history_max_turns: int = 16
     history_max_chars: int = 32_000
     compact_min_turns: int = 4
+    # D23 unified memory envelope configuration (interactive + task paths).
+    memory: MemoryConfig = MemoryConfig()
     # D22 F6b: optional summary-fallback model. 仅在回合主体完成但最终回复失败
     # 时，对一次摘要请求使用该模型（request-scoped，不切换会话模型）。
     # None/空 = 关闭（默认）：失败时只输出确定性摘要。
@@ -676,6 +679,8 @@ class RuntimeConfig:
             )
             if not isinstance(value, expected):
                 raise RuntimeConfigError("invalid_runtime_config")
+        if not isinstance(self.memory, MemoryConfig):
+            raise RuntimeConfigError("invalid_runtime_config")
         if not isinstance(self.test_profiles, tuple) or not self.test_profiles:
             raise RuntimeConfigError("test_profiles_required")
         if len(self.test_profiles) > 64:
@@ -868,6 +873,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         "budget_action_limits",
         "fallback_summary_model",
         "durable_limits",
+        "memory",
         "config_schema_version",
     }
     unknown = set(document) - allowed
@@ -939,6 +945,11 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     budget_action_limits = tuple(
         (str(key), value) for key, value in raw_budget.items()
     )
+    raw_memory = document.get("memory")
+    try:
+        memory = MemoryConfig.from_mapping(raw_memory)
+    except MemoryConfigError:
+        raise RuntimeConfigError("invalid_memory_config") from None
     return RuntimeConfig(
         repo=repo,
         db=db,
@@ -955,6 +966,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         history_max_turns=history_max_turns,
         history_max_chars=history_max_chars,
         compact_min_turns=compact_min_turns,
+        memory=memory,
         budget_action_limits=budget_action_limits,
         fallback_summary_model=fallback_summary_model,
         durable_limits=durable_limits,
