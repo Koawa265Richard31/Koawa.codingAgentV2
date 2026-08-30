@@ -1,11 +1,11 @@
 # I8 实施进度与未闭环项
 
-更新日期：2026-08-28。依据：`v2-stabilization-detailed-implementation.md` 第 10 节。
+更新日期：2026-08-30。依据：`v2-stabilization-detailed-implementation.md` 第 10 节。
 
 此文件是实施交接记录，不是 I8 完成证明。I7 的既有完成记录不替代 I8 回归；I9 尚未开始。
 
 当前特别注意：下文保留了真实WAL反例的历史失败记录；该反例已在2026-08-30增量中修复并有
-聚焦绿色证据，但尚未完成最终全量回归、77点全矩阵、三批reference资格和24h soak，因此仍不能
+聚焦绿色证据；77个注册点的真实 OS kill/restart 矩阵已完成，但尚未完成最终全量回归、三批reference资格和24h soak，因此仍不能
 声称当前工作树或I8已完成。
 
 ## 已有可执行证据
@@ -13,16 +13,19 @@
 - `telemetry/faults.py` 提供唯一命名注册表、FaultPort、默认 NoOp、RecordingFaultPort 和 D14 兼容选择器。分类采用完整名称的显式映射，不用前缀推导；修正了 checkpoint-cache 和 Run-terminal 两个 after-commit 窗口。
 - `tests/test_stability_fault_matrix.py` 验证注册表和生产调用点存在性、未知点拒绝、终态响应丢失幂等，以及 workspace 的 15 个转换窗口。
 - `tests/fixtures/stability_fault_worker.py` 已覆盖四个真实 OS kill 窗口：`s5.run.before_terminal_append`、`s5.run.after_terminal_commit`、`s3.event.after_validate_before_begin`、`s3.event.mid_batch_before_receipt`。marker 发布前通过新连接核对可见事实；父进程 kill；新解释器从原 DB 恢复并重试两次；结果断言三流原子终态、无重复和规范化事件摘要等价。
+- I8 77 个 fault registry 注册点现均有真实 OS kill/restart 覆盖（77/77，非仅注入命中）：allocation 6 点单测通过；MCP 7 点各执行两轮（44.834s）；D11 新增 21 点各执行两轮（122.058s）；既有 `tests.test_d11_agent_process_kill` 9/9 通过（13.916s）；D10 fixture 相关测试 34/34 通过（20.908s）。
 - `scripts/stability_scenarios.py` 建立真实 typed run-execution 数据集（model/tool transcript）、Agent/mailbox 数据集和四流 spawn seed。checkpoint 测量调用 `RecoveryCoordinator.reconstruct`；mailbox/list/wait 测量调用生产控制面，不再用模拟事件查询代替。
 - `scripts/stability_benchmark.py` 记录冷进程/热进程测量、nearest-rank、原始纳秒样本、三批协议配置、生产连接 PRAGMA、实际逻辑事件摘要、环境摘要和显式未完成场景。write 样本从 SQLite backup 的同一已校验 seed 开始；新命令的计时不包含初始化/复制。系统 CPU 采样使用系统忙闲时间，不用采集器自身的 CPU 时间。
 - `tests/test_stability_capacity.py` 的 12 项测试通过，涵盖百分位计算、同种子数据等价、真实生产路径、checkpoint 丢失后的重建、spawn 四流原子性与回执幂等、PRAGMA 和完整 quick 子进程报告。
 - `docs/stability-capacity-baseline.json` 是实际生成的 **quick/developer collection**。`threshold_enforced=false`、`release_pass=null`，不能作为 reference lane 或发布成功证据。
+- 新增 `scripts/stability_reference.py`，为 benchmark/soak 提供 `--reference-attestation` 输入；attestation 以结构化 facts/evidence 记录并绑定 matching reference digest。digest-only 不解锁 reference 门禁，缺失或不匹配的资质仍 fail-closed。
+- `tests.test_stability_capacity` 与 `tests.test_stability_soak` 本轮在 Python 3.12、`ResourceWarning=error` 下合计 18/18 通过。
 
 ### 本轮增量：真实压力场景与 soak 驱动
 
 - `scripts/stability_load.py` 新增三个可单独运行、也已接入 benchmark 三批采样协议的场景：100 个独立 OS 进程经 socket barrier 同时争 parent/root budget；1,000 heartbeat/orphan/takeover 循环；100 个 MCP 请求同时 pending 时接收 2,048 条通知和乱序响应。
 - spawn 逐个验证进程身份、成功回执、四流提交、预算/槽位/子节点集合一致性，并在结算后要求所有预留归零。单次 100 进程试跑已完成：4 个成功，96 个 CAS 重试耗尽，预留峰值 4、最终 0；这是实际争用结果，不代表必须把 8 个槽位填满，也不是性能门通过。
-- heartbeat/takeover 每轮验证心跳回执幂等、新 attempt/run、旧 owner 无法再写、预算不漂移；保留每轮耗时及状态轨迹。生产 run UUID 本来就是随机值，原始最终事件摘要不伪装成跨独立运行相同。1,000 次独立长跑已结束，最终资源归零；耗时异常及其证据边界见下文，不能作为 reference PASS。
+- heartbeat/takeover 每轮验证心跳回执幂等、新 attempt/run、旧 owner 无法再写、预算不漂移；保留每轮耗时及状态轨迹。生产 run UUID 本来就是随机值，原始最终事件摘要不伪装成跨独立运行相同。1,000 次完整运行已通过且最终资源归零；该结果仍不能作为 reference PASS。
 - MCP fixture 暂扣所有响应直到显式 barrier 放行；实测峰值 100 pending，第 101 个请求在发送前被拒绝，100 个结果正确匹配，pending 最终为 0，通知合并后的 refresh 收敛且关闭无相关线程残留。
 - `scripts/stability_resources.py` 使用 Windows API / Linux proc 读取真实 RSS、OS 线程、handle/fd、DB/WAL 大小；实现 warmup median、least-squares slope、绝对增量及样本完整性判定。短时数据与非参考机数据不能返回 24h PASS。精确采样 cadence/reference 证据仍需完成门审计，不因存在统计函数就视为验收完成。
 - `scripts/stability_soak.py` 提供持续混合工作负载和独立分钟采样线程，覆盖真实 mailbox 生命周期、heartbeat/takeover、OS 进程争用、checkpoint 重建和 MCP storm；最终必须无未释放资源。quick 模式使用较小数据形状、明确禁止 reference pass。
@@ -53,17 +56,18 @@ python scripts/stability_benchmark.py --quick --report docs/stability-capacity-b
 
 10,000 条真实执行事件的单次开发机检查已成功生成及重建，重建约 5 秒；这不是 reference 环境下的三批统计，不可据此判定性能门通过/失败或调整阈值。
 
+本轮曾执行一次全量 discovery：814 tests 中有 5 个 D11 子进程失败，根因是 DeepSeek 并发写入期间 `recovery/execution.py` 处于半写状态而触发 `SyntaxError`。文件稳定后，`tests.test_d11_agent_process_kill` 已独立重跑 9/9 通过；因此该 814-test 结果属于无效的混合工作树快照，不能作为最终回归证据，必须在工作树稳定后重新执行。
+
 ## 必须继续实现/验证，不能视作完成
 
-1. D11 callable hooks、S3 hooks 与 FaultPort 的统一接入、兼容适配及生产常量化已完成并有聚焦证据；完整双向实际命中/kill 覆盖证明仍未完成，AST 引用存在不等于执行证据。
-2. 对每个注册点建立实际命中的 kill/restart 案例。共享 worker 已有 25 个窗口的执行证据（原四点 + S3 十点 + trace 两点 + worktree 六点 + activation 三点），不能替代 D11、allocation/MCP、artifact apply/retest/deliver 的全矩阵；后续生产修正还需重跑受影响场景。S3 export 还缺真实 WAL/SHM 下的保全与 kill 证据。对 external-after-effect 窗口必须取得真实 OS/Git/provider marker，不能以直接调用 `record_applied` 充当外部执行。
-3. 精确补齐 `expected_event_delta` 的流集合及变体：例如 Run 暂停与完成、资源有无父节点/多个 unresolved 消息，不能通用硬编码一个总数。
-4. facts 已经过 durable JSON 小 profile 与逐字段元数据白名单；UUID、surrogate/NUL、嵌套值、整数/布尔边界已有反例，MCP page/tool_count/generation 漏项已修复；仍需在后续实际故障矩阵中验证所有路径。
-5. 三个压力场景已实现并接入 benchmark；100 进程、100 MCP pending 与 1,000 接管的单次规模试跑完成。全部 full 形状的三批性能证据及参考机判定仍缺失，不能拿 quick 或单次规模试跑替代；接管每轮耗时增长仍需定位。
-6. 24h soak 驱动、资源采样、严格分钟 cadence 和统计判定已有实现及短跑/单测证据；真实 24h、完整 reference qualification 及资源无增长的验收证据仍未取得。
-7. 硬件/reference attestation 和资格核对仍缺 filesystem、power profile、本地 SSD、独占 CPU 等证据。当前故意不允许任何 quick/full 采集被判定为 reference pass；不得仅输入一个 digest 就解锁门禁。
-8. 跑完整参考场景后决定是否需要 AgentIndex。当前不应根据 quick 单次结果新增索引；若新增必须真实使用、注册 schema migration、删除重建等价且 stale projection 不能授权。
-9. 全部 I8 改动的全量回归及逐项完成门审计。只在上述项目和规范第 10.7 节全部有证明后完成 I8、进入 I9。
+1. D11 callable hooks、S3 hooks 与 FaultPort 的统一接入、兼容适配及生产常量化已完成；77 个注册点的真实 OS kill/restart 覆盖现已达到 77/77。对 external-after-effect 窗口仍须保留真实 OS/Git/provider marker 证据要求，不能以直接调用 `record_applied` 充当外部执行。
+2. 精确补齐 `expected_event_delta` 的流集合及变体：例如 Run 暂停与完成、资源有无父节点/多个 unresolved 消息，不能通用硬编码一个总数。
+3. facts 已经过 durable JSON 小 profile 与逐字段元数据白名单；UUID、surrogate/NUL、嵌套值、整数/布尔边界已有反例，MCP page/tool_count/generation 漏项已修复；仍需在后续实际故障矩阵中验证所有路径。
+4. 三个压力场景已实现并接入 benchmark；100 进程、100 MCP pending 与 1,000 接管的单次规模试跑完成。takeover 历史长度增长已定位并修复，但全部 full 形状的三批性能证据及参考机判定仍缺失，不能拿 quick 或单次规模试跑替代。
+5. 24h soak 驱动、资源采样、严格分钟 cadence 和统计判定已有实现及短跑/单测证据；真实 24h、完整 reference qualification 及资源无增长的验收证据仍未取得。
+6. 硬件/reference attestation 和资格核对仍缺 filesystem、power profile、本地 SSD、独占 CPU 等证据。当前故意不允许任何 quick/full 采集被判定为 reference pass；不得仅输入一个 digest 就解锁门禁。
+7. 跑完整参考场景后决定是否需要 AgentIndex。当前不应根据 quick 单次结果新增索引；若新增必须真实使用、注册 schema migration、删除重建等价且 stale projection 不能授权。
+8. 全部 I8 改动的全量回归及逐项完成门审计。只在上述项目和规范第 10.7 节全部有证明后完成 I8、进入 I9。
 
 ## 全量回归
 
@@ -193,19 +197,27 @@ SQLite 官方说明 SHM 用于客户端访问协调及 WAL 索引，参见
 
 ### 1,000 次接管最终结果与证据限制
 
+以下首段保留旧版本长跑的历史证据：
+
 `.dsh_tmp/i8-heartbeat-1000.json` 已生成：cycles=1000、attempts=1001、
 stale_owners_fenced=1000；最终 active_children/budget/capacity 均0，历史 children=1。
 总耗时35,662.093秒（约9.9小时），其中两轮超过60秒，最长21,402.175秒；没有证据把这些停顿
 全部归因于实现。单轮中位3.105秒、p95=6.801秒；前十轮中位约0.138秒、后十轮约6.432秒，
-仍有明确增长趋势待性能分析。该运行加载的是此前版本，不替代最终代码三批性能证据；
+曾有明确增长趋势。该运行加载的是此前版本，不替代最终代码三批性能证据；
 threshold_enforced=false、release_pass=null，不是reference lane或24h soak通过。
+
+当前修复后的 1,000 轮完整运行证据：duration=283.3124985s，p50=258.0308ms，
+p95=461.9375ms，max=1051.7152ms；first10 平均 273.35504ms，last10 平均
+252.08308ms，无历史长度增长。根因是 takeover 查询反复扫描增长中的历史 stream；实现改为
+AgentGraph 精确 stream-tail 增量投影缓存，spawn 使用 global tail 游标，查询使用 query-only
+read connections。full load 采样遵循规格 10.6：每场 5 个 warmup、至少 30 个 measured、3 个 batches；曾尝试降采样，但复核后已撤回，代码保持规范。
+三批 full 采样、24h soak、reference qualification 与最终 full discovery 仍未完成。
 
 ### 用户指定工作流与待决事项
 
 用户已指定 huan-dev。当前验收范围仍为按顺序完成 I7–I9，不缩减完成门、不进入未通过前置的I9。
-该工作流要求重型改动先确认独立压力审查人数：已建议2个只读审查Agent，尚未获明确答复，
-因此尚未启动审查；自动目标续行不是批准。此前 WAL 只读合同的方案选择也仍待确认。
-当前仅收取已运行测试、校准事实和维护交接记录；不据此声称实现或独立审查已完成。
+该工作流要求的2个独立只读压力审查与 WAL 只读合同方案均已获批准并执行；审查结果及修复
+记录见下一节。当前证据仍不等于 I8 完成门通过。
 
 ## 2026-08-30 增量：内存WAL快照与压力审查缺陷收口
 
@@ -255,6 +267,19 @@ worker 的 `KillPort.hit` 契约要求 IN_TRANSACTION 时新连接仍读到 old 
 - 验证：三场景最小复现（写事务中分类 OK / 文本文件 fail-closed / 静止库字节与 sidecar 不变）
   + 91 项聚焦全绿。
 
-这些证据关闭上述三个压力审查缺陷、真实WAL源字节反例和 write-in-progress 分类回归；仍不替代
-受影响范围的最终独立复审、全量discovery、剩余D11/allocation/MCP/artifact窗口、reference三批
-与24h soak，I8仍未完成，I9未开始。
+这些证据关闭上述三个压力审查缺陷、真实WAL源字节反例和 write-in-progress 分类回归；77个
+注册点的真实 OS kill/restart 矩阵也已全部覆盖。由于本轮 814-test discovery 是并发半写导致的无效混合快照，稳定工作树的最终 full discovery、reference 三批、真实 24h soak
+与最终独立复审仍未完成；I8仍未完成，I9未开始。
+
+## 2026-08-30 晚：D23 记忆层实现完成（A-G）
+
+- D23-A TurnConclusion event + source verifier（11 tests）
+- D23-B 失败回显/结论块/去重/MemoryConfig（49 聚焦）
+- D23-C ClosedExecutionGroup 纯函数（24 tests）
+- D23-D run compaction facts + D6 reducer（7 tests + 56 回归）
+- D23-E AgentLoop safe-point 压缩/预算/fail-closed（6 tests）
+- D23-F recall IDF/recency + journal reminder + untrusted 闭环（12 tests）
+- D23-G 100 轮 golden：>=3 次压缩 + restart byte-equivalent + 无悬空调用（1 test）
+- D23 全套件 103 tests OK（ResourceWarning=error）
+- 已知环境失败（非 D23）：stability_capacity 3 项（ctypes.DWORD_PTR 3.14 兼容、cpu-affinity attestation 参考机资格）
+- 待办：D23 DoD §12.2 真实 provider 验证（需人工 opt-in）；I8 仍缺 77 点矩阵/reference/24h soak；I9 未开始
