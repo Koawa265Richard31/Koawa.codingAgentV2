@@ -42,6 +42,8 @@ from ..model.protocol import (
     UserMessage,
 )
 from .context import (
+    COMPACTION_COMPACTED_EVENT,
+    COMPACTION_INTENDED_EVENT,
     ExecutionProjection,
     ReconstructionError,
     reduce_execution,
@@ -69,6 +71,19 @@ _PHASE_ADVANCE_EVENT = "run.phase-advanced.v1"
 # ---------------------------------------------------------------------------
 # context document serialization (unchanged canonical redacted shapes)
 # ---------------------------------------------------------------------------
+
+
+def _context_digest_document(context: Sequence[Mapping[str, Any]]) -> str:
+    """Canonical SHA256 of the recorder's redacted context documents.
+
+    Must match the reducer's _context_digest over the same documents so the
+    intended/compacted facts verify on replay (D23 §5.7).
+    """
+    return hashlib.sha256(
+        canonical_json_bytes_v1(
+            [dict(item) for item in context], path="context"
+        )
+    ).hexdigest()
 
 
 def context_document(item: ModelContextItem) -> dict[str, Any]:
@@ -537,6 +552,9 @@ class DurableExecutionRecorder:
         self.thread_id, self.turn_id, self.run_id = thread_id, turn_id, run_id
         self.turn_version = turn_version
         self.context = [context_document(x) for x in initial_context]
+        # Parallel to context: the run-execution stream version that produced
+        # each item (seed items start at 0); compaction replaces by this range.
+        self._source_versions = [0] * len(self.context)
         self.model_round, self.tool_count, self.output_chars = (
             model_round,
             tool_count,
@@ -585,7 +603,12 @@ class DurableExecutionRecorder:
         has_tools: bool,
     ) -> None:
         docs = [context_document(x) for x in projected]
+        # The event appended below is the next stream version after the head.
+        new_version = (
+            self._stream_head_version(StreamId("run-execution", self.turn_id)) + 1
+        )
         self.context.extend(docs)
+        self._source_versions.extend([new_version] * len(docs))
         self.model_round = model_round
         self.output_chars = output_chars
         if turn.usage is not None:
@@ -618,7 +641,11 @@ class DurableExecutionRecorder:
 
     def tool_completed(self, result: ToolResultMessage, tool_count: int) -> None:
         doc = context_document(result)
+        new_version = (
+            self._stream_head_version(StreamId("run-execution", self.turn_id)) + 1
+        )
         self.context.append(doc)
+        self._source_versions.append(new_version)
         self.tool_count = tool_count
         self.pending_calls = [
             item
@@ -635,6 +662,179 @@ class DurableExecutionRecorder:
             _TOOL_RESULT_EVENT,
             {"context_item": doc, "tool_count": tool_count},
         )
+
+    def compact(
+        self,
+        *,
+        epoch: int,
+        source_first_version: int,
+        source_last_version: int,
+        source_event_ids_digest: str,
+        replacement: Mapping[str, Any],
+        resulting_context_digest: str,
+        target_chars: int,
+        summary_receipt_digest: str | None = None,
+    ) -> None:
+        """D23 §5.7: record an in-run compaction (intended + compacted).
+
+        Both facts are appended on the run-execution stream with exact
+        expected versions and deterministic command identities; a response
+        loss retry returns the same receipts without duplicating facts.
+        """
+        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:
+            raise ValueError("epoch must be a positive integer")
+        if (
+            not isinstance(source_first_version, int)
+            or isinstance(source_first_version, bool)
+            or source_first_version < 0
+        ):
+            raise ValueError("source_first_version must be an integer >= 0")
+        if (
+            not isinstance(source_last_version, int)
+            or isinstance(source_last_version, bool)
+            or source_last_version < source_first_version
+        ):
+            raise ValueError("source_last_version must cover source_first_version")
+        if not isinstance(source_event_ids_digest, str) or not source_event_ids_digest:
+            raise ValueError("source_event_ids_digest must be non-empty")
+        if not isinstance(replacement, Mapping):
+            raise TypeError("replacement must be a context document")
+        if not isinstance(resulting_context_digest, str) or not resulting_context_digest:
+            raise ValueError("resulting_context_digest must be non-empty")
+        if not isinstance(target_chars, int) or isinstance(target_chars, bool) or target_chars < 1:
+            raise ValueError("target_chars must be a positive integer")
+        if summary_receipt_digest is not None and (
+            not isinstance(summary_receipt_digest, str)
+            or not summary_receipt_digest
+        ):
+            raise ValueError("summary_receipt_digest must be non-empty or None")
+
+        prior_context_digest = _context_digest_document(self.context)
+        stream = StreamId("run-execution", self.turn_id)
+        head = self._stream_head_version(stream)
+
+        intended_command = uuid5(
+            NAMESPACE_URL,
+            f"koawa-d23:{self.run_id}:compaction-intended:{epoch}",
+        )
+        intended_event = NewEvent(
+            uuid5(intended_command, "event"),
+            COMPACTION_INTENDED_EVENT,
+            1,
+            datetime.now(timezone.utc),
+            {
+                "thread_id": str(self.thread_id),
+                "turn_id": str(self.turn_id),
+                "run_id": str(self.run_id),
+                "epoch": epoch,
+                "source_first_version": source_first_version,
+                "source_last_version": source_last_version,
+                "event_ids_digest": source_event_ids_digest,
+                "prior_context_digest": prior_context_digest,
+                "target_chars": target_chars,
+            },
+            EventMetadata(
+                intended_command,
+                self.turn_id,
+                self.thread_id,
+                self.turn_id,
+                self.run_id,
+                "worker",
+            ),
+        )
+        self._append_fenced(stream, head, (intended_event,), intended_command)
+
+        compacted_command = uuid5(
+            NAMESPACE_URL,
+            f"koawa-d23:{self.run_id}:compaction-compacted:{epoch}",
+        )
+        compacted_event = NewEvent(
+            uuid5(compacted_command, "event"),
+            COMPACTION_COMPACTED_EVENT,
+            1,
+            datetime.now(timezone.utc),
+            {
+                "thread_id": str(self.thread_id),
+                "turn_id": str(self.turn_id),
+                "run_id": str(self.run_id),
+                "epoch": epoch,
+                "replacement_item": dict(replacement),
+                "event_ids_digest": source_event_ids_digest,
+                "resulting_context_digest": resulting_context_digest,
+                "summary_receipt_digest": summary_receipt_digest,
+            },
+            EventMetadata(
+                compacted_command,
+                self.turn_id,
+                self.thread_id,
+                self.turn_id,
+                self.run_id,
+                "worker",
+            ),
+        )
+        self._append_fenced(stream, head + 1, (compacted_event,), compacted_command)
+
+        # Replace exactly the source-range items in the in-memory projection so
+        # the live state matches what the reducer reproduces from the facts
+        # (seed anchors before the range are preserved).
+        start = end = None
+        for index, version_at in enumerate(self._source_versions):
+            if version_at < source_first_version:
+                continue
+            if version_at > source_last_version:
+                break
+            if start is None:
+                start = index
+            end = index + 1
+        if start is None or end is None or not self.context[start:end]:
+            raise CheckpointError("compaction_source_range_missing")
+        self.context[start:end] = [dict(replacement)]
+        self._source_versions[start:end] = [head + 1]
+
+    def _stream_head_version(self, stream: StreamId) -> int:
+        cursor = -1
+        while True:
+            page = self.store.read_stream(stream, after_version=cursor, limit=500)
+            if not page:
+                return cursor
+            cursor = page[-1].stream_version
+            if len(page) < 500:
+                return cursor
+
+    def _append_fenced(
+        self,
+        stream: StreamId,
+        expected_version: int,
+        events: tuple[NewEvent, ...],
+        command_id: UUID,
+    ) -> None:
+        for _attempt in range(2):
+            head_fence = self._turn_head_fence()
+            if head_fence is None:
+                raise EventStoreError("recorder turn fence: turn stream missing")
+            fence_version, head_type, head_run = head_fence
+            if (
+                head_type not in LIVE_RUN_TURN_EVENT_TYPES
+                or head_run != str(self.run_id)
+            ):
+                raise EventStoreError("recorder turn fence is no longer active")
+            try:
+                self.store.append_batch(
+                    (StreamWrite(stream, expected_version, events),),
+                    idempotency_key=command_id,
+                    preconditions=(
+                        StreamPrecondition(
+                            StreamId("turn", self.turn_id),
+                            fence_version,
+                            head_type,
+                            {"run_id": str(self.run_id)},
+                        ),
+                    ),
+                )
+                return
+            except WrongExpectedVersion:
+                continue
+        raise CheckpointError("execution_fence_retry_exhausted")
 
     def _append_typed(self, event_type: str, payload: Mapping[str, Any]) -> None:
         stream = StreamId("run-execution", self.turn_id)

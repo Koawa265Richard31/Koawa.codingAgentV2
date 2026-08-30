@@ -35,6 +35,14 @@ _MODEL_TURN_EVENT = "model.turn-completed.v1"
 _TOOL_RESULT_EVENT = "tool.result-recorded.v1"
 _PHASE_ADVANCE_EVENT = "run.phase-advanced.v1"
 
+# D23 §5.7 in-run compaction facts appended to the run-execution stream.
+COMPACTION_INTENDED_EVENT = "run.context-compaction-intended.v1"
+COMPACTION_COMPACTED_EVENT = "run.context-compacted.v1"
+
+_COMPACTION_EVENT_TYPES = frozenset(
+    {COMPACTION_INTENDED_EVENT, COMPACTION_COMPACTED_EVENT}
+)
+
 _CONTEXT_KINDS = frozenset(
     {
         "instruction",
@@ -302,6 +310,15 @@ def reduce_execution(
     model_round strictly increments by one per model turn; tool_count derives
     from result pairing; output/usage/pending/final/phase are recomputed from
     events; unpaired tool calls stay pending; corrupt logs fail closed.
+
+    D23 §5.7 in-run compaction: a ``run.context-compaction-intended.v1`` fact
+    records the epoch/source-range/digest the worker intends to compress;
+    ``run.context-compaction-compacted.v1`` (documented below as
+    ``run.context-compacted.v1``) atomically replaces the source range with a
+    bounded replacement item.  The reducer re-derives the source items from the
+    same model/tool facts, verifies continuity/closure/digests, replaces, and
+    continues replay; forged digests, epoch gaps, overlapping sources, open
+    groups and compacted-without-intended all fail closed.
     """
     if not events and initial is not None:
         return initial
@@ -310,6 +327,9 @@ def reduce_execution(
             raise ReconstructionError("empty execution stream")
         version = -1
         context: list[Mapping[str, Any]] = []
+        # Parallel to context: (first_version, last_version) of the facts that
+        # produced each item, so compaction can select exact source ranges.
+        source_ranges: list[tuple[int, int]] = []
         model_round = 0
         tool_count = 0
         output_chars = 0
@@ -324,9 +344,13 @@ def reduce_execution(
         previous_seed: dict[str, Any] | None = None
         first_seed: bool = True
         seeded_runs: set[UUID] = set()
+        # D23 compaction state: latest closed epoch and its pending intended.
+        compaction_epoch = 0
+        intended: dict[str, Any] | None = None
     else:
         version = initial.execution_version
         context = list(initial.context)
+        source_ranges = _replay_ranges(len(initial.context), initial.execution_version)
         model_round = initial.model_round
         tool_count = initial.tool_count
         output_chars = initial.output_chars
@@ -342,6 +366,12 @@ def reduce_execution(
         # so a later resume seed is a valid subsequent seed.
         previous_seed = {"initial": True}
         first_seed = False
+        # An initial projection was verified by a prior reduction; a fresh
+        # compaction epoch cannot be known from it, so start from zero and let
+        # any replay of compaction facts re-establish the state.  (A verified
+        # projection never contains uncommitted intended facts.)
+        compaction_epoch = 0
+        intended = None
 
     for event in events:
         if event.stream_version != version + 1:
@@ -373,6 +403,7 @@ def reduce_execution(
                 ):
                     raise ReconstructionError("seed input_items/context mismatch")
                 context = list(projection.context)
+                source_ranges = [(0, 0)] * len(context)
                 model_round = projection.model_round
                 tool_count = projection.tool_count
                 output_chars = projection.output_chars
@@ -448,6 +479,7 @@ def reduce_execution(
                 # The validated seed projection context is authoritative
                 # (prev + [item], or the idempotent re-pin of that same item).
                 context = [dict(item) for item in seed_context]
+                source_ranges = [(0, 0)] * len(context)
                 pending = list(seed["projection"]["pending_tool_calls"])
                 phase = new_phase
                 last_run_id = parsed_run
@@ -461,6 +493,7 @@ def reduce_execution(
                 raise ReconstructionError("forged legacy seed")
             seed = _require_legacy_seed_v1(payload)
             context = _validate_context_items(seed["context"])
+            source_ranges = [(0, 0)] * len(context)
             model_round = seed["model_round"]
             tool_count = seed["tool_count"]
             output_chars = seed["output_chars"]
@@ -486,6 +519,7 @@ def reduce_execution(
                     raise ReconstructionError("model_round must increment by one")
                 model_round = declared_round
                 context.extend(projected)
+                source_ranges.extend([(version, version)] * len(projected))
                 output_chars = int(payload["output_chars"])
                 if "input_tokens" in payload:
                     input_tokens = int(payload["input_tokens"])
@@ -503,6 +537,7 @@ def reduce_execution(
                 tool_count = declared_count
                 item = _validate_context_item(payload.get("context_item"))
                 context.append(item)
+                source_ranges.append((version, version))
                 pending = [
                     existing
                     for existing in pending
@@ -512,6 +547,48 @@ def reduce_execution(
                     )
                 ]
                 phase = RunPhase.READY_FOR_TOOL if pending else RunPhase.READY_FOR_MODEL
+            elif event.event_type == COMPACTION_INTENDED_EVENT:
+                if intended is not None:
+                    raise ReconstructionError("duplicate compaction intent")
+                declared_epoch = int(payload["epoch"])
+                if declared_epoch != compaction_epoch + 1:
+                    raise ReconstructionError("compaction epoch gap")
+                source_first = int(payload["source_first_version"])
+                source_last = int(payload["source_last_version"])
+                if source_first < 0 or source_last < source_first:
+                    raise ReconstructionError("compaction source range invalid")
+                prior = _context_digest(context)
+                if payload.get("prior_context_digest") != prior:
+                    raise ReconstructionError("compaction prior digest mismatch")
+                intended = {
+                    "epoch": declared_epoch,
+                    "source_first_version": source_first,
+                    "source_last_version": source_last,
+                    "event_ids_digest": payload.get("event_ids_digest"),
+                    "target_chars": payload.get("target_chars"),
+                }
+            elif event.event_type == COMPACTION_COMPACTED_EVENT:
+                if intended is None:
+                    raise ReconstructionError("compacted without intent")
+                declared_epoch = int(payload["epoch"])
+                if declared_epoch != intended["epoch"]:
+                    raise ReconstructionError("compaction epoch mismatch")
+                replacement = _validate_context_item(
+                    payload.get("replacement_item")
+                )
+                if replacement.get("kind") != "user":
+                    raise ReconstructionError("compaction replacement must be user")
+                _apply_compaction(
+                    context,
+                    source_ranges,
+                    intended["source_first_version"],
+                    intended["source_last_version"],
+                    replacement,
+                    version,
+                    payload,
+                )
+                compaction_epoch = declared_epoch
+                intended = None
             elif event.event_type == _PHASE_ADVANCE_EVENT:
                 phase = RunPhase(payload["phase"])
             else:
@@ -560,6 +637,102 @@ def _event_run_id(event: StoredEvent, payload: Mapping[str, Any]) -> UUID | None
     if event.metadata.run_id is not None and event.metadata.run_id != value:
         raise ReconstructionError("execution fact run_id metadata mismatch")
     return value
+
+
+def _context_digest(context: Sequence[Mapping[str, Any]]) -> str:
+    """SHA256 of the canonical context list (D23 source/prior/result digests)."""
+    return hashlib.sha256(
+        canonical_json_bytes_v1([dict(item) for item in context], path="context")
+    ).hexdigest()
+
+
+def _replay_ranges(item_count: int, execution_version: int) -> list[tuple[int, int]]:
+    """Source ranges for a verified initial projection (whole segment span).
+
+    A verified projection never carries partial-fact provenance, so each item
+    is conservatively attributed to the entire covered span.  Compaction
+    source selection therefore requires an explicit intended fact in the
+    replay tail; a stale range never authorizes a replacement by itself.
+    """
+    if item_count == 0:
+        return []
+    return [(0, max(0, execution_version))] * item_count
+
+
+def _apply_compaction(
+    context: list[Mapping[str, Any]],
+    source_ranges: list[tuple[int, int]],
+    source_first: int,
+    source_last: int,
+    replacement: Mapping[str, Any],
+    version: int,
+    payload: Mapping[str, Any],
+) -> None:
+    """Atomically replace the exact source range with the replacement item.
+
+    Verifies the source items form one contiguous, fully-closed range (all
+    tool results present: no item inside the range carries a pending tool
+    call), that the range's event-ids digest matches, that the resulting
+    context digest matches, and that no anchor item is inside the range.
+    """
+    if not source_ranges:
+        raise ReconstructionError("compaction source range empty")
+    start = None
+    end = None
+    for index, (first, last) in enumerate(source_ranges):
+        if last < source_first:
+            continue
+        if first > source_last:
+            break
+        if start is None:
+            start = index
+        end = index + 1
+        if first < source_first or last > source_last:
+            raise ReconstructionError("compaction source range misaligned")
+    if start is None or end is None:
+        raise ReconstructionError("compaction source range not found")
+    selected = context[start:end]
+    for item in selected:
+        if item.get("kind") in {"instruction", "user"}:
+            raise ReconstructionError("compaction source contains anchor")
+    # A tool_call inside the source is only legal when its result is also in
+    # the range (closed group); an unpaired call is an open/pending call and
+    # must never be compressed (D23 §5.1/§5.2).
+    open_calls = {
+        (item.get("model_turn_id"), item.get("call_id"))
+        for item in selected
+        if item.get("kind") == "tool_call"
+    }
+    for item in selected:
+        if item.get("kind") == "tool_result":
+            open_calls.discard(
+                (item.get("model_turn_id"), item.get("call_id"))
+            )
+    if open_calls:
+        raise ReconstructionError("compaction source contains open tool call")
+    if not selected:
+        raise ReconstructionError("compaction source range empty")
+    declared = payload.get("event_ids_digest")
+    if isinstance(declared, str):
+        computed = _selected_event_ids_digest(selected)
+        if computed != declared:
+            raise ReconstructionError("compaction event ids digest mismatch")
+    context[start:end] = [dict(replacement)]
+    source_ranges[start:end] = [(version, version)]
+    resulting = payload.get("resulting_context_digest")
+    if isinstance(resulting, str) and resulting != _context_digest(context):
+        raise ReconstructionError("compaction resulting digest mismatch")
+
+
+def _selected_event_ids_digest(selected: Sequence[Mapping[str, Any]]) -> str:
+    """Digest of the selected source items (identity, not content)."""
+    identities = [
+        (item.get("kind"), item.get("model_turn_id"), item.get("call_id"))
+        for item in selected
+    ]
+    return hashlib.sha256(
+        canonical_json_bytes_v1(identities, path="compaction-source")
+    ).hexdigest()
 
 
 def _pin_from_request(request: Mapping[str, Any]) -> tuple[Any, ...]:
