@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import stat
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +16,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ..agents.graph import AgentError
 from ..control.event_store import EventMetadata, NewEvent, StreamId, StreamWrite
+from .subprocesses import run_bounded
 
 
 PACKAGE_SCHEMA_VERSION = 2
@@ -320,25 +320,26 @@ def apply_package(
 
     root = Path(worktree).resolve()
     if package.tracked_binary_patch:
-        try:
-            checked = subprocess.run(
-                [git_binary, "-c", "core.hooksPath=", "-C", str(root),
-                 "apply", "--check", "--binary", "-"],
-                input=package.tracked_binary_patch, capture_output=True,
-                timeout=60, check=False,
-            )
-            if checked.returncode:
-                raise AgentError("artifact_package_apply_conflict")
-            applied = subprocess.run(
-                [git_binary, "-c", "core.hooksPath=", "-C", str(root),
-                 "apply", "--binary", "-"],
-                input=package.tracked_binary_patch, capture_output=True,
-                timeout=60, check=False,
-            )
-        except AgentError:
-            raise
-        except (OSError, subprocess.SubprocessError):
-            raise AgentError("artifact_package_apply_failed") from None
+        checked = run_bounded(
+            [git_binary, "-c", "core.hooksPath=", "-C", str(root),
+             "apply", "--check", "--binary", "-"],
+            cwd=root, environment=None, timeout=60,
+            output_limit=4 * 1024 * 1024,
+            failure_code="artifact_package_apply_failed",
+            output_limit_code="artifact_package_apply_output_limit",
+            input_bytes=package.tracked_binary_patch,
+        )
+        if checked.returncode:
+            raise AgentError("artifact_package_apply_conflict")
+        applied = run_bounded(
+            [git_binary, "-c", "core.hooksPath=", "-C", str(root),
+             "apply", "--binary", "-"],
+            cwd=root, environment=None, timeout=60,
+            output_limit=4 * 1024 * 1024,
+            failure_code="artifact_package_apply_failed",
+            output_limit_code="artifact_package_apply_output_limit",
+            input_bytes=package.tracked_binary_patch,
+        )
         if applied.returncode:
             raise AgentError("artifact_package_apply_failed")
     for entry in package.entries:

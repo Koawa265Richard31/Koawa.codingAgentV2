@@ -14,6 +14,7 @@ import sqlite3
 import stat
 import struct
 import time
+import threading
 from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +57,35 @@ def _stat(path):
     return info
 
 
+def _open_read_shared(path):
+    """Open a source medium without excluding SQLite's live Windows handles."""
+    if os.name != "nt":
+        return os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                       | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path), 0x80000000, 0x00000001 | 0x00000002 | 0x00000004,
+        None, 3, 0x00000080 | 0x00200000, None,
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+
+
 def _capture(path, deadline):
     paths = [Path(str(path) + suffix) for suffix in SUFFIXES]
     before = [_stat(item) for item in paths]
@@ -73,8 +103,7 @@ def _capture(path, deadline):
                 handles.append(None)
                 opened.append(None)
                 continue
-            fd = os.open(candidate, os.O_RDONLY | getattr(os, "O_BINARY", 0)
-                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            fd = _open_read_shared(candidate)
             stack.callback(os.close, fd)
             actual = os.fstat(fd)
             if _identity(actual) != _identity(info):
@@ -227,17 +256,36 @@ def read_snapshot(path: Path, *, timeout_ms: int = 10000) -> ReadSnapshot:
     if type(timeout_ms) is not int or timeout_ms < 1:
         raise ValueError("timeout_ms must be positive int")
     deadline = time.monotonic() + timeout_ms / 1000
-    try:
-        media = _capture(Path(path), deadline)
-        # Preserve the legacy source-digest wire (DB, WAL, SHM concatenation),
-        # now computed from exactly the captured bytes used by the reader.
-        digest = hashlib.sha256()
-        for data in media[:3]:
-            if data is not None:
-                digest.update(data)
-        image = _materialize(media[0], media[1], media[3], deadline)
-        return ReadSnapshot(image, digest.hexdigest())
-    except ReadSnapshotError:
-        raise
-    except OSError:
-        raise ReadSnapshotError("database_snapshot_unavailable") from None
+    retryable = frozenset({
+        "database_snapshot_changed", "database_snapshot_unavailable",
+        "database_snapshot_journal_requires_recovery", "database_snapshot_invalid",
+        "database_snapshot_wal_invalid",
+    })
+    last = None
+    for attempt in range(4):
+        try:
+            media = _capture(Path(path), deadline)
+            # Preserve the legacy source-digest wire (DB, WAL, SHM concatenation),
+            # now computed from exactly the captured bytes used by the reader.
+            digest = hashlib.sha256()
+            for data in media[:3]:
+                if data is not None:
+                    digest.update(data)
+            image = _materialize(media[0], media[1], media[3], deadline)
+            return ReadSnapshot(image, digest.hexdigest())
+        except ReadSnapshotError as error:
+            last = error
+            if error.code not in retryable or attempt == 3:
+                raise
+        except OSError:
+            last = ReadSnapshotError("database_snapshot_unavailable")
+            if attempt == 3:
+                raise last from None
+        # A failed image is discarded. The next attempt reopens every medium
+        # and proves its own two-pass bytes; this wait only yields to the lock
+        # holder and is bounded by the shared caller deadline.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ReadSnapshotError("database_snapshot_timeout")
+        threading.Event().wait(min(0.01 * (2 ** attempt), remaining))
+    raise last

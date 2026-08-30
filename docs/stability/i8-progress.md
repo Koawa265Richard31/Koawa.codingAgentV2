@@ -4,8 +4,9 @@
 
 此文件是实施交接记录，不是 I8 完成证明。I7 的既有完成记录不替代 I8 回归；I9 尚未开始。
 
-当前特别注意：真实 WAL 导出的源 SHM 字节保全反例仍为红，见下文；不能引用历史绿色回归
-声称当前工作树或 I8 已完成。
+当前特别注意：下文保留了真实WAL反例的历史失败记录；该反例已在2026-08-30增量中修复并有
+聚焦绿色证据，但尚未完成最终全量回归、77点全矩阵、三批reference资格和24h soak，因此仍不能
+声称当前工作树或I8已完成。
 
 ## 已有可执行证据
 
@@ -205,3 +206,55 @@ threshold_enforced=false、release_pass=null，不是reference lane或24h soak�
 该工作流要求重型改动先确认独立压力审查人数：已建议2个只读审查Agent，尚未获明确答复，
 因此尚未启动审查；自动目标续行不是批准。此前 WAL 只读合同的方案选择也仍待确认。
 当前仅收取已运行测试、校准事实和维护交接记录；不据此声称实现或独立审查已完成。
+
+## 2026-08-30 增量：内存WAL快照与压力审查缺陷收口
+
+本节覆盖上面的历史待决状态：维护者已明确批准“有界、仅驻留内存的DB+WAL一致快照”，并批准
+两个独立只读压力审查。两个审查均独立复现worktree非规范metadata指针缺陷；另分别指出Git子进程
+输出未在采集前受限，以及activation缺少请求代际、并发append泄漏`WrongExpectedVersion`。第二个
+审查在最终工具用量处中止，但已交付可复现发现；不能表述为两个审查均完整通过。
+
+- `control/read_snapshot.py` 现在只用OS只读句柄采集DB/WAL/SHM/journal，双读+身份复验，解析WAL
+  checksum与最后commit marker，在私有image中覆盖页面后deserialize到`:memory:`。总介质256 MiB、
+  image 256 MiB、SHM 4 MiB、frame 262,144；最多四次新鲜重试共享deadline。源上不创建raw副本、
+  不打开SQLite磁盘连接、不checkpoint/recovery。合法未提交tail被忽略，截断/checksum错误、hot
+  journal、变化中和超限介质fail closed。
+- legacy export分类、查询及source digest使用同一成功快照；行读取改为streaming，并增加100,000
+  events及64 MiB payload UTF-8累计上限。
+- worktree拒绝含`..`或非`normpath`的绝对gitdir metadata指针，不能把等价非规范路径当作权威
+  不存在。Git子进程stdout/stderr各4 MiB实时受限、双管并发drain、60秒deadline，超限先kill再返回
+  `git_worktree_output_limit`，不再先无界`capture_output`。
+- activation operator决定现在强制exact `expected_version`并写入decision代际。响应丢失/并发同
+  决定返回原回执且不续TTL；旧决定不能批准新REQUESTED代际；并发异决定稳定返回
+  `activation_version_conflict`，不泄漏存储版本异常。CLI和交互pending路径传递document version。
+
+当前聚焦证据（均`ResourceWarning=error`）：
+
+- S3 snapshot/export/schema + worktree recovery + interactive联合：56 tests / 62.709s / OK。
+- activation完整模块：27 tests / 21.376s / OK，含旧批准跨代、并发同决定、并发异决定。
+- activation三点真实kill/restart矩阵：1 matrix test / 21.847s / OK（内部五场景各两轮）。
+- 接手复核补充：fault-matrix + s3 read_snapshot/schema/legacy export + worktree recovery + d11 activation
+  + i7 durable integration 联合：91 tests / 475.425s / OK（`ResourceWarning=error`）。
+
+## 2026-08-30 接手复核：修复 write-in-progress 分类回归
+
+复核聚焦矩阵时抓到并修复一个真实回归：`SqliteEventStore` 打开路径（`ensure_schema` →
+`classify_database`）在**写事务进行中**（如 `s3.event.mid_batch_before_receipt` kill 窗口，fault
+worker 的 `KillPort.hit` 契约要求 IN_TRANSACTION 时新连接仍读到 old 状态）打开失败，
+`database_classification_failed` 稳定复现（两次 76/403s 聚焦均失败）。
+
+- 根因：GPT 侧 08-30 增量把 `classify_database` 从 SQLite 原生 `mode=ro` 连接换成裸 OS 句柄
+  `read_snapshot`（为修 export 的 SHM 字节保全）。但裸读会读取整个 `-shm` 文件，而 SQLite 写
+  事务进行中通过 LockFileEx 持有 wal-index 字节范围的 **Windows 强制锁**，`os.read` 撞锁抛
+  PermissionError（`database_snapshot_unavailable`，4 次重试全失败）。SQLite 原生 `mode=ro`
+  由 SQLite 自身协调锁，写事务进行中仍可读已提交状态（WAL 快照隔离），不受影响。
+- 修复：`classify_database` 保留 `read_snapshot` 作为静止源字节保全路径；仅当快照报
+  `database_snapshot_unavailable`（活跃写者持锁）时回退到 `_read_only_connection`（SQLite
+  `mode=ro`）完成分类。其他失败保持 fail-closed，非 SQLite 文件仍稳定
+  `database_classification_failed`，静止库零写入、不新建 sidecar 语义不变。
+- 验证：三场景最小复现（写事务中分类 OK / 文本文件 fail-closed / 静止库字节与 sidecar 不变）
+  + 91 项聚焦全绿。
+
+这些证据关闭上述三个压力审查缺陷、真实WAL源字节反例和 write-in-progress 分类回归；仍不替代
+受影响范围的最终独立复审、全量discovery、剩余D11/allocation/MCP/artifact窗口、reference三批
+与24h soak，I8仍未完成，I9未开始。

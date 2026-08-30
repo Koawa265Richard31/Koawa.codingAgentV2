@@ -118,7 +118,13 @@ if __name__ == "__main__":
         from tests.fixtures.stability_trace_faults import TRACE_POINTS, crash_trace
         from tests.fixtures.stability_worktree_faults import WORKTREE_POINTS, crash_worktree
         from tests.fixtures.stability_activation_faults import ACTIVATION_POINTS, crash_activation
-        if sys.argv[3] in S3_POINTS:
+        from tests.fixtures.stability_artifact_faults import ARTIFACT_POINTS, crash_artifact
+        from tests.fixtures.stability_allocation_faults import ALLOCATION_POINTS, crash_allocation
+        if sys.argv[3] in ALLOCATION_POINTS:
+            crash_allocation(root, sys.argv[3])
+        elif sys.argv[3] in ARTIFACT_POINTS:
+            crash_artifact(root, sys.argv[3])
+        elif sys.argv[3] in S3_POINTS:
             crash_s3(root, sys.argv[3])
         elif sys.argv[3] in TRACE_POINTS:
             crash_trace(root, sys.argv[3])
@@ -133,8 +139,14 @@ if __name__ == "__main__":
         from tests.fixtures.stability_trace_faults import TRACE_POINTS, recover_trace
         from tests.fixtures.stability_worktree_faults import WORKTREE_POINTS, recover_worktree
         from tests.fixtures.stability_activation_faults import ACTIVATION_POINTS, recover_activation
+        from tests.fixtures.stability_artifact_faults import ARTIFACT_POINTS, recover_artifact
+        from tests.fixtures.stability_allocation_faults import ALLOCATION_POINTS, recover_allocation
         point = json.loads((root / "ready.json").read_text(encoding="utf-8"))["point"]
-        if point in S3_POINTS:
+        if point in ALLOCATION_POINTS:
+            recover_allocation(root)
+        elif point in ARTIFACT_POINTS:
+            recover_artifact(root)
+        elif point in S3_POINTS:
             recover_s3(root)
         elif point in TRACE_POINTS:
             recover_trace(root)

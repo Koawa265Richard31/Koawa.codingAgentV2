@@ -378,6 +378,24 @@ class Classification:
     user_version: int
 
 
+def _read_only_connection(path: Path, busy_timeout_ms: int) -> sqlite3.Connection:
+    """Lock-coordinated read-only connection (SQLite handles WAL read marks).
+
+    Unlike the byte-preserving raw snapshot, this lets SQLite arbitrate its own
+    locks, so classification can read committed state while another connection
+    holds an open write transaction (fault-worker IN_TRANSACTION contract).
+    """
+    connection = sqlite3.connect(
+        f"file:{path}?mode=ro",
+        uri=True,
+        timeout=busy_timeout_ms / 1000,
+        isolation_level=None,
+    )
+    connection.row_factory = sqlite3.Row
+    connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+    return connection
+
+
 def classify_database(
     database_path: str | Path,
     *,
@@ -388,6 +406,12 @@ def classify_database(
     Every rejection branch is byte-preserving: the DB/WAL/SHM digests captured
     before classification must equal the digests after classification, and no
     -wal/-shm file may be created.
+
+    The raw snapshot path reads media through OS handles; when a live writer
+    holds Windows mandatory byte locks on the WAL index (-shm), raw reads are
+    denied. In that case classification falls back to a lock-coordinated
+    read-only SQLite connection, which still sees only committed state and
+    never creates sidecars. Other failures stay fail-closed.
     """
     if busy_timeout_ms < 1:
         raise ValueError("busy_timeout_ms must be positive")
@@ -400,7 +424,20 @@ def classify_database(
         snapshot = read_snapshot(path, timeout_ms=busy_timeout_ms)
         with snapshot.connect() as connection:
             return classify_connection(connection)
-    except (ReadSnapshotError, sqlite3.Error):
+    except ReadSnapshotError as error:
+        if error.code != "database_snapshot_unavailable":
+            raise DatabaseSchemaError(DATABASE_CLASSIFICATION_FAILED) from None
+        try:
+            connection = _read_only_connection(path, busy_timeout_ms)
+        except sqlite3.Error:
+            raise DatabaseSchemaError(DATABASE_CLASSIFICATION_FAILED) from None
+        try:
+            return classify_connection(connection)
+        except sqlite3.DatabaseError:
+            raise DatabaseSchemaError(DATABASE_CLASSIFICATION_FAILED) from None
+        finally:
+            connection.close()
+    except sqlite3.Error:
         raise DatabaseSchemaError(DATABASE_CLASSIFICATION_FAILED) from None
 
 

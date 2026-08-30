@@ -67,6 +67,7 @@ from koawa_agent_v2.runtime.config import (
     TestProfileConfig,
     load_runtime_config,
 )
+from koawa_agent_v2.telemetry.faults import FaultPoint
 from koawa_agent_v2.telemetry.trace import TraceStore
 
 
@@ -443,7 +444,8 @@ class ActivationServiceTest(unittest.TestCase):
         self.assertEqual(1, len(pending))
         self.assertEqual(view.request_id, pending[0].request_id)
         granted = self.service.resolve_activation(
-            view.request_id, True, approver_principal_id="operator",
+            view.request_id, True, expected_version=view.version,
+            approver_principal_id="operator",
         )
         self.assertEqual(ActivationService.STATUS_GRANTED, granted.status)
         # Re-entering the same launch reuses the grant.
@@ -455,7 +457,8 @@ class ActivationServiceTest(unittest.TestCase):
         server = _host_trusted_server()
         _identity, view = self._granted(server, decision="ask")
         denied = self.service.resolve_activation(
-            view.request_id, False, approver_principal_id="operator",
+            view.request_id, False, expected_version=view.version,
+            approver_principal_id="operator",
         )
         self.assertEqual(ActivationService.STATUS_DENIED, denied.status)
         with self.assertRaises(McpActivationError) as raised:
@@ -464,17 +467,107 @@ class ActivationServiceTest(unittest.TestCase):
         self.assertEqual(0, len(self.service.pending_requests()))
         self.assertFalse(any("mcp.process" in kind for kind in self._event_types()))
 
+    def test_delayed_old_decision_cannot_approve_new_request_generation(self) -> None:
+        server = _host_trusted_server()
+        identity, requested = self._granted(server, decision="ask")
+        self.service.resolve_activation(
+            requested.request_id, True, expected_version=requested.version,
+            approver_principal_id="operator",
+        )
+        self.clock.advance(301)
+        renewed = self.service.plan_start(
+            identity, principal_id="root", scope="mcp.host_process.execute",
+            decision="ask",
+        )
+        self.assertEqual(ActivationService.STATUS_REQUESTED, renewed.status)
+        with self.assertRaises(McpActivationError) as caught:
+            self.service.resolve_activation(
+                requested.request_id, True,
+                expected_version=requested.version,
+                approver_principal_id="operator",
+            )
+        self.assertEqual("activation_version_conflict", caught.exception.code)
+        self.assertEqual(renewed, self.service.get_activation(requested.request_id))
+
+    def test_competing_identical_decision_returns_committed_receipt(self) -> None:
+        server = _host_trusted_server()
+        _, requested = self._granted(server, decision="ask")
+        competing = ActivationService(self.store, clock=self.clock)
+
+        class CompetingGrant:
+            fired = False
+
+            def hit(inner, point, _facts):
+                if point is FaultPoint.S4_ACTIVATION_BEFORE_GRANT_APPEND and not inner.fired:
+                    inner.fired = True
+                    competing.resolve_activation(
+                        requested.request_id, True,
+                        expected_version=requested.version,
+                        approver_principal_id="operator",
+                    )
+
+        service = ActivationService(
+            self.store, clock=self.clock, fault_port=CompetingGrant(),
+        )
+        granted = service.resolve_activation(
+            requested.request_id, True, expected_version=requested.version,
+            approver_principal_id="operator",
+        )
+        self.assertEqual(ActivationService.STATUS_GRANTED, granted.status)
+        self.assertEqual(1, sum(
+            event.event_type == "mcp.activation-granted.v1"
+            for event in self.store.read_all()
+        ))
+
+    def test_competing_different_decision_is_stable_version_conflict(self) -> None:
+        server = _host_trusted_server()
+        _, requested = self._granted(server, decision="ask")
+        competing = ActivationService(self.store, clock=self.clock)
+
+        class CompetingDenial:
+            fired = False
+
+            def hit(inner, point, _facts):
+                if point is FaultPoint.S4_ACTIVATION_BEFORE_GRANT_APPEND and not inner.fired:
+                    inner.fired = True
+                    competing.resolve_activation(
+                        requested.request_id, False,
+                        expected_version=requested.version,
+                        approver_principal_id="operator",
+                    )
+
+        service = ActivationService(
+            self.store, clock=self.clock, fault_port=CompetingDenial(),
+        )
+        with self.assertRaises(McpActivationError) as caught:
+            service.resolve_activation(
+                requested.request_id, True,
+                expected_version=requested.version,
+                approver_principal_id="operator",
+            )
+        self.assertEqual("activation_version_conflict", caught.exception.code)
+        self.assertEqual(
+            ActivationService.STATUS_DENIED,
+            service.get_activation(requested.request_id).status,
+        )
+
     def test_operator_grant_replay_cannot_reinstate_revoked_authorization(self) -> None:
         _, requested = self._granted(_host_trusted_server())
-        granted = self.service.resolve_activation(requested.request_id, True, approver_principal_id="operator")
+        granted = self.service.resolve_activation(
+            requested.request_id, True, expected_version=requested.version,
+            approver_principal_id="operator",
+        )
         self.service._append_activation(granted.request_id, "mcp.activation-revoked.v1", {
             "request_id": str(granted.request_id), "server_id": granted.server_id,
             "reason": "fixture_revoked",
         }, granted.version)
         before = self.store.read_all()
         with self.assertRaises(McpActivationError) as caught:
-            self.service.resolve_activation(granted.request_id, True, approver_principal_id="operator")
-        self.assertEqual("activation_already_resolved", caught.exception.code)
+            self.service.resolve_activation(
+                granted.request_id, True, expected_version=requested.version,
+                approver_principal_id="operator",
+            )
+        self.assertEqual("activation_version_conflict", caught.exception.code)
         self.assertEqual(before, self.store.read_all())
         self.assertFalse(self.service._tickets)
 
@@ -483,7 +576,11 @@ class ActivationServiceTest(unittest.TestCase):
         before = self.store.read_all()
         for decision in (1, 0, "true", None):
             with self.subTest(decision=decision), self.assertRaises(TypeError):
-                self.service.resolve_activation(requested.request_id, decision, approver_principal_id="operator")
+                self.service.resolve_activation(
+                    requested.request_id, decision,
+                    expected_version=requested.version,
+                    approver_principal_id="operator",
+                )
             self.assertEqual(before, self.store.read_all())
 
     def test_replaced_host_trusted_executable_invalidates_approval_before_spawn(self) -> None:
@@ -492,7 +589,8 @@ class ActivationServiceTest(unittest.TestCase):
         server = _host_trusted_server(command=(str(script),))
         identity, view = self._granted(server, decision="ask")
         self.service.resolve_activation(
-            view.request_id, True, approver_principal_id="operator",
+            view.request_id, True, expected_version=view.version,
+            approver_principal_id="operator",
         )
         first_digest = identity.config_digest
         script.write_text("echo replaced-content-now\n", encoding="utf-8")
@@ -505,7 +603,8 @@ class ActivationServiceTest(unittest.TestCase):
         server = _host_trusted_server(extra_env=(("TOKEN", "abc"),))
         identity, view = self._granted(server, decision="ask")
         self.service.resolve_activation(
-            view.request_id, True, approver_principal_id="operator",
+            view.request_id, True, expected_version=view.version,
+            approver_principal_id="operator",
         )
         first = identity.config_digest
         drifted = McpServerConfig(
@@ -523,7 +622,8 @@ class ActivationServiceTest(unittest.TestCase):
         server = _host_trusted_server()
         _identity, view = self._granted(server, decision="ask")
         granted = self.service.resolve_activation(
-            view.request_id, True, approver_principal_id="operator",
+            view.request_id, True, expected_version=view.version,
+            approver_principal_id="operator",
         )
         intent = self.service.intend(granted)
         ticket = self.service.claim(
@@ -548,11 +648,60 @@ class ActivationServiceTest(unittest.TestCase):
             self.assertNotIn("TOKEN", raw)
             self.assertNotIn(_fixture_command()[-1], raw)
 
+    def test_allocation_intent_response_loss_replays_same_allocation(self) -> None:
+        _, requested = self._granted(_host_trusted_server(), decision="ask")
+        granted = self.service.resolve_activation(
+            requested.request_id, True, expected_version=requested.version,
+            approver_principal_id="operator",
+        )
+        first = self.service.intend(granted)
+        second = self.service.intend(granted)
+        self.assertEqual(first, second)
+        self.assertEqual(1, sum(
+            event.event_type == "mcp.process-intended.v1"
+            for event in self.store.read_all()
+        ))
+
+    def test_claimed_allocation_requires_evidence_bound_reconciliation(self) -> None:
+        _, requested = self._granted(_host_trusted_server(), decision="ask")
+        granted = self.service.resolve_activation(
+            requested.request_id, True, expected_version=requested.version,
+            approver_principal_id="operator",
+        )
+        intent = self.service.intend(granted)
+        self.service.claim(intent, granted, principal_id="root")
+        claimed = self.service.get_allocation(intent.allocation_id)
+        self.assertEqual(ActivationService.ALLOCATION_CLAIMED, claimed.status)
+        with self.assertRaises(McpActivationError) as caught:
+            self.service.intend(granted)
+        self.assertEqual(
+            "mcp_allocation_reconciliation_required", caught.exception.code,
+        )
+        evidence = "e" * 64
+        failed = self.service.reconcile_allocation(
+            intent.allocation_id, expected_version=claimed.version,
+            outcome="failed_before_start", evidence_kind="process_absent",
+            evidence_digest=evidence, reconciler_principal_id="operator",
+        )
+        self.assertEqual(
+            ActivationService.ALLOCATION_FAILED_BEFORE_START, failed.status,
+        )
+        replay = self.service.reconcile_allocation(
+            intent.allocation_id, expected_version=claimed.version,
+            outcome="failed_before_start", evidence_kind="process_absent",
+            evidence_digest=evidence, reconciler_principal_id="operator",
+        )
+        self.assertEqual(failed, replay)
+        next_intent = self.service.intend(granted)
+        self.assertEqual(1, next_intent.attempt)
+        self.assertNotEqual(intent.allocation_id, next_intent.allocation_id)
+
     def test_claim_after_revoke_has_zero_writes(self) -> None:
         server = _host_trusted_server()
         _identity, view = self._granted(server, decision="ask")
         granted = self.service.resolve_activation(
-            view.request_id, True, approver_principal_id="operator",
+            view.request_id, True, expected_version=view.version,
+            approver_principal_id="operator",
         )
         intent = self.service.intend(granted)
         # Revoke between intend and claim: the claim precondition must fail
@@ -580,7 +729,8 @@ class ActivationServiceTest(unittest.TestCase):
         server = _host_trusted_server()
         _identity, view = self._granted(server, decision="ask")
         granted = self.service.resolve_activation(
-            view.request_id, True, approver_principal_id="operator",
+            view.request_id, True, expected_version=view.version,
+            approver_principal_id="operator",
         )
         intent = self.service.intend(granted)
         ticket = self.service.claim(intent, granted, principal_id="root")
@@ -588,6 +738,9 @@ class ActivationServiceTest(unittest.TestCase):
         with self.assertRaises(McpActivationError) as raised:
             self.service.consume_ticket(ticket)
         self.assertEqual("mcp_ticket_replayed_or_unknown", raised.exception.code)
+        self.service.record_failed_before_start(
+            ticket, reason="fixture_no_external_create",
+        )
         ticket_two = self.service.claim(
             self.service.intend(granted), granted, principal_id="root",
         )
@@ -624,7 +777,8 @@ class LauncherTest(unittest.TestCase):
             decision="ask",
         )
         granted = self.service.resolve_activation(
-            view.request_id, True, approver_principal_id="operator",
+            view.request_id, True, expected_version=view.version,
+            approver_principal_id="operator",
         )
         intent = self.service.intend(granted)
         ticket = self.service.claim(
@@ -924,6 +1078,7 @@ class AppRuntimeActivationFlowTest(unittest.TestCase):
         self.assertEqual(1, len(pending))
         approved = app.resolve_approval(
             pending[0].request_id_str, True,
+            expected_version=pending[0].version,
         )
         self.assertTrue(approved.ok)
         granted = app.assembled.activation.pending_requests()
@@ -953,7 +1108,10 @@ class AppRuntimeActivationFlowTest(unittest.TestCase):
         )
         self.assertEqual("mcp_process_activation_pending", app.run("x").code)
         pending = app.assembled.activation.pending_requests()
-        app.resolve_approval(pending[0].request_id_str, approved=True)
+        app.resolve_approval(
+            pending[0].request_id_str, approved=True,
+            expected_version=pending[0].version,
+        )
         script.write_text("echo replaced-content-now\n", encoding="utf-8")
         again = app.run("x")
         self.assertFalse(again.ok)

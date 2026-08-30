@@ -1838,10 +1838,16 @@ class MigrationStep:
   executescript。
 - DDL、postcheck、foreign_key_check、migration row和user_version同事务提交。
 
-分类发生在目录创建、journal mode改变、DDL和普通runtime connection之前。现有文件先取得独占
-writer条件，再用SQLite只读模式读取user_version/sqlite_schema/PRAGMA列与index；分类前后记录
-DB/WAL/SHM存在性与digest，所有拒绝分支必须字节不变且不能新建`-wal/-shm`。无法取得安全只读
-快照则 `database_classification_failed`，不能猜fresh。
+分类发生在目录创建、journal mode改变、DDL和普通runtime connection之前。现有文件不交给磁盘
+SQLite连接：以OS只读句柄有界采集DB/WAL/SHM/journal，每个介质完整读取两遍并复验路径/句柄身份、
+大小、mtime/ctime和内容摘要；Windows句柄必须允许SQLite现有read/write/delete共享。总源介质上限
+256 MiB、SHM上限4 MiB、WAL frame上限262,144、私有image上限256 MiB，四次新鲜重试共享调用
+deadline，失败尝试的内存image必须丢弃。解析WAL header/salt/page size及滚动checksum，只覆盖最后一个
+checksum-valid commit marker之前的frame；合法未提交tail不可见，截断、checksum错误、hot journal、
+变化中或超限介质均fail closed。重建后的私有image才用`sqlite3_deserialize`装入`:memory:`，设置
+trusted_schema=OFF、query_only=ON并开启read transaction；绝不在磁盘建立raw副本，也不触发源库
+recovery/checkpoint。分类前后DB/WAL/SHM字节必须完全不变且不能新建sidecar；无法证明一致快照则
+`database_classification_failed`，不能猜fresh。
 
 本次migration registry固定为：
 
@@ -2127,8 +2133,11 @@ CLI：
 实现规则：
 
 1. source/destination canonical且不同；destination不存在。
-2. source用SQLite mode=ro和一致read transaction，绝不UPDATE/DELETE/VACUUM。
-3. 验证known legacy schema fingerprint并以hard limits读。
+2. source只经7.2定义的有界OS介质快照读取；DB/WAL/SHM共同source digest来自同一次成功采集，
+   schema分类、行读取和digest不能跨快照拼接。SQLite只读取私有内存image，源介质绝不
+   UPDATE/DELETE/VACUUM/recovery/checkpoint。
+3. 验证known legacy schema fingerprint并流式读取；最多100,000条事件、payload JSON UTF-8累计
+   64 MiB，任一超限在发布destination前fail closed。
 4. 不复制raw events、idempotency receipts、checkpoint、lease、trace。
 5. 在同目录.partial-uuid创建latest fresh DB。
 6. 写独立legacy-import audit stream：
@@ -2375,6 +2384,12 @@ payload只含：
 - stable code/time。
 
 禁止env value、stderr、credential、完整config/argv正文。
+
+人工grant/deny命令必须携带pending document暴露的exact `expected_version`。operator decision事件
+同时记录`decision_expected_version`、布尔decision和approver principal。响应丢失后，只有“当前
+latest事件恰为expected_version+1且决定/批准人/代际全部相同”才能返回原回执，不能续TTL；旧代批准
+不能命中同request ID后来追加的REQUESTED代际。grant append并发发生`WrongExpectedVersion`时先重读：
+同一精确决定返回已提交回执，异决定稳定返回`activation_version_conflict`，不得泄漏存储层异常。
 
 host_trusted需要principal的mcp.host_process.execute scope和identity-bound durable grant。
 sandboxed可被本地policy ALLOW，但仍写authorization与allocation事实。

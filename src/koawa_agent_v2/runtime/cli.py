@@ -428,10 +428,12 @@ def _real_main(argv: list[str]) -> int:
     approve_parser = subparsers.add_parser("approve")
     approve_parser.add_argument("--config", required=True)
     approve_parser.add_argument("--request-id", required=True)
+    approve_parser.add_argument("--expected-version", required=True, type=int)
     approve_parser.add_argument("--no-resume", action="store_true")
     deny_parser = subparsers.add_parser("deny")
     deny_parser.add_argument("--config", required=True)
     deny_parser.add_argument("--request-id", required=True)
+    deny_parser.add_argument("--expected-version", required=True, type=int)
     for name in ("status", "doctor"):
         subparser = subparsers.add_parser(name)
         subparser.add_argument("--config", required=True)
@@ -507,12 +509,14 @@ def _real_main(argv: list[str]) -> int:
             outcome = app.resolve_approval(
                 arguments.request_id,
                 True,
+                expected_version=arguments.expected_version,
                 resume_after=not arguments.no_resume,
             )
         elif arguments.command == "deny":
             outcome = app.resolve_approval(
                 arguments.request_id,
                 False,
+                expected_version=arguments.expected_version,
                 resume_after=False,
             )
         elif arguments.command == "status":
@@ -542,8 +546,8 @@ _INTERACTIVE_HELP = """commands:
   <message>             run one agent turn (conversation context is kept)
   /status               show threads, turns and pending approvals
   /approvals            list pending durable approvals
-  /approve <id>         approve a pending request (and resume)
-  /deny <id>            deny a pending request
+  /approve <id> <ver>   approve an exact pending request generation (and resume)
+  /deny <id> <ver>      deny an exact pending request generation
   /resume <turn-id>     resume a paused/interrupted turn
   /history              show the current in-memory session history
   /thread <uuid>        switch to (or create) a conversation thread
@@ -636,7 +640,8 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
         for item in pending:
             answer = input(f"approve {item['request_id']}? [y/N] ").strip().lower()
             result = app.resolve_approval(
-                item["request_id"], answer in ("y", "yes")
+                item["request_id"], answer in ("y", "yes"),
+                expected_version=item["version"],
             )
             print(result.to_json())
 
@@ -746,10 +751,17 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
                 print(f"  journal failed: {getattr(exc, 'code', exc)}")
             continue
         if text.startswith("/approve "):
-            print(app.resolve_approval(text[9:].strip(), True).to_json())
+            request_id, version = text[9:].strip().rsplit(maxsplit=1)
+            print(app.resolve_approval(
+                request_id, True, expected_version=int(version),
+            ).to_json())
             continue
         if text.startswith("/deny "):
-            print(app.resolve_approval(text[6:].strip(), False, resume_after=False).to_json())
+            request_id, version = text[6:].strip().rsplit(maxsplit=1)
+            print(app.resolve_approval(
+                request_id, False, expected_version=int(version),
+                resume_after=False,
+            ).to_json())
             continue
         if text.startswith("/resume "):
             print(app.resume(text[8:].strip()).to_json())

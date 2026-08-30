@@ -43,11 +43,42 @@ class FaultPointClass(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class FaultEventDelta:
+    counters: Mapping[str, int]
+    stream_categories: tuple[str, ...] = ()
+    per_fact: Mapping[str, int] = field(default_factory=dict)
+    variants: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        counters = dict(self.counters)
+        per_fact = dict(self.per_fact)
+        variants = {key: MappingProxyType(dict(value)) for key, value in self.variants.items()}
+        if "durable_events" not in counters:
+            raise ValueError("durable_events counter is required")
+        for document in (counters, per_fact, *variants.values()):
+            if any(
+                not isinstance(key, str) or not key
+                or type(value) is not int or value < 0
+                for key, value in document.items()
+            ):
+                raise ValueError("fault event counters must be non-negative integers")
+        categories = tuple(self.stream_categories)
+        if len(categories) != len(set(categories)) or any(
+            not isinstance(value, str) or not value for value in categories
+        ):
+            raise ValueError("stream categories must be a unique tuple")
+        object.__setattr__(self, "counters", MappingProxyType(counters))
+        object.__setattr__(self, "stream_categories", categories)
+        object.__setattr__(self, "per_fact", MappingProxyType(per_fact))
+        object.__setattr__(self, "variants", MappingProxyType(variants))
+
+
+@dataclass(frozen=True, slots=True)
 class FaultSpec:
     name: str
     point_class: FaultPointClass
     marker_timing: str
-    expected_event_delta: Mapping[str, int]
+    expected_event_delta: FaultEventDelta
     recovery_oracle: str
 
     def __post_init__(self) -> None:
@@ -57,16 +88,8 @@ class FaultSpec:
             raise TypeError("point_class must be FaultPointClass")
         if not self.marker_timing or not self.recovery_oracle:
             raise ValueError("fault spec text fields must be non-empty")
-        delta = dict(self.expected_event_delta)
-        if not delta or any(
-            not isinstance(key, str)
-            or not isinstance(value, int)
-            or isinstance(value, bool)
-            or value < 0
-            for key, value in delta.items()
-        ):
-            raise ValueError("expected_event_delta must be non-negative")
-        object.__setattr__(self, "expected_event_delta", MappingProxyType(delta))
+        if not isinstance(self.expected_event_delta, FaultEventDelta):
+            raise TypeError("expected_event_delta must be FaultEventDelta")
 
 
 class FaultPort(Protocol):
@@ -206,7 +229,7 @@ _POINTS: tuple[tuple[str, int, str], ...] = (
     ("d11.orphan.before_append", 0, "rediscover"),
     ("d11.orphan.after_commit", 1, "takeover_race"),
     ("d11.takeover.before_append", 0, "full_reread"),
-    ("d11.takeover.after_commit", 2, "same_run_receipt"),
+    ("d11.takeover.after_commit", 1, "same_run_receipt"),
     ("d11.terminal.after_read", 0, "full_reread"),
     ("d11.terminal.before_append", 0, "full_retry"),
     ("d11.terminal.after_commit", 4, "receipt_replay"),
@@ -233,37 +256,102 @@ _POINTS: tuple[tuple[str, int, str], ...] = (
     ("s4.mcp.initialize.after_send_before_result", 0, "unknown_and_close"),
     ("s4.mcp.initialize.after_result_before_commit", 0, "safe_session_rebuild"),
     ("s4.mcp.list.after_page_before_cursor", 0, "restart_bounded_list"),
-    ("s4.mcp.list.after_catalog_commit", 1, "use_snapshot"),
+    ("s4.mcp.list.after_catalog_commit", 0, "use_snapshot"),
     ("s4.mcp.call.after_send_before_result", 0, "ledger_unknown"),
     ("s4.mcp.call.after_result_before_ledger", 0, "reconcile_or_unknown"),
     ("s4.mcp.refresh.after_list_before_publish", 0, "discard"),
     ("s4.mcp.close.after_terminate_before_stopped", 0, "inspect_reap_or_unknown"),
     ("s5.run.before_terminal_append", 0, "full_reread"),
     ("s5.run.after_terminal_commit", 3, "receipt_replay"),
-    ("s5.workspace.add.after_intent_commit", 1, "claim"),
+    ("s5.workspace.add.after_intent_commit", 2, "claim"),
     ("s5.workspace.add.after_claim_commit", 1, "inspect_path"),
     ("s5.workspace.add.after_effect_before_ack", 0, "postcondition_or_unknown"),
-    ("s5.workspace.remove.after_intent_commit", 1, "claim"),
+    ("s5.workspace.remove.after_intent_commit", 2, "claim"),
     ("s5.workspace.remove.after_claim_commit", 1, "inspect_path_metadata"),
     ("s5.workspace.remove.after_effect_before_ack", 0, "postcondition_or_unknown"),
-    ("s5.workspace.apply.after_intent_commit", 1, "claim"),
+    ("s5.workspace.apply.after_intent_commit", 2, "claim"),
     ("s5.workspace.apply.after_claim_commit", 1, "verify_prestate"),
     ("s5.workspace.apply.after_effect_before_ack", 0, "postcondition_or_unknown"),
-    ("s5.workspace.retest.after_intent_commit", 1, "claim"),
+    ("s5.workspace.retest.after_intent_commit", 2, "claim"),
     ("s5.workspace.retest.after_claim_commit", 1, "test_identity"),
     ("s5.workspace.retest.after_effect_before_ack", 0, "positive_or_negative_evidence"),
-    ("s5.workspace.deliver.after_intent_commit", 1, "claim"),
+    ("s5.workspace.deliver.after_intent_commit", 2, "claim"),
     ("s5.workspace.deliver.after_claim_commit", 1, "verify_repo_prestate"),
     ("s5.workspace.deliver.after_effect_before_ack", 0, "postcondition_or_unknown"),
     ("s5.trace.cas_conflict", 0, "bounded_trace_retry"),
     ("s5.trace.drop", 0, "business_unchanged"),
 )
 
+_STREAM_CATEGORIES: dict[str, tuple[str, ...]] = {}
+for _name in (
+    "d11.enqueue.after_commit", "d11.deliver.after_commit",
+    "d11.result.after_commit", "d11.ack.after_commit",
+    "d11.unresolved.after_commit",
+):
+    _STREAM_CATEGORIES[_name] = ("mailbox",)
+for _name in (
+    "d11.waiting.after_commit", "d11.resume.after_commit",
+    "d11.cancel.after_commit", "d11.heartbeat.after_commit",
+    "d11.orphan.after_commit",
+):
+    _STREAM_CATEGORIES[_name] = ("agent",)
+_STREAM_CATEGORIES.update({
+    "d11.resources.baseline.after_commit": ("agent-capacity",),
+    "d11.spawn.after_commit": ("agent", "agent-capacity", "agent-budget"),
+    "d11.takeover.after_commit": ("agent", "mailbox"),
+    "d11.terminal.after_commit": (
+        "agent", "agent-capacity", "agent-budget", "mailbox",
+    ),
+    "s4.activation.after_request_commit": ("mcp-activation",),
+    "s4.activation.after_grant_commit": ("mcp-activation",),
+    "s4.allocation.after_intent_commit": ("mcp-allocation",),
+    "s4.allocation.after_claim_commit": ("mcp-allocation",),
+    "s4.allocation.after_started_commit": ("mcp-allocation",),
+    "s4.allocation.after_ready_commit": ("mcp-allocation",),
+    "s5.run.after_terminal_commit": ("thread", "turn", "run"),
+})
+for _kind in ("add", "remove", "apply", "retest", "deliver"):
+    _STREAM_CATEGORIES[f"s5.workspace.{_kind}.after_intent_commit"] = (
+        "workspace-effect", "run-effect-index",
+    )
+    _STREAM_CATEGORIES[f"s5.workspace.{_kind}.after_claim_commit"] = (
+        "workspace-effect",
+    )
+
+_PER_FACT_DELTAS = {
+    "d11.takeover.after_commit": {"message_count": 1},
+}
+_DELTA_VARIANTS = {
+    "d11.spawn.after_commit": {
+        "root_spawn_durable_events": 1,
+        "child_spawn_durable_events": 4,
+    },
+    "d11.terminal.after_commit": {
+        "root_terminal_durable_events": 1,
+        "child_parent_terminal_durable_events": 3,
+        "child_parent_active_durable_events": 4,
+    },
+}
+
+
+def _event_delta(name: str, durable_events: int) -> FaultEventDelta:
+    counters = {"durable_events": durable_events}
+    if name == "s4.mcp.list.after_catalog_commit":
+        counters["catalog_snapshots"] = 1
+    if name == "s3.checkpoint.after_cache_commit":
+        counters["projection_rows"] = 1
+    return FaultEventDelta(
+        counters,
+        _STREAM_CATEGORIES.get(name, ()),
+        _PER_FACT_DELTAS.get(name, {}),
+        {key: {"durable_events": value} for key, value in _DELTA_VARIANTS.get(name, {}).items()},
+    )
+
 
 FAULT_REGISTRY: tuple[FaultSpec, ...] = tuple(
     FaultSpec(
         name, _class(name), _class(name).value,
-        {"durable_events": delta}, oracle,
+        _event_delta(name, delta), oracle,
     )
     for name, delta, oracle in _POINTS
 )
@@ -437,7 +525,7 @@ def classify_failure(code: str) -> str:
 
 __all__ = [
     "FAILURE_POINTS", "FAULT_REGISTRY", "FAULT_SPECS", "FaultInjector",
-    "FaultPointClass", "FaultPort", "FaultSpec", "InjectedFault",
+    "FaultEventDelta", "FaultPointClass", "FaultPort", "FaultSpec", "InjectedFault",
     "JsonPrimitive", "NO_OP_FAULT_PORT", "NoOpFaultPort",
     "RecordingFaultPort", "classify_failure", "require_fault_point",
     "validate_fault_facts",

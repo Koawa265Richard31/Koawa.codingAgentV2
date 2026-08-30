@@ -12,6 +12,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from koawa_agent_v2.control.schema import DatabaseSchemaError
 from koawa_agent_v2.control.sqlite_store import SqliteEventStore
@@ -50,6 +51,32 @@ class LegacyExportTest(unittest.TestCase):
         self.assertEqual(database.read_bytes(), before)
         self.assertFalse(Path(str(database) + "-wal").exists())
         self.assertFalse(Path(str(database) + "-shm").exists())
+
+    def test_source_event_count_budget_fails_before_destination_publish(self):
+        source = self.directory / "legacy-count.db"
+        build_legacy_database(source, canary=CANARY)
+        before = media_snapshot(source)
+        destination = self.directory / "fresh-count.db"
+        with patch(
+            "koawa_agent_v2.runtime.store_migration.MAX_LEGACY_EVENTS", 1,
+        ), self.assertRaises(LegacyExportError) as caught:
+            export_legacy_store(source, destination)
+        self.assertEqual(LEGACY_EXPORT_SOURCE_INVALID, caught.exception.code)
+        self.assertEqual(before, media_snapshot(source))
+        self.assertFalse(destination.exists())
+
+    def test_source_payload_budget_fails_before_destination_publish(self):
+        source = self.directory / "legacy-payload.db"
+        build_legacy_database(source, canary=CANARY)
+        before = media_snapshot(source)
+        destination = self.directory / "fresh-payload.db"
+        with patch(
+            "koawa_agent_v2.runtime.store_migration.MAX_LEGACY_PAYLOAD_BYTES", 1,
+        ), self.assertRaises(LegacyExportError) as caught:
+            export_legacy_store(source, destination)
+        self.assertEqual(LEGACY_EXPORT_SOURCE_INVALID, caught.exception.code)
+        self.assertEqual(before, media_snapshot(source))
+        self.assertFalse(destination.exists())
 
     def test_offline_export_creates_sanitized_fresh_store(self):
         source = self.directory / "legacy.db"
@@ -197,4 +224,3 @@ class LegacyExportTest(unittest.TestCase):
                 self.assertTrue(source.exists())
                 leftover = [path for path in self.directory.glob(".partial-*")]
                 self.assertEqual(leftover, [])
-

@@ -46,6 +46,8 @@ from ..recovery.redaction import redact_text
 LEGACY_EXPORT_DESTINATION_EXISTS = 'legacy_export_destination_exists'
 LEGACY_EXPORT_SOURCE_INVALID = 'legacy_export_source_invalid'
 LEGACY_EXPORT_VERIFICATION_FAILED = 'legacy_export_verification_failed'
+MAX_LEGACY_EVENTS = 100_000
+MAX_LEGACY_PAYLOAD_BYTES = 64 * 1024 * 1024
 
 
 class LegacyExportError(RuntimeError):
@@ -105,11 +107,20 @@ def _legacy_rows(connection) -> dict:
             'e.event_type, e.schema_version, e.occurred_at, e.payload_json '
             'FROM streams s JOIN events e ON e.stream_id = s.stream_id '
             "WHERE s.category IN ('thread','turn') ORDER BY s.stream_id, e.stream_version",
-        ).fetchall()
+        )
         streams = {}
+        event_count = 0
+        payload_bytes = 0
         for row in rows:
+            event_count += 1
+            raw_payload = row['payload_json']
+            if not isinstance(raw_payload, str):
+                raise LegacyExportError(LEGACY_EXPORT_SOURCE_INVALID)
+            payload_bytes += len(raw_payload.encode('utf-8', 'strict'))
+            if event_count > MAX_LEGACY_EVENTS or payload_bytes > MAX_LEGACY_PAYLOAD_BYTES:
+                raise LegacyExportError(LEGACY_EXPORT_SOURCE_INVALID)
             try:
-                payload = json.loads(row['payload_json'])
+                payload = json.loads(raw_payload)
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise LegacyExportError(LEGACY_EXPORT_SOURCE_INVALID) from exc
             occurred_at = datetime.fromisoformat(row['occurred_at'])

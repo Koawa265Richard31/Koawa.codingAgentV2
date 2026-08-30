@@ -509,6 +509,20 @@ class AllocationIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class AllocationView:
+    request_id: UUID
+    allocation_id: UUID
+    status: str
+    version: int
+    attempt: int
+    grant_version: int
+    launch_identity_digest: str
+    principal_id: str
+    claim_epoch: int
+    claim_token: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
 class AuthorizedLaunchTicket:
     # One-time process-local ticket issued only after the claim commits.
     # Never serialized, never written to an event (doc §8.5).
@@ -545,6 +559,13 @@ class ActivationService:
     STATUS_DENIED = "denied"
     STATUS_EXPIRED = "expired"
     STATUS_REVOKED = "revoked"
+    ALLOCATION_INTENDED = "intended"
+    ALLOCATION_CLAIMED = "claimed"
+    ALLOCATION_STARTED = "started"
+    ALLOCATION_READY = "ready"
+    ALLOCATION_STOPPED = "stopped"
+    ALLOCATION_FAILED_BEFORE_START = "failed_before_start"
+    ALLOCATION_OUTCOME_UNKNOWN = "outcome_unknown"
 
     def __init__(
         self,
@@ -656,6 +677,7 @@ class ActivationService:
         request_id: UUID,
         approved: bool,
         *,
+        expected_version: int,
         approver_principal_id: str,
     ) -> ActivationView:
         # Approve/deny ONE exact request; the grant is identity-bound.  Only
@@ -664,26 +686,19 @@ class ActivationService:
             raise TypeError("request_id must be UUID")
         if type(approved) is not bool:
             raise TypeError("approved must be bool")
+        if type(expected_version) is not int or expected_version < 0:
+            raise TypeError("expected_version must be a non-negative int")
         view = self._require_view(request_id)
-        if view.status != self.STATUS_REQUESTED:
-            # A committed operator approval may have lost its response. Replay
-            # only the identical current decision; never renew TTL, reinstate
-            # a revoked grant, or treat a policy grant as an operator receipt.
-            events = self._read_all(self._activation_stream(request_id))
-            latest = events[-1]
-            if (approved and view.status == self.STATUS_GRANTED
-                    and latest.stream_version == view.version
-                    and latest.event_type == "mcp.activation-granted.v1"
-                    and latest.payload.get("reason") == "operator_approved"
-                    and latest.payload.get("approver_principal_id") == approver_principal_id):
+        if view.version != expected_version or view.status != self.STATUS_REQUESTED:
+            if self._is_decision_receipt(
+                request_id, approved, expected_version, approver_principal_id,
+            ):
                 return view
-            raise McpActivationError("activation_already_resolved")
+            raise McpActivationError("activation_version_conflict")
         now = self._now()
         if approved:
-            self._append_activation(
-                request_id,
-                "mcp.activation-granted.v1",
-                {
+            event_type = "mcp.activation-granted.v1"
+            payload = {
                     "request_id": str(request_id),
                     "server_id": view.server_id,
                     "launch_identity_digest": view.launch_identity_digest,
@@ -693,25 +708,38 @@ class ActivationService:
                     "approver_principal_id": approver_principal_id,
                     "reason": "operator_approved",
                     "expires_at": (now + self._ttl).isoformat(),
-                },
-                view.version,
-            )
+                    "decision_expected_version": expected_version,
+                    "decision_approved": True,
+                }
         else:
-            self._append_activation(
-                request_id,
-                "mcp.activation-denied.v1",
-                {
+            event_type = "mcp.activation-denied.v1"
+            payload = {
                     "request_id": str(request_id),
                     "server_id": view.server_id,
                     "launch_identity_digest": view.launch_identity_digest,
                     "execution_profile": view.execution_profile,
                     "principal_id": view.principal_id,
                     "scope": view.scope,
+                    "approver_principal_id": approver_principal_id,
                     "reason": "operator_denied",
-                },
-                view.version,
+                    "decision_expected_version": expected_version,
+                    "decision_approved": False,
+                }
+        try:
+            self._append_activation(
+                request_id, event_type, payload, expected_version,
             )
+        except WrongExpectedVersion:
+            if not self._is_decision_receipt(
+                request_id, approved, expected_version, approver_principal_id,
+            ):
+                raise McpActivationError("activation_version_conflict") from None
         return self._require_view(request_id)
+
+    def get_activation(self, request_id: UUID) -> ActivationView | None:
+        if not isinstance(request_id, UUID):
+            raise TypeError("request_id must be UUID")
+        return self._reconstruct(request_id)
 
     def pending_requests(self) -> tuple[ActivationView, ...]:
         # Pending mcp_process_start ASKs for status/approve/deny APIs.
@@ -750,12 +778,19 @@ class ActivationService:
         head = -1 if not history else history[-1].stream_version
         if head != view.version or history[-1].event_type != "mcp.activation-granted.v1":
             raise McpActivationError("mcp_no_effective_grant")
-        attempt = sum(
-            1
-            for event in self._store.read_all(after_position=0, limit=10_000)
-            if event.event_type == "mcp.process-intended.v1"
-            and event.payload.get("request_id") == str(view.request_id)
-        )
+        prior_allocations = self._allocations_for_request(view.request_id)
+        if prior_allocations:
+            latest = prior_allocations[-1]
+            if latest.status == self.ALLOCATION_INTENDED:
+                return AllocationIntent(
+                    latest.request_id, latest.allocation_id, latest.attempt,
+                    latest.grant_version,
+                )
+            if latest.status not in (
+                self.ALLOCATION_STOPPED, self.ALLOCATION_FAILED_BEFORE_START,
+            ):
+                raise McpActivationError("mcp_allocation_reconciliation_required")
+        attempt = len(prior_allocations)
         allocation_id = uuid5(
             view.request_id, f"allocation:{attempt}",
         )
@@ -810,6 +845,95 @@ class ActivationService:
         return AllocationIntent(
             view.request_id, allocation_id, attempt, view.version,
         )
+
+    def get_allocation(self, allocation_id: UUID) -> AllocationView | None:
+        if not isinstance(allocation_id, UUID):
+            raise TypeError("allocation_id must be UUID")
+        return self._reconstruct_allocation(allocation_id)
+
+    def reconcile_allocation(
+        self,
+        allocation_id: UUID,
+        *,
+        expected_version: int,
+        outcome: str,
+        evidence_kind: str,
+        evidence_digest: str,
+        reconciler_principal_id: str,
+    ) -> AllocationView:
+        if not isinstance(allocation_id, UUID):
+            raise TypeError("allocation_id must be UUID")
+        if type(expected_version) is not int or expected_version < 0:
+            raise TypeError("expected_version must be a non-negative int")
+        allowed = {
+            "failed_before_start": (
+                "mcp.process-failed-before-start.v1",
+                {self.ALLOCATION_INTENDED, self.ALLOCATION_CLAIMED},
+            ),
+            "outcome_unknown": (
+                "mcp.process-outcome-unknown.v1",
+                {self.ALLOCATION_CLAIMED, self.ALLOCATION_STARTED, self.ALLOCATION_READY},
+            ),
+            "stopped": (
+                "mcp.process-stopped.v1",
+                {self.ALLOCATION_STARTED, self.ALLOCATION_READY,
+                 self.ALLOCATION_OUTCOME_UNKNOWN},
+            ),
+        }
+        if outcome not in allowed:
+            raise ValueError("unsupported allocation recovery outcome")
+        if not isinstance(evidence_kind, str) or not evidence_kind:
+            raise TypeError("evidence_kind must be non-empty text")
+        if not isinstance(evidence_digest, str) or len(evidence_digest) != 64 or any(
+            value not in "0123456789abcdef" for value in evidence_digest
+        ):
+            raise TypeError("evidence_digest must be lowercase sha256")
+        if not isinstance(reconciler_principal_id, str) or not reconciler_principal_id:
+            raise TypeError("reconciler_principal_id must be non-empty text")
+        event_type, source_states = allowed[outcome]
+        view = self._reconstruct_allocation(allocation_id)
+        if view is None:
+            raise McpActivationError("mcp_allocation_missing")
+        if view.version != expected_version or view.status not in source_states:
+            if self._is_allocation_recovery_receipt(
+                allocation_id, expected_version, outcome, evidence_kind,
+                evidence_digest, reconciler_principal_id,
+            ):
+                return view
+            raise McpActivationError("mcp_allocation_version_conflict")
+        payload = {
+            "request_id": str(view.request_id),
+            "allocation_id": str(view.allocation_id),
+            "claim_token": None if view.claim_token is None else str(view.claim_token),
+            "launch_identity_digest": view.launch_identity_digest,
+            "reason": "reconciled_" + outcome,
+            "evidence_kind": evidence_kind,
+            "evidence_digest": evidence_digest,
+            "reconciler_principal_id": reconciler_principal_id,
+            "recovery_expected_version": expected_version,
+            "recovery_outcome": outcome,
+        }
+        event = self._event(
+            "mcp-process-reconcile", event_type, payload, view.request_id,
+        )
+        try:
+            self._store.append_batch(
+                (StreamWrite(
+                    self._allocation_stream(allocation_id), expected_version,
+                    (event,),
+                ),),
+                idempotency_key=event.metadata.command_id,
+                request_fingerprint=_canonical_json({
+                    "action": "allocation_reconcile", "payload": payload,
+                }),
+            )
+        except WrongExpectedVersion:
+            if not self._is_allocation_recovery_receipt(
+                allocation_id, expected_version, outcome, evidence_kind,
+                evidence_digest, reconciler_principal_id,
+            ):
+                raise McpActivationError("mcp_allocation_version_conflict") from None
+        return self._reconstruct_allocation(allocation_id)
 
 
     def claim(
@@ -1081,11 +1205,145 @@ class ActivationService:
             and self._now() >= view.expires_at
         )
 
+    def _allocations_for_request(self, request_id: UUID) -> tuple[AllocationView, ...]:
+        identities: list[UUID] = []
+        cursor = 0
+        while True:
+            page = self._store.read_all(after_position=cursor, limit=500)
+            for event in page:
+                if (
+                    event.event_type == "mcp.process-intended.v1"
+                    and event.payload.get("request_id") == str(request_id)
+                ):
+                    try:
+                        identities.append(UUID(event.payload["allocation_id"]))
+                    except (KeyError, TypeError, ValueError):
+                        raise McpActivationError("mcp_allocation_corrupt") from None
+            if len(page) < 500:
+                break
+            cursor = page[-1].global_position
+        values = []
+        for allocation_id in identities:
+            view = self._reconstruct_allocation(allocation_id)
+            if view is None:
+                raise McpActivationError("mcp_allocation_corrupt")
+            values.append(view)
+        return tuple(values)
+
+    def _reconstruct_allocation(
+        self, allocation_id: UUID,
+    ) -> AllocationView | None:
+        events = self._read_all(self._allocation_stream(allocation_id))
+        if not events:
+            return None
+        first = events[0]
+        if first.event_type != "mcp.process-intended.v1":
+            raise McpActivationError("mcp_allocation_corrupt")
+        payload = first.payload
+        try:
+            request_id = UUID(payload["request_id"])
+            if UUID(payload["allocation_id"]) != allocation_id:
+                raise ValueError
+            attempt = int(payload["attempt"])
+            grant_version = int(payload["grant_version"])
+            launch_digest = str(payload["launch_identity_digest"])
+            principal_id = str(payload["principal_id"])
+        except (KeyError, TypeError, ValueError):
+            raise McpActivationError("mcp_allocation_corrupt") from None
+        status = self.ALLOCATION_INTENDED
+        claim_epoch = 0
+        claim_token = None
+        for event in events[1:]:
+            event_type = event.event_type
+            if event_type == "mcp.process-claimed.v1":
+                status = self.ALLOCATION_CLAIMED
+                try:
+                    claim_epoch = int(event.payload["claim_epoch"])
+                    claim_token = UUID(event.payload["claim_token"])
+                except (KeyError, TypeError, ValueError):
+                    raise McpActivationError("mcp_allocation_corrupt") from None
+            elif event_type in (
+                "mcp.process-started.v1", "mcp.process-start-observed.v1",
+            ):
+                status = self.ALLOCATION_STARTED
+            elif event_type == "mcp.process-ready.v1":
+                status = self.ALLOCATION_READY
+            elif event_type == "mcp.process-stopped.v1":
+                status = self.ALLOCATION_STOPPED
+            elif event_type == "mcp.process-failed-before-start.v1":
+                status = self.ALLOCATION_FAILED_BEFORE_START
+            elif event_type == "mcp.process-outcome-unknown.v1":
+                status = self.ALLOCATION_OUTCOME_UNKNOWN
+            elif event_type == "mcp.process-outcome-resolved.v1":
+                resolved = event.payload.get("resolved_state")
+                if resolved == "stopped":
+                    status = self.ALLOCATION_STOPPED
+                elif resolved == "failed_before_start":
+                    status = self.ALLOCATION_FAILED_BEFORE_START
+                else:
+                    raise McpActivationError("mcp_allocation_corrupt")
+            else:
+                raise McpActivationError("mcp_allocation_corrupt")
+        return AllocationView(
+            request_id, allocation_id, status, events[-1].stream_version,
+            attempt, grant_version, launch_digest, principal_id,
+            claim_epoch, claim_token,
+        )
+
+    def _is_allocation_recovery_receipt(
+        self,
+        allocation_id: UUID,
+        expected_version: int,
+        outcome: str,
+        evidence_kind: str,
+        evidence_digest: str,
+        reconciler_principal_id: str,
+    ) -> bool:
+        events = self._read_all(self._allocation_stream(allocation_id))
+        if not events:
+            return False
+        latest = events[-1]
+        return (
+            latest.stream_version == expected_version + 1
+            and latest.payload.get("recovery_expected_version") == expected_version
+            and latest.payload.get("recovery_outcome") == outcome
+            and latest.payload.get("evidence_kind") == evidence_kind
+            and latest.payload.get("evidence_digest") == evidence_digest
+            and latest.payload.get("reconciler_principal_id")
+            == reconciler_principal_id
+        )
+
     def _require_view(self, request_id: UUID) -> ActivationView:
         view = self._reconstruct(request_id)
         if view is None:
             raise McpActivationError("activation_request_missing")
         return view
+
+    def _is_decision_receipt(
+        self,
+        request_id: UUID,
+        approved: bool,
+        expected_version: int,
+        approver_principal_id: str,
+    ) -> bool:
+        events = self._read_all(self._activation_stream(request_id))
+        if not events:
+            return False
+        latest = events[-1]
+        expected_type = (
+            "mcp.activation-granted.v1" if approved
+            else "mcp.activation-denied.v1"
+        )
+        return (
+            latest.stream_version == expected_version + 1
+            and latest.event_type == expected_type
+            and latest.payload.get("decision_expected_version") == expected_version
+            and latest.payload.get("decision_approved") is approved
+            and latest.payload.get("approver_principal_id") == approver_principal_id
+            and latest.payload.get("reason") == (
+                "operator_approved" if approved else "operator_denied"
+            )
+        )
 
     def _reconstruct(self, request_id: UUID) -> ActivationView | None:
         events = self._read_all(self._activation_stream(request_id))
@@ -1237,6 +1495,7 @@ __all__ = [
     "ActivationService",
     "ActivationView",
     "AllocationIntent",
+    "AllocationView",
     "AuthorizedLaunchTicket",
     "CodeArtifactIdentity",
     "EnvironmentIdentity",

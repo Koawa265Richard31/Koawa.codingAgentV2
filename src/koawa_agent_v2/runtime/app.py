@@ -18,7 +18,7 @@ from ..control.models import TERMINAL_TURN_STATUSES, TurnStatus
 from ..execution.loop import AgentLoopApprovalWaiting
 from ..execution.worker import TurnWorkerResult
 from ..ledger.recovery import ToolRecoveryManager
-from ..mcp.activation import ActivationView
+from ..mcp.activation import ActivationView, McpActivationError
 from ..recovery import CheckpointStore, RecoveryCoordinator
 from ..sandbox.runtime import DockerSandboxDoctor
 from .assembly import (
@@ -343,23 +343,22 @@ class AppRuntime:
         request_id: str | UUID,
         approved: bool,
         *,
+        expected_version: int | None = None,
         resume_after: bool = True,
     ) -> CommandOutcome:
         try:
             resolved_id = UUID(str(request_id))
             # mcp_process_start activation grant: writes ONLY the durable
             # grant; the operator re-issues the same semantic command (I6 §8.5).
-            activation_request = next(
-                (
-                    item
-                    for item in self.assembled.activation.pending_requests()
-                    if item.request_id == resolved_id
-                ),
-                None,
-            )
+            activation_request = self.assembled.activation.get_activation(resolved_id)
             if activation_request is not None:
+                if expected_version is None:
+                    return CommandOutcome(
+                        False, "activation_expected_version_required", {},
+                    )
                 view = self.assembled.activation.resolve_activation(
-                    resolved_id, approved, approver_principal_id="operator",
+                    resolved_id, approved, expected_version=expected_version,
+                    approver_principal_id="operator",
                 )
                 document = _activation_document(view)
                 if view.execution_profile == "host_trusted":
@@ -395,7 +394,7 @@ class AppRuntime:
             return CommandOutcome(True, f"approval_{updated.status.value}", payload)
         except StopIteration:
             return CommandOutcome(False, "approval_request_not_found", {})
-        except (RuntimeAssemblyError, AgentError) as exc:
+        except (RuntimeAssemblyError, AgentError, McpActivationError) as exc:
             return _failure(exc)
         except ValueError:
             return CommandOutcome(False, "invalid_approval_request_id", {})

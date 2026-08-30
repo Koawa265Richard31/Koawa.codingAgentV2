@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -30,8 +31,10 @@ from koawa_agent_v2.workspace.effects import (
 )
 from tests.fixtures.stability_fault_worker import TERMINAL_POINTS
 from tests.fixtures.stability_activation_faults import ACTIVATION_POINTS
+from tests.fixtures.stability_artifact_faults import ARTIFACT_POINTS
+from tests.fixtures.stability_allocation_faults import ALLOCATION_POINTS
 from tests.fixtures.stability_s3_faults import (
-    CHECKPOINT_POINTS, EXPORT_POINTS, MIGRATION_POINTS, S3_POINTS,
+    CANARY, CHECKPOINT_POINTS, EXPORT_POINTS, MIGRATION_POINTS, S3_POINTS,
 )
 from tests.fixtures.legacy_builder import build_legacy_database
 from tests.fixtures.stability_trace_faults import TRACE_POINTS, RETRY_LIMIT
@@ -50,8 +53,22 @@ class I8FaultRegistryTest(unittest.TestCase):
         self.assertEqual(set(names), set(FAULT_SPECS))
         for spec in FAULT_REGISTRY:
             self.assertEqual(spec.point_class.value, spec.marker_timing)
-            self.assertIn("durable_events", spec.expected_event_delta)
-            self.assertGreaterEqual(spec.expected_event_delta["durable_events"], 0)
+            self.assertIn("durable_events", spec.expected_event_delta.counters)
+            self.assertGreaterEqual(
+                spec.expected_event_delta.counters["durable_events"], 0,
+            )
+            self.assertEqual(
+                len(spec.expected_event_delta.stream_categories),
+                len(set(spec.expected_event_delta.stream_categories)),
+            )
+        takeover = FAULT_SPECS["d11.takeover.after_commit"].expected_event_delta
+        self.assertEqual(1, takeover.counters["durable_events"])
+        self.assertEqual(1, takeover.per_fact["message_count"])
+        terminal = FAULT_SPECS["d11.terminal.after_commit"].expected_event_delta
+        self.assertEqual(4, terminal.variants["child_parent_active_durable_events"]["durable_events"])
+        catalog = FAULT_SPECS["s4.mcp.list.after_catalog_commit"].expected_event_delta
+        self.assertEqual(0, catalog.counters["durable_events"])
+        self.assertEqual(1, catalog.counters["catalog_snapshots"])
         root = Path(__file__).parents[1] / "src" / "koawa_agent_v2"
         from scripts.stability_fault_audit import audit_sites
         audit = audit_sites(root)
@@ -160,6 +177,106 @@ class I8FaultBehaviorTest(unittest.TestCase):
 
 
 class I8ProcessKillTest(unittest.TestCase):
+    def test_allocation_and_external_process_windows_reconcile_exact_identity(self):
+        repo = Path(__file__).resolve().parents[1]
+        worker = repo / "tests/fixtures/stability_fault_worker.py"
+        environment = {**os.environ, "PYTHONPATH": os.pathsep.join((str(repo), str(repo / "src")))}
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for point in ALLOCATION_POINTS:
+            sequences = []
+            for repetition in range(2):
+                with self.subTest(point=point, repetition=repetition), tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    process = subprocess.Popen(
+                        [sys.executable, str(worker), "crash", str(root), point],
+                        cwd=repo, env=environment, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, creationflags=flags,
+                    )
+                    child_pid = None
+                    try:
+                        deadline = time.monotonic() + 30
+                        while not (root / "ready.json").exists():
+                            if process.poll() is not None:
+                                output, error = process.communicate()
+                                self.fail(f"allocation worker exited before {point}: {output}\n{error}")
+                            if time.monotonic() >= deadline:
+                                self.fail(f"allocation worker failed to reach {point}")
+                            time.sleep(.02)
+                        marker = json.loads((root / "ready.json").read_text())
+                        if marker.get("child"):
+                            child_pid = marker["child"]["pid"]
+                        self.assertEqual(FAULT_SPECS[point].point_class.value, marker["point_class"])
+                        process.kill()
+                        process.communicate(timeout=10)
+                        recovered = subprocess.run(
+                            [sys.executable, str(worker), "recover", str(root)],
+                            cwd=repo, env=environment, capture_output=True, text=True,
+                            timeout=30, creationflags=flags,
+                        )
+                        self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
+                        result = json.loads((root / "recovered.json").read_text())
+                        self.assertFalse(result["child_alive"])
+                        self.assertIn(result["status"], ("stopped", "failed_before_start"))
+                        sequences.append(result["normalized_events"])
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.communicate(timeout=10)
+                        if child_pid is not None:
+                            try:
+                                os.kill(child_pid, 15)
+                            except OSError:
+                                pass
+            self.assertEqual(sequences[0], sequences[1])
+
+    def test_artifact_apply_retest_deliver_kill_windows_fail_closed(self):
+        repo = Path(__file__).resolve().parents[1]
+        worker = repo / "tests/fixtures/stability_fault_worker.py"
+        environment = {**os.environ, "PYTHONPATH": os.pathsep.join((str(repo), str(repo / "src")))}
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for point in ARTIFACT_POINTS:
+            sequences = []
+            for repetition in range(2):
+                with self.subTest(point=point, repetition=repetition), tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    process = subprocess.Popen(
+                        [sys.executable, str(worker), "crash", str(root), point],
+                        cwd=repo, env=environment, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, creationflags=flags,
+                    )
+                    try:
+                        deadline = time.monotonic() + 40
+                        while not (root / "ready.json").exists():
+                            if process.poll() is not None:
+                                output, error = process.communicate()
+                                self.fail(f"artifact worker exited before {point}: {output}\n{error}")
+                            if time.monotonic() >= deadline:
+                                self.fail(f"artifact worker failed to reach {point}")
+                            time.sleep(.02)
+                        marker = json.loads((root / "ready.json").read_text())
+                        self.assertEqual(point, marker["point"])
+                        self.assertEqual(FAULT_SPECS[point].point_class.value, marker["point_class"])
+                        if point.endswith("after_effect_before_ack"):
+                            self.assertTrue(marker["external_marker"])
+                        process.kill()
+                        process.communicate(timeout=10)
+                        self.assertNotEqual(0, process.returncode)
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.communicate(timeout=10)
+                    recovered = subprocess.run(
+                        [sys.executable, str(worker), "recover", str(root)],
+                        cwd=repo, env=environment, capture_output=True, text=True,
+                        timeout=40, creationflags=flags,
+                    )
+                    self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
+                    result = json.loads((root / "recovered.json").read_text())
+                    expected = "applied" if point.endswith("after_intent_commit") else "outcome_unknown"
+                    self.assertEqual(expected, result["state"])
+                    sequences.append(result["normalized_events"])
+            self.assertEqual(sequences[0], sequences[1])
+
     def test_activation_request_and_grant_kill_replay_without_launch_or_renewal(self):
         repo = Path(__file__).resolve().parents[1]
         worker = repo / "tests/fixtures/stability_fault_worker.py"
@@ -322,6 +439,18 @@ class I8ProcessKillTest(unittest.TestCase):
             base = Path(raw)
             legacy_seed = base / "legacy-seed.db"
             build_legacy_database(legacy_seed, include_active_turn=True)
+            keeper = sqlite3.connect(legacy_seed, isolation_level=None)
+            self.assertEqual("wal", keeper.execute("PRAGMA journal_mode=WAL").fetchone()[0])
+            keeper.execute("PRAGMA wal_autocheckpoint=0")
+            keeper.execute(
+                "UPDATE events SET payload_json=? WHERE event_type='turn.completed.v1'",
+                (json.dumps({"summary": "wal-export-result " + CANARY}),),
+            )
+            legacy_media = {
+                suffix: Path(str(legacy_seed) + suffix).read_bytes()
+                for suffix in ("", "-wal", "-shm")
+            }
+            keeper.close()
             normalized = {}
             for point in S3_POINTS:
                 for repetition in range(2):
@@ -329,7 +458,8 @@ class I8ProcessKillTest(unittest.TestCase):
                         root = base / f"{point}-{repetition}"
                         root.mkdir()
                         if point in EXPORT_POINTS:
-                            shutil.copyfile(legacy_seed, root / "legacy.db")
+                            for suffix, contents in legacy_media.items():
+                                Path(str(root / "legacy.db") + suffix).write_bytes(contents)
                         process = subprocess.Popen(
                             [sys.executable, str(worker), "crash", str(root), point],
                             cwd=repo, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

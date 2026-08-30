@@ -85,11 +85,15 @@ def crash_activation(root, point, variant):
     if variant == "operator" and point != ACTIVATION_POINTS[0]:
         view = plan(service, identity, "ask")
     request = {"point": point, "variant": variant, "baseline_count": len(store.read_all()),
-               "launch_digest": identity.config_digest}
+               "launch_digest": identity.config_digest,
+               "decision_expected_version": None if view is None else view.version}
     atomic_json(root / "request.json", request)
     service = ActivationService(store, clock=lambda: START, fault_port=ActivationKillPort(root, request))
     if view is not None:
-        service.resolve_activation(view.request_id, True, approver_principal_id="fixture-operator")
+        service.resolve_activation(
+            view.request_id, True, expected_version=view.version,
+            approver_principal_id="fixture-operator",
+        )
     else:
         plan(service, identity, "allow" if variant == "policy" else "ask")
     raise AssertionError("activation missed production hook")
@@ -106,6 +110,7 @@ def recover_activation(root):
     service = ActivationService(store, clock=lambda: now)
     point, variant = marker["point"], marker["variant"]
     request_id = UUID(marker["request_id"])
+    decision_expected_version = request["decision_expected_version"]
     prior = service._reconstruct(request_id)
     if point == ACTIVATION_POINTS[0]:
         result = plan(service, identity, "ask")
@@ -113,7 +118,10 @@ def recover_activation(root):
     elif variant == "policy":
         result = plan(service, identity, "allow")
     else:
-        result = service.resolve_activation(request_id, True, approver_principal_id="fixture-operator")
+        result = service.resolve_activation(
+            request_id, True, expected_version=decision_expected_version,
+            approver_principal_id="fixture-operator",
+        )
     first_digest = event_digest(store)
     now += timedelta(seconds=20)
     for _ in range(2):
@@ -122,18 +130,29 @@ def recover_activation(root):
         elif variant == "policy":
             again = plan(service, identity, "allow")
         else:
-            again = service.resolve_activation(request_id, True, approver_principal_id="fixture-operator")
+            again = service.resolve_activation(
+                request_id, True, expected_version=decision_expected_version,
+                approver_principal_id="fixture-operator",
+            )
         assert again == result and event_digest(store) == first_digest
     if point == ACTIVATION_POINTS[2]:
         assert result == prior, "response loss renewed or changed a committed authorization"
     if result.status == "granted":
         assert not service.pending_requests()
         # Conflicting decisions and a different approver are not receipt replay.
+        conflict_expected_version = (
+            result.version if decision_expected_version is None
+            else decision_expected_version
+        )
         for approved, principal in ((False, "fixture-operator"), (True, "other-operator")):
             try:
-                service.resolve_activation(request_id, approved, approver_principal_id=principal)
+                service.resolve_activation(
+                    request_id, approved,
+                    expected_version=conflict_expected_version,
+                    approver_principal_id=principal,
+                )
             except McpActivationError as exc:
-                assert exc.code == "activation_already_resolved"
+                assert exc.code == "activation_version_conflict"
             else:
                 raise AssertionError("conflicting authorization accepted")
         assert event_digest(store) == first_digest

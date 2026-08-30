@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4, uuid5
@@ -13,12 +14,16 @@ from uuid import uuid4, uuid5
 from koawa_agent_v2.agents.graph import AgentError
 from koawa_agent_v2.control.event_store import EventMetadata, NewEvent, StreamId, StreamWrite
 from koawa_agent_v2.control.sqlite_store import SqliteEventStore
+from koawa_agent_v2.telemetry.faults import InjectedFault, RecordingFaultPort
 from koawa_agent_v2.workspace.artifacts import (
     ArtifactPackageStore, ArtifactV2, TestEvidenceRef, package_from_snapshot,
 )
 from koawa_agent_v2.workspace.container import InjectedContainerRunner
 from koawa_agent_v2.workspace.content import capture_repository, repository_identity
-from koawa_agent_v2.workspace.effects import WorkspaceEffectStore
+from koawa_agent_v2.workspace.effects import (
+    WorkspaceEffectKind, WorkspaceEffectState, WorkspaceEffectStore,
+    workspace_effect_id,
+)
 from koawa_agent_v2.workspace.integration import (
     DurableArtifactIntegrator, IntegrationReceiptRef,
 )
@@ -100,6 +105,18 @@ class I7DurableIntegrationTest(unittest.TestCase):
             runner=InjectedContainerRunner(),
         )
 
+    def _faulting_integrator(self, point: str) -> DurableArtifactIntegrator:
+        effects = WorkspaceEffectStore(
+            self.events,
+            fault_port=RecordingFaultPort(raise_at=frozenset({point})),
+        )
+        return DurableArtifactIntegrator(
+            event_store=self.events, package_store=self.packages,
+            effect_store=effects, repo_root=self.repo,
+            integration_root=self.root / "integration",
+            runner=InjectedContainerRunner(),
+        )
+
     def test_source_removed_package_integrates_and_receipt_delivers(self) -> None:
         result = self.integrator.integrate(
             [self.artifact], test_argv=[sys.executable, "-c", "raise SystemExit(0)"],
@@ -128,6 +145,113 @@ class I7DurableIntegrationTest(unittest.TestCase):
         with self.assertRaises(AgentError) as raised:
             self.integrator.deliver(result.receipt, command_id=uuid4())
         self.assertEqual("integration_known_negative_not_deliverable", raised.exception.code)
+
+    def test_apply_faults_resume_only_before_claim_and_otherwise_become_unknown(self) -> None:
+        for phase in ("after_intent_commit", "after_claim_commit", "after_effect_before_ack"):
+            with self.subTest(phase=phase):
+                command = uuid4()
+                artifact = replace(self.artifact, artifact_id=uuid4())
+                point = "s5.workspace.apply." + phase
+                with self.assertRaises(InjectedFault):
+                    self._faulting_integrator(point).integrate(
+                        [artifact],
+                        test_argv=[sys.executable, "-c", "raise SystemExit(0)"],
+                        command_id=command,
+                    )
+                semantic = uuid5(
+                    command, f"artifact-apply:0:{artifact.artifact_id}",
+                )
+                effect_id = workspace_effect_id(
+                    WorkspaceEffectKind.ARTIFACT_APPLY, semantic,
+                )
+                if phase == "after_intent_commit":
+                    result = self.integrator.integrate(
+                        [artifact],
+                        test_argv=[sys.executable, "-c", "raise SystemExit(0)"],
+                        command_id=command,
+                    )
+                    self.assertEqual("success", result.test_result_kind)
+                else:
+                    with self.assertRaises(AgentError) as caught:
+                        self.integrator.integrate(
+                            [artifact],
+                            test_argv=[sys.executable, "-c", "raise SystemExit(0)"],
+                            command_id=command,
+                        )
+                    self.assertEqual("workspace_outcome_unknown", caught.exception.code)
+                    self.assertEqual(
+                        WorkspaceEffectState.OUTCOME_UNKNOWN,
+                        self.effects.load(effect_id).state,
+                    )
+
+    def test_retest_faults_resume_only_before_claim_and_otherwise_become_unknown(self) -> None:
+        for phase in ("after_intent_commit", "after_claim_commit", "after_effect_before_ack"):
+            with self.subTest(phase=phase):
+                command = uuid4()
+                artifact = replace(self.artifact, artifact_id=uuid4())
+                point = "s5.workspace.retest." + phase
+                with self.assertRaises(InjectedFault):
+                    self._faulting_integrator(point).integrate(
+                        [artifact],
+                        test_argv=[sys.executable, "-c", "raise SystemExit(0)"],
+                        command_id=command,
+                    )
+                semantic = uuid5(command, "artifact-retest")
+                effect_id = workspace_effect_id(
+                    WorkspaceEffectKind.ARTIFACT_RETEST, semantic,
+                )
+                if phase == "after_intent_commit":
+                    result = self.integrator.integrate(
+                        [artifact],
+                        test_argv=[sys.executable, "-c", "raise SystemExit(0)"],
+                        command_id=command,
+                    )
+                    self.assertEqual("success", result.test_result_kind)
+                else:
+                    with self.assertRaises(AgentError) as caught:
+                        self.integrator.integrate(
+                            [artifact],
+                            test_argv=[sys.executable, "-c", "raise SystemExit(0)"],
+                            command_id=command,
+                        )
+                    self.assertEqual("workspace_outcome_unknown", caught.exception.code)
+                    self.assertEqual(
+                        WorkspaceEffectState.OUTCOME_UNKNOWN,
+                        self.effects.load(effect_id).state,
+                    )
+
+    def _assert_delivery_fault(self, phase: str, *, resumes: bool) -> None:
+        receipt = self.integrator.integrate(
+            [self.artifact],
+            test_argv=[sys.executable, "-c", "raise SystemExit(0)"],
+            command_id=uuid4(),
+        ).receipt
+        command = uuid4()
+        with self.assertRaises(InjectedFault):
+            self._faulting_integrator(
+                "s5.workspace.deliver." + phase,
+            ).deliver(receipt, command_id=command)
+        if resumes:
+            self.integrator.deliver(receipt, command_id=command)
+            self.assertEqual(b"changed\n", (self.repo / "value.txt").read_bytes())
+        else:
+            with self.assertRaises(AgentError) as caught:
+                self.integrator.deliver(receipt, command_id=command)
+            self.assertEqual("workspace_outcome_unknown", caught.exception.code)
+            semantic = uuid5(command, "artifact-deliver")
+            effect = self.effects.load(workspace_effect_id(
+                WorkspaceEffectKind.ARTIFACT_DELIVER, semantic,
+            ))
+            self.assertEqual(WorkspaceEffectState.OUTCOME_UNKNOWN, effect.state)
+
+    def test_delivery_after_intent_fault_resumes_exact_command(self) -> None:
+        self._assert_delivery_fault("after_intent_commit", resumes=True)
+
+    def test_delivery_after_claim_fault_becomes_unknown(self) -> None:
+        self._assert_delivery_fault("after_claim_commit", resumes=False)
+
+    def test_delivery_after_effect_fault_becomes_unknown(self) -> None:
+        self._assert_delivery_fault("after_effect_before_ack", resumes=False)
 
     def test_forged_receipt_is_rejected(self) -> None:
         result = self.integrator.integrate(

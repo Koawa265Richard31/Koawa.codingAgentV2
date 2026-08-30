@@ -12,12 +12,12 @@ import json
 import os
 import shutil
 import stat
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from ..agents.graph import AgentError
+from .subprocesses import run_bounded
 
 
 MAX_ENTRIES = 10_000
@@ -263,14 +263,13 @@ def _git_bytes(root: Path, git: str, *arguments: str) -> bytes:
         "GIT_OPTIONAL_LOCKS": "0",
         "LC_ALL": "C",
     }
-    try:
-        result = subprocess.run(
-            [git, "-c", "core.hooksPath=", *arguments],
-            cwd=str(root), env=environment, capture_output=True,
-            timeout=GIT_TIMEOUT_SECONDS, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        raise AgentError("git_content_identity_failed") from None
+    result = run_bounded(
+        [git, "-c", "core.hooksPath=", *arguments], cwd=root,
+        environment=environment, timeout=GIT_TIMEOUT_SECONDS,
+        output_limit=MAX_TOTAL_BYTES + 1024 * 1024,
+        failure_code="git_content_identity_failed",
+        output_limit_code="git_content_output_limit",
+    )
     if result.returncode != 0:
         raise AgentError("git_content_identity_failed")
     return bytes(result.stdout)

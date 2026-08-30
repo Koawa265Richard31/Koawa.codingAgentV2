@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import stat
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +19,7 @@ from .effects import (
     workspace_effect_id, workspace_resource_nonce,
 )
 from .store import AgentWorkspaceStore
+from .subprocesses import run_bounded
 
 
 class WorktreeManager:
@@ -454,7 +454,8 @@ class WorktreeManager:
             if not raw or any(char in raw for char in (b"\x00", b"\r", b"\n")):
                 raise ValueError("invalid pointer")
             pointer = Path(os.fsdecode(raw))
-            if not pointer.is_absolute():
+            if (not pointer.is_absolute() or ".." in pointer.parts
+                    or os.path.normpath(os.fsdecode(raw)) != os.fsdecode(raw)):
                 raise ValueError("relative pointer")
             return pointer
         except (OSError, ValueError):
@@ -468,20 +469,21 @@ class WorktreeManager:
             "GIT_OPTIONAL_LOCKS": "0",
             "LC_ALL": "C",
         }
-        try:
-            result = subprocess.run(
-                [self.git_binary, "-c", "core.hooksPath=", *arguments],
-                cwd=self.repo_root, env=environment, capture_output=True,
-                timeout=60, check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except (OSError, subprocess.SubprocessError):
-            raise AgentError("git_worktree_failed") from None
+        return self._run_bounded(
+            [self.git_binary, "-c", "core.hooksPath=", *arguments],
+            environment=environment,
+        )
+
+    def _run_bounded(self, arguments: list[str], *, environment: dict[str, str]) -> bytes:
+        result = run_bounded(
+            arguments, cwd=self.repo_root, environment=environment,
+            timeout=60, output_limit=4 * 1024 * 1024,
+            failure_code="git_worktree_failed",
+            output_limit_code="git_worktree_output_limit",
+        )
         if result.returncode:
             raise AgentError("git_worktree_failed")
-        if len(result.stdout) > 4 * 1024 * 1024:
-            raise AgentError("git_worktree_output_limit")
-        return bytes(result.stdout)
+        return result.stdout
 
 
 def _sha(value: bytes) -> str:

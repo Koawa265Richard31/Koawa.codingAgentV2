@@ -93,8 +93,8 @@ def _reconstruct(store, seed):
 
 
 class S3KillPort(NoOpFaultPort):
-    def __init__(self, root: Path, request: dict):
-        self.root, self.request = root, request
+    def __init__(self, root: Path, request: dict, *, truth_store=None):
+        self.root, self.request, self.truth_store = root, request, truth_store
 
     def hit(self, point, facts):
         super().hit(point, facts)
@@ -119,7 +119,8 @@ class S3KillPort(NoOpFaultPort):
                 marker["partial_event_digest"] = event_digest(store_at(partial))
         else:
             path = root / "runtime.db"
-            assert event_digest(store_at(path)) == request["seed"]["dataset_digest"], "checkpoint_changed_truth"
+            assert self.truth_store is not None
+            assert event_digest(self.truth_store) == request["seed"]["dataset_digest"], "checkpoint_changed_truth"
             rows = _cache_rows(path)
             committed = point in (CHECKPOINT_POINTS[2], CHECKPOINT_POINTS[3])
             assert len(rows) == int(committed), "cache_commit_marker_misplaced"
@@ -135,6 +136,8 @@ def crash_s3(root: Path, point: str) -> None:
         raise ValueError("unsupported S3 scenario")
     request = {"point": point}
     path = root / "runtime.db"
+    store = None
+    keeper = None
     if point in MIGRATION_POINTS:
         build_versioned_v1_database(path)
         with closing(sqlite3.connect(path)) as connection:
@@ -149,6 +152,16 @@ def crash_s3(root: Path, point: str) -> None:
         source = root / "legacy.db"
         if not source.exists():
             build_legacy_database(source, canary=CANARY, include_active_turn=True)
+        if not Path(str(source) + "-wal").exists():
+            # Standalone worker fallback. The matrix normally supplies one
+            # byte-identical, genuinely generated WAL seed to every window.
+            keeper = sqlite3.connect(source, isolation_level=None)
+            assert keeper.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+            keeper.execute("PRAGMA wal_autocheckpoint=0")
+            keeper.execute(
+                "UPDATE events SET payload_json=? WHERE event_type='turn.completed.v1'",
+                (json.dumps({"summary": "wal-export-result " + CANARY}),),
+            )
         request["source_media"] = media_snapshot(source)
         (root / "export").mkdir(exist_ok=True)
         action = lambda: export_legacy_store(source, root / "export" / "fresh.db", canaries=[CANARY])
@@ -163,8 +176,12 @@ def crash_s3(root: Path, point: str) -> None:
         store = store_at(path)
         action = lambda: _reconstruct(store, seed) if point == CHECKPOINT_POINTS[3] else _publish(store, seed)
     atomic_json(root / "request.json", request)
-    with using_fault_port(S3KillPort(root, request)):
-        action()
+    try:
+        with using_fault_port(S3KillPort(root, request, truth_store=store)):
+            action()
+    finally:
+        if keeper is not None:
+            keeper.close()
     raise AssertionError("production operation missed S3 kill point")
 
 

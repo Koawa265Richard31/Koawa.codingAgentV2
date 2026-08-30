@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from .container import ContainerRunner
+from .container import ContainerResult, ContainerRunner
 from ..agents.graph import AgentError
 from ..control.event_store import EventMetadata, NewEvent, StreamId, StreamWrite
 from .artifacts import (
@@ -23,6 +23,7 @@ from .effects import (
     WorkspaceEffectKind, WorkspaceEffectResultKind, WorkspaceEffectState,
     WorkspaceEffectStore, workspace_effect_id,
 )
+from .subprocesses import run_bounded
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,8 +226,19 @@ class DurableArtifactIntegrator:
         if existing := self._load_receipt_head(receipt_id):
             return DurableIntegrationResult(existing, 0, "success")
         if self.integration_root.exists():
-            raise AgentError("integration_root_already_exists")
-        self._git("worktree", "add", "--detach", str(self.integration_root), ordered[0].base_commit)
+            if self._common_git_dir(self.integration_root) != self._common_git_dir(self.repo_root):
+                raise AgentError("integration_root_identity_mismatch")
+            existing_root = capture_repository(
+                self.integration_root, base_commit=ordered[0].base_commit,
+                git_binary=self.git_binary,
+            )
+            if existing_root.prestate.head_commit != ordered[0].base_commit:
+                raise AgentError("integration_root_identity_mismatch")
+        else:
+            self._git(
+                "worktree", "add", "--detach", str(self.integration_root),
+                ordered[0].base_commit,
+            )
         effect_refs: list[dict[str, object]] = []
         try:
             for index, artifact in enumerate(ordered):
@@ -289,8 +301,26 @@ class DurableArtifactIntegrator:
             )
             if existing is not None:
                 if existing.state is WorkspaceEffectState.APPLIED:
+                    self._release_matching_delivery_lease(
+                        payload["repository_identity_digest"], command_id,
+                    )
                     return
                 if existing.state is WorkspaceEffectState.OUTCOME_UNKNOWN:
+                    self._release_matching_delivery_lease(
+                        payload["repository_identity_digest"], command_id,
+                    )
+                    raise AgentError("workspace_outcome_unknown")
+                if existing.state is WorkspaceEffectState.CLAIMED:
+                    self.effects.record_outcome_unknown(
+                        existing.effect_id, expected_version=existing.version,
+                        claim_epoch=existing.claim_epoch,
+                        claim_token=existing.claim_token,
+                        uncertainty_code="artifact_delivery_uncertain",
+                        evidence_digest=None,
+                    )
+                    self._release_matching_delivery_lease(
+                        payload["repository_identity_digest"], command_id,
+                    )
                     raise AgentError("workspace_outcome_unknown")
             lease_version, lease_token = self._acquire_delivery_lease(
                 payload["repository_identity_digest"], command_id
@@ -300,17 +330,32 @@ class DurableArtifactIntegrator:
             )
             if before.prestate.head_commit != payload["base_commit"]:
                 raise AgentError("user_workspace_drift")
-            intended = self.effects.intend(
-                semantic_command_id=semantic, kind=WorkspaceEffectKind.ARTIFACT_DELIVER,
-                repository_identity_digest=payload["repository_identity_digest"],
-                agent_id=None, run_id=UUID(payload["receipt_id"]),
-                resource_ref="user-worktree", base_digest=_sha(payload["base_commit"].encode()),
-                input_digest=payload["artifact_set_digest"],
-                precondition_digest=before.prestate.prestate_digest,
-                expected_postcondition_digest=payload["integrated_content_digest"],
-            )
+            if existing is not None:
+                if (
+                    existing.repository_identity_digest
+                    != payload["repository_identity_digest"]
+                    or existing.agent_id is not None
+                    or existing.run_id != UUID(payload["receipt_id"])
+                    or existing.base_digest != _sha(payload["base_commit"].encode())
+                    or existing.input_digest != payload["artifact_set_digest"]
+                    or existing.precondition_digest != before.prestate.prestate_digest
+                    or existing.expected_postcondition_digest
+                    != payload["integrated_content_digest"]
+                ):
+                    raise AgentError("artifact_effect_identity_mismatch")
+                intended_record = existing
+            else:
+                intended_record = self.effects.intend(
+                    semantic_command_id=semantic, kind=WorkspaceEffectKind.ARTIFACT_DELIVER,
+                    repository_identity_digest=payload["repository_identity_digest"],
+                    agent_id=None, run_id=UUID(payload["receipt_id"]),
+                    resource_ref="user-worktree", base_digest=_sha(payload["base_commit"].encode()),
+                    input_digest=payload["artifact_set_digest"],
+                    precondition_digest=before.prestate.prestate_digest,
+                    expected_postcondition_digest=payload["integrated_content_digest"],
+                ).record
             claimed = self.effects.claim(
-                intended.record.effect_id, expected_version=intended.record.version,
+                intended_record.effect_id, expected_version=intended_record.version,
                 owner_id=self.owner_id,
             ).record
             try:
@@ -368,6 +413,15 @@ class DurableArtifactIntegrator:
         stream = StreamId("workspace-delivery-lease", lease_id)
         events = self.event_store.read_stream(stream, after_version=-1, limit=10_000)
         if events and events[-1].event_type == "workspace.delivery-lease-acquired.v1":
+            latest = events[-1]
+            epoch = latest.payload.get("epoch")
+            if type(epoch) is int:
+                acquire_command = uuid5(
+                    command_id, f"delivery-lease-acquire:{epoch}",
+                )
+                token = uuid5(acquire_command, "delivery-lease-token")
+                if latest.payload.get("lease_token") == str(token):
+                    return latest.stream_version, token
             raise AgentError("repository_delivery_lease_held")
         expected = events[-1].stream_version if events else -1
         epoch = (expected + 2) // 2
@@ -399,6 +453,30 @@ class DurableArtifactIntegrator:
         )
         return version, token
 
+    def _release_matching_delivery_lease(
+        self, repository_digest: str, command_id: UUID,
+    ) -> None:
+        lease_id = uuid5(
+            NAMESPACE_URL, "koawa-v2:delivery-lease:" + repository_digest,
+        )
+        stream = StreamId("workspace-delivery-lease", lease_id)
+        events = self.event_store.read_stream(
+            stream, after_version=-1, limit=10_000,
+        )
+        if not events or events[-1].event_type != "workspace.delivery-lease-acquired.v1":
+            return
+        latest = events[-1]
+        epoch = latest.payload.get("epoch")
+        if type(epoch) is not int:
+            raise AgentError("repository_delivery_lease_held")
+        acquire_command = uuid5(command_id, f"delivery-lease-acquire:{epoch}")
+        token = uuid5(acquire_command, "delivery-lease-token")
+        if latest.payload.get("lease_token") != str(token):
+            raise AgentError("repository_delivery_lease_held")
+        self._release_delivery_lease(
+            repository_digest, latest.stream_version, token, command_id,
+        )
+
     def _release_delivery_lease(
         self,
         repository_digest: str,
@@ -428,17 +506,67 @@ class DurableArtifactIntegrator:
         )
 
     def _run_apply_effect(self, semantic: UUID, artifact: ArtifactV2):
-        intended = self.effects.intend(
-            semantic_command_id=semantic, kind=WorkspaceEffectKind.ARTIFACT_APPLY,
-            repository_identity_digest=artifact.repository_identity_digest,
-            agent_id=artifact.agent_id, run_id=artifact.run_id,
-            resource_ref="integration-worktree", base_digest=_sha(artifact.base_commit.encode()),
-            input_digest=artifact.package.package_digest,
-            precondition_digest=artifact.repo_prestate_digest,
-            expected_postcondition_digest=artifact.working_tree_content_digest,
-        )
+        effect_id = workspace_effect_id(WorkspaceEffectKind.ARTIFACT_APPLY, semantic)
+        existing = self.effects.load(effect_id)
+        if existing is not None:
+            if (
+                existing.repository_identity_digest != artifact.repository_identity_digest
+                or existing.agent_id != artifact.agent_id
+                or existing.run_id != artifact.run_id
+                or existing.base_digest != _sha(artifact.base_commit.encode())
+                or existing.input_digest != artifact.package.package_digest
+                or existing.expected_postcondition_digest
+                != artifact.working_tree_content_digest
+            ):
+                raise AgentError("artifact_effect_identity_mismatch")
+            if existing.state is WorkspaceEffectState.APPLIED:
+                observed = capture_repository(
+                    self.integration_root, base_commit=artifact.base_commit,
+                    git_binary=self.git_binary,
+                )
+                if observed.working_tree_content_digest != existing.postcondition_digest:
+                    apply_package(
+                        self.packages.load(artifact.package),
+                        worktree=self.integration_root,
+                        git_binary=self.git_binary,
+                    )
+                    observed = capture_repository(
+                        self.integration_root, base_commit=artifact.base_commit,
+                        git_binary=self.git_binary,
+                    )
+                    if observed.working_tree_content_digest != existing.postcondition_digest:
+                        raise AgentError("artifact_projection_rebuild_failed")
+                return existing
+            if existing.state is WorkspaceEffectState.OUTCOME_UNKNOWN:
+                raise AgentError("workspace_outcome_unknown")
+            if existing.state is WorkspaceEffectState.CLAIMED:
+                observed = capture_repository(
+                    self.integration_root, base_commit=artifact.base_commit,
+                    git_binary=self.git_binary,
+                )
+                self.effects.record_outcome_unknown(
+                    existing.effect_id, expected_version=existing.version,
+                    claim_epoch=existing.claim_epoch,
+                    claim_token=existing.claim_token,
+                    uncertainty_code="artifact_apply_uncertain",
+                    evidence_digest=_digest_doc({
+                        "post": observed.working_tree_content_digest,
+                    }),
+                )
+                raise AgentError("workspace_outcome_unknown")
+        intended_record = existing
+        if intended_record is None:
+            intended_record = self.effects.intend(
+                semantic_command_id=semantic, kind=WorkspaceEffectKind.ARTIFACT_APPLY,
+                repository_identity_digest=artifact.repository_identity_digest,
+                agent_id=artifact.agent_id, run_id=artifact.run_id,
+                resource_ref="integration-worktree", base_digest=_sha(artifact.base_commit.encode()),
+                input_digest=artifact.package.package_digest,
+                precondition_digest=artifact.repo_prestate_digest,
+                expected_postcondition_digest=artifact.working_tree_content_digest,
+            ).record
         claimed = self.effects.claim(
-            intended.record.effect_id, expected_version=intended.record.version,
+            intended_record.effect_id, expected_version=intended_record.version,
             owner_id=self.owner_id,
         ).record
         try:
@@ -481,16 +609,53 @@ class DurableArtifactIntegrator:
             raise AgentError("artifact_test_evidence_invalid")
 
     def _run_retest_effect(self, semantic, artifacts, argv, timeout, post):
-        intended = self.effects.intend(
-            semantic_command_id=semantic, kind=WorkspaceEffectKind.ARTIFACT_RETEST,
-            repository_identity_digest=artifacts[0].repository_identity_digest,
-            agent_id=None, run_id=artifacts[0].run_id,
-            resource_ref="integration-worktree", base_digest=_sha(artifacts[0].base_commit.encode()),
-            input_digest=_digest_doc(argv), precondition_digest=post.prestate.prestate_digest,
-            expected_postcondition_digest=post.working_tree_content_digest,
-        )
+        effect_id = workspace_effect_id(WorkspaceEffectKind.ARTIFACT_RETEST, semantic)
+        existing = self.effects.load(effect_id)
+        if existing is not None:
+            if (
+                existing.repository_identity_digest
+                != artifacts[0].repository_identity_digest
+                or existing.agent_id is not None
+                or existing.run_id != artifacts[0].run_id
+                or existing.base_digest != _sha(artifacts[0].base_commit.encode())
+                or existing.input_digest != _digest_doc(argv)
+                or existing.expected_postcondition_digest
+                != post.working_tree_content_digest
+            ):
+                raise AgentError("artifact_effect_identity_mismatch")
+            if existing.state is WorkspaceEffectState.APPLIED:
+                image_digest = (
+                    existing.result.get("image_digest")
+                    if existing.result is not None else None
+                )
+                if not isinstance(image_digest, str):
+                    raise AgentError("integration_retest_evidence_missing")
+                return existing, ContainerResult(
+                    existing.exit_code, "", "", image_digest,
+                )
+            if existing.state is WorkspaceEffectState.OUTCOME_UNKNOWN:
+                raise AgentError("workspace_outcome_unknown")
+            if existing.state is WorkspaceEffectState.CLAIMED:
+                self.effects.record_outcome_unknown(
+                    existing.effect_id, expected_version=existing.version,
+                    claim_epoch=existing.claim_epoch,
+                    claim_token=existing.claim_token,
+                    uncertainty_code="artifact_retest_uncertain",
+                    evidence_digest=None,
+                )
+                raise AgentError("workspace_outcome_unknown")
+        intended_record = existing
+        if intended_record is None:
+            intended_record = self.effects.intend(
+                semantic_command_id=semantic, kind=WorkspaceEffectKind.ARTIFACT_RETEST,
+                repository_identity_digest=artifacts[0].repository_identity_digest,
+                agent_id=None, run_id=artifacts[0].run_id,
+                resource_ref="integration-worktree", base_digest=_sha(artifacts[0].base_commit.encode()),
+                input_digest=_digest_doc(argv), precondition_digest=post.prestate.prestate_digest,
+                expected_postcondition_digest=post.working_tree_content_digest,
+            ).record
         claimed = self.effects.claim(
-            intended.record.effect_id, expected_version=intended.record.version,
+            intended_record.effect_id, expected_version=intended_record.version,
             owner_id=self.owner_id,
         ).record
         try:
@@ -511,8 +676,18 @@ class DurableArtifactIntegrator:
             exit_code=result.exit_code, postcondition_digest=post.working_tree_content_digest,
             evidence_digest=_digest_doc({"exit_code": result.exit_code,
                                          "image_digest": result.image_digest}),
+            result={"image_digest": result.image_digest},
         ).record
         return effect, result
+
+    def _common_git_dir(self, root: Path) -> Path:
+        raw = self._git(
+            "-C", str(root), "rev-parse", "--git-common-dir",
+        ).strip()
+        candidate = Path(os.fsdecode(raw))
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        return candidate.resolve()
 
     def _record_receipt(self, receipt_id: UUID, payload: dict, command_id: UUID) -> IntegrationReceiptRef:
         digest = _digest_doc(payload)
@@ -560,17 +735,16 @@ class DurableArtifactIntegrator:
             "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "GIT_PAGER": "cat",
             "GIT_EXTERNAL_DIFF": "", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C",
         }
-        try:
-            result = subprocess.run(
-                [self.git_binary, "-c", "core.hooksPath=", *arguments],
-                cwd=self.repo_root, env=environment, capture_output=True,
-                timeout=60, check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            raise AgentError("git_integration_failed") from None
+        result = run_bounded(
+            [self.git_binary, "-c", "core.hooksPath=", *arguments],
+            cwd=self.repo_root, environment=environment, timeout=60,
+            output_limit=4 * 1024 * 1024,
+            failure_code="git_integration_failed",
+            output_limit_code="git_integration_output_limit",
+        )
         if result.returncode:
             raise AgentError("git_integration_failed")
-        return bytes(result.stdout[:4 * 1024 * 1024])
+        return result.stdout
 
 
 def _effect_ref(record) -> dict[str, object]:
