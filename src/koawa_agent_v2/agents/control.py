@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from ..telemetry.faults import FaultPoint, adapt_fault_callback
@@ -259,6 +260,12 @@ class AgentControlPlane:
         self.limits = limits or AgentBudgetLimits()
         self._clock = clock
         self._faults = adapt_fault_callback(faults, fault_port)
+        # Incremental, process-local index over the append-only global log.
+        # It never asserts truth: each scan consumes the durable tail after the
+        # last observed global position before returning the accumulated spawns.
+        self._spawn_scan_cursor = 0
+        self._spawn_scan_events: list = []
+        self._spawn_scan_lock = RLock()
 
     def now(self) -> datetime:
         value = self._clock()
@@ -603,6 +610,12 @@ class AgentControlPlane:
             return self._takeover(record, lease_seconds=lease_seconds)
         if record.state is AgentState.WAITING:
             return self._resume(record, lease_seconds=lease_seconds)
+        if record.state is AgentState.RUNNING:
+            # A concurrent winner already holds the agent: this caller lost the
+            # start/takeover race.  Report the stable conflict code (identical
+            # to the takeover CAS loop) instead of a state-shape error, so
+            # concurrent losers can retry/fail consistently.
+            raise AgentError("agent_takeover_conflict")
         raise AgentError("agent_attempt_state_invalid")
 
     def _start_fresh(
@@ -2911,18 +2924,20 @@ class AgentControlPlane:
             cursor = page[-1].stream_version
 
     def _scan_agent_spawns(self) -> list:
-        events = []
-        cursor = 0
-        while True:
-            page = self.event_store.read_all(after_position=cursor, limit=500)
-            events.extend(
-                event
-                for event in page
-                if event.event_type in ("agent.spawned.v1", "agent.spawned.v2")
-            )
-            if len(page) < 500:
-                return events
-            cursor = page[-1].global_position
+        with self._spawn_scan_lock:
+            cursor = self._spawn_scan_cursor
+            while True:
+                page = self.event_store.read_all(after_position=cursor, limit=500)
+                self._spawn_scan_events.extend(
+                    event
+                    for event in page
+                    if event.event_type in ("agent.spawned.v1", "agent.spawned.v2")
+                )
+                if page:
+                    cursor = page[-1].global_position
+                    self._spawn_scan_cursor = cursor
+                if len(page) < 500:
+                    return list(self._spawn_scan_events)
 
 
 
