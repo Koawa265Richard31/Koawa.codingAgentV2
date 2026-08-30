@@ -754,6 +754,7 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
                     semantic_command_id=semantic,
                     repository_identity_digest=repository_identity(config.repo),
                 )
+                history.mark_journal_written()
                 print(f"  journal written: {target}")
             except Exception as exc:
                 print(f"  journal failed: {getattr(exc, 'code', exc)}")

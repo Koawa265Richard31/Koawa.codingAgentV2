@@ -13,6 +13,7 @@ restart by re-reading the thread.
 
 from __future__ import annotations
 
+import math
 import re
 import hashlib
 import os
@@ -54,6 +55,25 @@ _SUMMARY_INSTRUCTION = (
     "following past turns (user requests and agent answers) into a short factual "
     "summary in the same language as the turns. Keep concrete facts: what was "
     "requested, what was changed, what failed, what remains. Never invent steps."
+)
+# D23 §6 recall tokenizer: ASCII word chunks plus contiguous CJK runs.
+_TOKEN_PATTERN = re.compile(
+    r"[A-Za-z0-9_]+|[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]+",
+    re.UNICODE,
+)
+_STOP_WORDS = frozenset(
+    {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "to",
+        "of", "in", "on", "for", "and", "or", "but", "with", "at", "by",
+        "from", "as", "it", "this", "that", "i", "you", "we", "they", "he",
+        "she", "not", "no", "do", "does", "did", "have", "has", "had",
+        "的", "了", "是", "在", "我", "你", "他", "她", "它", "们", "与",
+        "和", "或", "不", "也", "都", "就", "而", "及", "对", "从", "为",
+        "这", "那", "个", "等", "把", "被", "让", "用", "以", "其",
+        "这个", "那个", "这些", "那些", "一个", "什么", "怎么", "我们",
+        "你们", "他们", "没有", "可以", "需要", "应该", "进行", "已经",
+        "还是", "或者", "然后", "因为", "所以", "如果", "但是", "并且",
+    }
 )
 
 
@@ -176,6 +196,9 @@ class SessionHistory:
         self._turns: list[SessionTurn] = []
         self._compacted: list[CompactionResult] = []
         self._compacted_up_to = 0
+        # D23 §7 journal reminder state (turns since last successful journal).
+        self._last_journal_turn_count = 0
+        self._journal_changed_files: set[str] = set()
 
     @property
     def limits(self) -> SessionHistoryLimits:
@@ -212,6 +235,8 @@ class SessionHistory:
         if canon.value != turn.user_input:
             turn = replace(turn, user_input=canon.value)
         self._turns.append(turn)
+        # D23 §7.1: track new changed files for the journal reminder.
+        self._journal_changed_files.update(turn.changed_files)
 
     def _bounded_recent(self) -> list[SessionTurn]:
         recent = list(self._turns)
@@ -264,6 +289,9 @@ class SessionHistory:
         """
         self.maybe_compact()
         items: list[ModelContextItem] = []
+        reminder = self._journal_reminder()
+        if reminder is not None:
+            items.append(reminder)
         for index, block in enumerate(self._compacted):
             content = block.authoritative
             if block.summary is not None:
@@ -370,6 +398,44 @@ class SessionHistory:
         if not recorded:
             return None
         return recorded[-1]
+
+    def _journal_reminder(self) -> UserMessage | None:
+        """D23 §7.1 deterministic reminder for the next fresh interactive turn.
+
+        Any of: turns since the last successful journal >= journal_remind_turns;
+        the most recent turn is FAILED/TIMED_OUT/OUTCOME_UNKNOWN; or at least
+        journal_remind_changed_files new changed files since the last journal.
+        The reminder is a low-priority [session-memory-reminder] UserMessage,
+        never a system/developer instruction.
+        """
+        if not self._turns:
+            return None
+        turns_since = len(self._turns) - self._last_journal_turn_count
+        reasons: list[str] = []
+        if turns_since >= self._memory.journal_remind_turns:
+            reasons.append("turns_since_journal")
+        latest = self._turns[-1]
+        if latest.status in {"failed", "timed_out", "outcome_unknown"}:
+            reasons.append("recent_turn_failed")
+        new_files = len(self._journal_changed_files)
+        if new_files >= self._memory.journal_remind_changed_files:
+            reasons.append(f"changed_files={new_files}")
+        if not reasons:
+            return None
+        return UserMessage(
+            input_id="session:journal-reminder",
+            content=(
+                "[session-memory-reminder]"
+                "建议写入 /journal 检查点（低优先级）: "
+                + ",".join(reasons)
+                + "[/session-memory-reminder]"
+            ),
+        )
+
+    def mark_journal_written(self) -> None:
+        """Record a successful journal export so reminders reset (§7.1)."""
+        self._last_journal_turn_count = len(self._turns)
+        self._journal_changed_files = set()
 
     @classmethod
     def from_thread(
@@ -544,28 +610,52 @@ class SessionMemory:
         query: str,
         limit: int = 5,
     ) -> tuple[RecallHit, ...]:
-        """Rank completed turns of a thread by literal query-term hits."""
+        """Rank completed turns of a thread by D23 §6 IDF/recency scoring."""
         if not isinstance(query, str) or not query.strip():
             return ()
         if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
             raise ValueError("limit must be a positive integer")
-        terms = tuple(term for term in query.casefold().split() if term)
+        terms = _tokenize(query)
+        if not terms:
+            return ()
         resolved = UUID(str(thread_id))
         records = _thread_records(self._store, self._runtime, resolved)
+        if not records:
+            return ()
+        idf = _recall_idf(terms, records)
+        total = len(records)
         hits: list[RecallHit] = []
-        for turn, tools in records:
-            score = _recall_score(terms, turn, tools)
-            if score > 0:
-                hits.append(
-                    RecallHit(
-                        turn_id=turn.turn_id,
-                        user_input=turn.user_input,
-                        final_text=turn.final_text,
-                        tools=tools,
-                        files=turn.changed_files,
-                        score=score,
-                    )
+        for position, (turn, tools) in enumerate(records):
+            score = _recall_score(
+                terms, turn, tools,
+                total_turns=total, turn_position=position,
+            )
+            if score <= 0:
+                continue
+            weighted = 0.0
+            text_pool = f"{turn.user_input} {turn.final_text or ''}".casefold()
+            error_pool = (turn.error or "").casefold()
+            tool_pool = " ".join(tools).casefold()
+            file_pool = " ".join(turn.changed_files).casefold()
+            for term in terms:
+                weight = idf.get(term, 1.0)
+                if term in text_pool:
+                    weighted += 2.0 * weight
+                if term in error_pool:
+                    weighted += 1.5 * weight
+                if term in tool_pool or term in file_pool:
+                    weighted += 1.0 * weight
+            recency = 0.5 + 0.5 * ((position + 1) / total)
+            hits.append(
+                RecallHit(
+                    turn_id=turn.turn_id,
+                    user_input=turn.user_input,
+                    final_text=turn.final_text,
+                    tools=tools,
+                    files=turn.changed_files,
+                    score=weighted * recency,
                 )
+            )
         hits.sort(key=lambda hit: (-hit.score, str(hit.turn_id)))
         return tuple(hits[:limit])
 
@@ -803,17 +893,70 @@ def _recall_score(
     terms: tuple[str, ...],
     turn: SessionTurn,
     tools: tuple[str, ...],
+    *,
+    total_turns: int = 1,
+    turn_position: int = 0,
 ) -> float:
-    """Deterministic literal scoring: request/answer x2, tools/files x1."""
-    score = 0.0
+    """D23 §6 deterministic IDF/field-weight/recency scoring.
+
+    score = Σ(idf(token) * matched_field_weight) * recency, where idf uses the
+    corpus document frequency over the scanned turns and recency is
+    ``0.5 + 0.5 * (turn_position + 1) / total_turns`` (newest highest).
+    """
+    if not terms:
+        return 0.0
     text_pool = f"{turn.user_input} {turn.final_text or ''}".casefold()
+    error_pool = (turn.error or "").casefold()
+    score = 0.0
     for term in terms:
         if term in text_pool:
             score += 2.0
+        if term in error_pool:
+            score += 1.5
         for tool in tools:
             if term in tool.casefold():
                 score += 1.0
         for path in turn.changed_files:
             if term in path.casefold():
                 score += 1.0
-    return score
+    total = max(1, total_turns)
+    recency = 0.5 + 0.5 * ((turn_position + 1) / total)
+    return score * recency
+
+
+def _tokenize(text: str) -> tuple[str, ...]:
+    """D23 §6: Unicode casefold -> alnum/underscore tokens -> de-stopword,
+    de-duplicated preserving order."""
+    if not isinstance(text, str):
+        return ()
+    folded = text.casefold()
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for match in _TOKEN_PATTERN.findall(folded):
+        token = match.lower()
+        if token in _STOP_WORDS or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tuple(tokens)
+
+
+def _recall_idf(
+    terms: tuple[str, ...],
+    records: Sequence[tuple[SessionTurn, tuple[str, ...]]],
+) -> dict[str, float]:
+    """D23 §6 idf(t) = log((1+N)/(1+df(t)))+1 over the scanned corpus."""
+    document_frequency: dict[str, int] = {}
+    for turn, tools in records:
+        pool = {term for term in _tokenize(
+            f"{turn.user_input} {turn.final_text or ''} {turn.error or ''}"
+        )}
+        pool.update(tool.casefold() for tool in tools)
+        for term in terms:
+            if term in pool:
+                document_frequency[term] = document_frequency.get(term, 0) + 1
+    total = max(1, len(records))
+    return {
+        term: math.log((1 + total) / (1 + document_frequency.get(term, 0))) + 1.0
+        for term in terms
+    }
