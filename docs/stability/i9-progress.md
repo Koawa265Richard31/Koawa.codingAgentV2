@@ -70,6 +70,49 @@ reference 三批、24h soak 未取得）时由维护者指定启动**，本文�
 
 在完整生产发布门未恢复并通过前，不得使用“生产就绪”“正式发布完成”或等价表述。
 
+### 0.5 内部工程闭环最终证据（2026-09-01）
+
+以下记录绑定最终代码候选 `dd1c8863df3605d4e52c5ee7295ed090cb72e501`，用于判定 §0.2
+内部工程闭环；证据文件位于本机 TEMP/WSL 工作目录，不是生产发布包：
+
+- Windows Python 3.14.3 全量回归：898 discovered / 0 fail / 0 error / 22 skip，耗时
+  1362.851s；无 `ResourceWarning`。
+- Linux Ubuntu WSL2 原生 ext4：`pr-fast` 为 898 discovered / 875 pass / 0 fail /
+  0 error / 23 skip，耗时 242.083s；commit `dd1c886`；报告 digest
+  `53af141974bebfcfa26e0448d297ed53c4f30bb78f896e94ac3ccb764f6a49f6`；路径
+  `/home/koawa265/koawa-i9-dd1c8863-run1/repo/.dsh_tmp/i9-lanes/pr-fast-linux-dd1c8863.json`。
+  作为父候选 `67b610b` 的交叉记录，integration 为 29 pass / 0 fail / 0 error /
+  1 Docker skip，MCP 为 114 pass 全绿，pr-fast 为 873 pass / 0 fail / 0 error /
+  23 skip。
+- Linux 实测发现并修复了 POSIX env 大小写、`sys.executable`、symlink cleanup、
+  worktree metadata fail-closed，以及 MCP notification storm 导致 response starvation、
+  gate traceback 诊断问题；这些修复已包含在最终候选中。
+- 仓库外 fresh install smoke：fresh archive digest
+  `4f9d705bab1cbe24fe3bf6e7b6847a45c4e296c59bb21f9074ea76fd6f94f9a2`，wheel digest
+  `b9aae22139dc38ea1ceae996a7df5ad798f505ccf9c784234201a443963a6f8b`；离线安装后执行
+  `CLI run-status-resume-status` 与副作用核验一次通过。证据路径
+  `C:\Users\qaz14\AppData\Local\Temp\koawa-i9-dd1-d77985db0f7744daa058f65c29759b55\fresh-install-evidence.json`，
+  文件 hash `cd6a5ed96483d586f9f57ef23f2a71703ee751bf1ca4b9cdf27e0cc375d0e6c6`。
+- release-audit active 全部为 0；`credential_literals_present=false`；实际 key 与合成
+  canary 命中均为 0。期间修复了 `task-repo` 中 `sk-` 字样造成的假阳性。审计证据路径
+  `C:\Users\qaz14\AppData\Local\Temp\koawa-i9-dd1-d77985db0f7744daa058f65c29759b55\release-audit-canary-evidence.json`，
+  文件 hash `026c9fa3d4212e9c8e12dfd0ee1cd1a49333b02075328ab82fe5e36719b06233`。
+- 真实 SiliconFlow provider（精确模型 `Qwen/Qwen3.5-35B-A3B`）：四场景 10/10 PASS；
+  cleanup zero delta；报告路径
+  `C:\Users\qaz14\AppData\Local\Temp\i9-provider-df3e61ac28e34cf89134a2abb4140ac1.json`，
+  digest `91ae0e8d7e058c85ab9050cc10c9c2ad3822d805148949cefcafce872e04c662`；safe config
+  digest `19c6d7b01049c71dd94082273ffeaea11b5b42674d80cfdf6ba43382c615eb3c`。
+- Sol 审计结论：恢复、并发、ledger、resource、security 差异均已审查，无已知 P0/P1
+  阻断。
+- Docker 边界：Ubuntu 未运行 Docker daemon，Linux integration 的唯一 skip 属环境事实；
+  Docker/golden 已有 `da3983f` Windows/Docker Desktop 实测证据，内部工程闭环不要求在
+  Ubuntu 重跑 Docker daemon。
+
+据此，§0.2 必做项已完成；24h reference soak、双 OS 三连、正式发布材料等仍按 §0.3
+明确豁免。唯一准确完成声明仍为：
+
+> **I9 内部工程闭环完成，适合继续开发和长任务验证；未执行生产发布资格认证。**
+
 ## 一、GPT 前段（提交 f3c652b + 31c4d7d，约 4900 行）
 
 - `scripts/stability_gate.py`（lane runner，341 行）：七条 lane、逐 exact test id 记录、
@@ -113,6 +156,8 @@ reference 三批、24h soak 未取得）时由维护者指定启动**，本文�
 
 ## 三、Windows 侧 lane 证据（2026-09-01，Docker daemon 29.6.1 在线）
 
+本节保留收尾前的逐 lane 历史记录；最终候选的统一结果与闭环判定见 §0.5。
+
 | lane | 报告 | 结果 |
 |---|---|---|
 | docker | `.dsh_tmp/i9-lanes/docker-win-1.json` | ok（零 skip） |
@@ -126,9 +171,8 @@ reference 三批、24h soak 未取得）时由维护者指定启动**，本文�
 release-audit：全新 durable 库正向报告 `ok:true`、active 全零
 （`.dsh_tmp/i9-lanes/release-audit-demo.json`）；错误路径稳定码取证。
 
-注：上表 lane 报告的 `commit` 字段为提交前 HEAD（31c4d7d），实际被测代码是**包含 §二修复的
-工作树**（报告时点修复尚未提交）；官方候选运行须在收尾提交后带 build/config digest 重跑，
-该身份差异不构成完成证据。
+注：上表早期 lane 报告的 `commit` 字段为提交前 HEAD（31c4d7d），实际被测代码是包含 §二
+修复的工作树；该历史身份差异已由 §0.5 的最终候选记录覆盖，不得单独作为正式发布证据。
 
 manifest verifier fail-closed 演示（`.dsh_tmp/i9-release-demo/`）：用仅含 Windows 单轮的
 部分 manifest 连续触发三层稳定拒绝——`approved_skip_manifest_missing`（bundle 布局 root 规则）、
@@ -136,28 +180,31 @@ manifest verifier fail-closed 演示（`.dsh_tmp/i9-release-demo/`）：用仅�
 
 ## 四、原生产发布门未闭合事实（保留作历史基线）
 
-以下是 I9 原发布门 §11.8 截至本次决策时的真实状态。它们继续用于说明“未执行生产发布资格
-认证”的边界；其中已在 §0.3 明确豁免的项目，不再阻断 §0.2 的内部工程闭环。
+以下是 I9 原发布门 §11.8 的状态。它们继续用于说明“未执行生产发布资格认证”的边界；其中
+已在 §0.3 明确豁免的项目，不再阻断 §0.2 的内部工程闭环。
 
-1. **双 OS lane × 连续 3 次**：需 Linux 环境（Windows 单机无法产出 linux 序列）。
-2. **24h reference soak ×1**：需 reference 机与 attestation（I8 同源遗留）。
-3. **lane 报告统一 build/canonical-config 身份**：官方候选运行须全部 lane 携带
-   `--build-artifact-digest` / `--canonical-config-digest` 重跑（本次除 provider 外未带）。
-4. **fresh_demo_report 与 migration_reports**：未产出。
-5. **P0/P1 清零 + 独立 review 无阻断**：I8 遗留项仍开。
-6. 发布门第 3–7 条（canary、迁移证据、资源零遗留的正式核验）未做正式记录。
+1. **双 OS lane × 连续 3 次**：未按原合同完成；按 §0.3 豁免，已以一次真实 WSL2/ext4
+   Linux lane 完成内部工程验证。
+2. **24h reference soak ×1**：未执行；按 §0.3 豁免。
+3. **lane 报告统一 build/canonical-config 身份**：内部闭环已由 §0.5 最终候选、provider
+   报告及 safe config digest 绑定；未形成原合同要求的全套发布 manifest。
+4. **fresh_demo_report 与 migration_reports**：未形成正式发布报告包；fresh install smoke
+   已按 §0.5 完成，迁移自动化测试仍属于必做项。
+5. **P0/P1 清零 + 独立 review 无阻断**：已完成内部审计式评审，无已知 P0/P1；不等同于
+   组织级发布审批。
+6. 发布门第 3–7 条的正式发布材料、冻结包和上线 canary：未执行；凭据/环境安全 canary、
+   release-audit 与资源零遗留已按 §0.5 完成。
 
-按 §零的新口径，后续不再补齐第 1 项的“三轮”数量、第 2 项、正式 migration reports 或严格
-release manifest；但必须以一次真实 WSL2/ext4 Linux lane 替代 Linux 空缺，并完成最终候选身份
-绑定、资源零遗留、release audit、安全 canary、仓库外 fresh install smoke 与无已知 P0/P1 的
-审计式评审。
+按 §零的新口径，不再补齐第 1 项的“三轮”数量、第 2 项、正式 migration reports 或严格
+release manifest；§0.5 记录的内部工程闭环证据已满足当前收尾口径。
 
 ## 五、与 RT/J 轨道的接口
 
 RT/J v1.1 §8.1 启动前置要求「I9 已完成（证据：I9 记录、审批记录、冻结包 manifest）」。当前
-状态为**实现完成 + Windows 侧 lane 证据**，正式 release manifest 未满足（见 §四）。RT/J 核心
-切片是否放行由维护者依据本记录判定；J1 离线件不受影响。若后续仅完成 §零定义的内部工程
-闭环，RT/J 应引用该限定结论，不得将其等同于原合同要求的生产发布资格。
+状态为**I9 内部工程闭环完成**，但原生产 release manifest/审批前置未满足（见 §四），因此
+不得宣称生产就绪或原合同意义上的 I9 发布完成。RT/J 核心切片是否放行由维护者依据本记录
+判定；J1 离线件不受影响。RT/J 若引用 I9，只能引用唯一完成声明及其限定边界，不得将内部
+工程闭环等同于生产发布资格认证。
 
 ## 六、复现命令（PowerShell，v2/）
 
