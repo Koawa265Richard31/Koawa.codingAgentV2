@@ -7,6 +7,69 @@
 本记录作者接手收尾（复杂决策与审计侧）。排期事实：**I9 在 I8 完成门未闭合（77 点矩阵余量、
 reference 三批、24h soak 未取得）时由维护者指定启动**，本文即该决定的正式记录。
 
+## 零、维护者决策：I9 内部工程闭环（2026-09-01）
+
+### 0.1 决策背景与适用边界
+
+维护者于 2026-09-01 决定：本项目当前不计划上线，因此 I9 不再以完整的生产发布资格认证
+作为完成条件。I9 改按“内部工程闭环”收尾：保留能够直接降低长任务 Coding Agent 工程风险的
+验证，去除主要服务于上线审计、SLA 与发布合规的仪式性要求。
+
+本决定不否认或改写原 I9 合同及既有发布门事实。原生产发布门仍作为历史基线保留在本文
+§四；未满足其中被豁免的项目，不再阻断内部工程闭环，但仍意味着不得宣称已取得生产发布资格。
+
+### 0.2 内部工程闭环的必做项
+
+以下各项均须在最终候选代码上完成并留下可核对记录，方可结束 I9：
+
+1. **Windows 全量回归一次**：从 `v2/` 按 AGENTS.md 运行完整 unittest 集，确认最终候选没有
+   已知回归；环境型 skip 必须可解释，不得把强制场景静默降级为 skip。
+2. **真实 Linux lane 一次**：在本机 `Ubuntu` WSL2 的 Linux 原生 ext4 文件系统中，以最终
+   候选快照执行一次有意义的 Linux 序列。不得直接在 `/mnt/d` 的 v9fs 挂载目录中运行，也不得
+   以独立的 `docker-desktop` 发行版或仅有 Linux 容器外壳的 Windows 执行冒充 Linux host。
+   该 lane 应覆盖 Linux 特有的路径、权限、信号/进程回收、文件锁、Git worktree 与资源清理
+   行为；不要求机械重复三轮。
+3. **最终候选身份绑定的真实 provider lane 一次**：报告必须绑定最终 commit；如门禁使用构建
+   制品或 canonical config，则同时记录对应 digest。使用真实供应商验证正常响应、多轮、空
+   completion/重试、超时取消及清理，不再要求为同一候选反复付费执行。
+4. **资源零遗留与 release audit**：核验任务结束后无遗留非 daemon 线程、子进程、未回收句柄、
+   容器/worktree 或 active durable 状态；运行 release audit 并保存成功或可解释的失败记录。
+5. **凭据与环境安全 canary**：扫描持久化数据、WAL/数据库、事件、报告与构建产物，确认 API Key、
+   canary secret、credential 字段、完整环境变量及隐藏推理未落盘。此项是安全门，不属于下文被
+   豁免的“上线 canary”。
+6. **仓库外 fresh install smoke**：构建 wheel，在仓库外临时目录创建全新 venv 并安装该 wheel，
+   执行一次最小启动与恢复路径，证明 console script、包内资源和运行时 import 不依赖仓库根目录。
+   不要求另备 fresh machine。
+7. **迁移自动化测试**：现有 schema/data migration 自动化测试继续保留并必须通过；只豁免用于
+   正式发布签署的 migration 报告包。
+8. **最终独立审计式评审**：由未直接实施该变更的 Agent/评审者检查恢复、并发、外部副作用账本、
+   资源与安全边界，确认没有已知 P0/P1 阻断。无需组织级审批或发布签字。
+9. **文档一致性**：最终证据、已知限制和完成口径须回写本文，确保后续 Agent 不会把内部工程
+   闭环误报为生产发布认证。
+
+### 0.3 明确豁免的生产发布认证项
+
+以下项目对当前不计划上线的项目投入产出过低，经维护者明确豁免，不再阻断 I9 内部工程闭环：
+
+- 24h reference soak；
+- Windows/Linux 双 OS 各连续三轮；
+- reference 性能/稳定性 attestation；
+- 正式 `current-next`、`legacy-export` 等 migration 发布报告；
+- 严格 release manifest、冻结包签署及七天/十四天证据新鲜度窗口；
+- 组织级独立发布审批；
+- 面向真实上线流量的 canary/灰度流程。
+
+豁免不等于删除相应实现或测试：迁移自动化测试仍须保留，凭据/环境安全 canary 仍是必做安全门；
+24h soak 与正式发布材料也可在未来项目改变为上线目标时重新启用。
+
+### 0.4 完成声明约束
+
+全部 §0.2 项完成后，I9 的唯一准确完成声明为：
+
+> **I9 内部工程闭环完成，适合继续开发和长任务验证；未执行生产发布资格认证。**
+
+在完整生产发布门未恢复并通过前，不得使用“生产就绪”“正式发布完成”或等价表述。
+
 ## 一、GPT 前段（提交 f3c652b + 31c4d7d，约 4900 行）
 
 - `scripts/stability_gate.py`（lane runner，341 行）：七条 lane、逐 exact test id 记录、
@@ -71,7 +134,10 @@ manifest verifier fail-closed 演示（`.dsh_tmp/i9-release-demo/`）：用仅�
 部分 manifest 连续触发三层稳定拒绝——`approved_skip_manifest_missing`（bundle 布局 root 规则）、
 `report_time_invalid`（时间序校验）、`report_identity_missing`（lane 报告未携带 build 身份）。
 
-## 四、未完成 / 环境阻断（I9 发布门 §11.8 在本机不可全满足）
+## 四、原生产发布门未闭合事实（保留作历史基线）
+
+以下是 I9 原发布门 §11.8 截至本次决策时的真实状态。它们继续用于说明“未执行生产发布资格
+认证”的边界；其中已在 §0.3 明确豁免的项目，不再阻断 §0.2 的内部工程闭环。
 
 1. **双 OS lane × 连续 3 次**：需 Linux 环境（Windows 单机无法产出 linux 序列）。
 2. **24h reference soak ×1**：需 reference 机与 attestation（I8 同源遗留）。
@@ -81,11 +147,17 @@ manifest verifier fail-closed 演示（`.dsh_tmp/i9-release-demo/`）：用仅�
 5. **P0/P1 清零 + 独立 review 无阻断**：I8 遗留项仍开。
 6. 发布门第 3–7 条（canary、迁移证据、资源零遗留的正式核验）未做正式记录。
 
+按 §零的新口径，后续不再补齐第 1 项的“三轮”数量、第 2 项、正式 migration reports 或严格
+release manifest；但必须以一次真实 WSL2/ext4 Linux lane 替代 Linux 空缺，并完成最终候选身份
+绑定、资源零遗留、release audit、安全 canary、仓库外 fresh install smoke 与无已知 P0/P1 的
+审计式评审。
+
 ## 五、与 RT/J 轨道的接口
 
 RT/J v1.1 §8.1 启动前置要求「I9 已完成（证据：I9 记录、审批记录、冻结包 manifest）」。当前
 状态为**实现完成 + Windows 侧 lane 证据**，正式 release manifest 未满足（见 §四）。RT/J 核心
-切片是否放行由维护者依据本记录判定；J1 离线件不受影响。
+切片是否放行由维护者依据本记录判定；J1 离线件不受影响。若后续仅完成 §零定义的内部工程
+闭环，RT/J 应引用该限定结论，不得将其等同于原合同要求的生产发布资格。
 
 ## 六、复现命令（PowerShell，v2/）
 
