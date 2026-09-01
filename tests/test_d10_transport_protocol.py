@@ -488,6 +488,33 @@ class StdioTransportTest(unittest.TestCase):
                 self.fail("transport closed before overflow was observed")
         self.assertTrue(transport.closed)
 
+    def test_notification_burst_preserves_response_capacity_and_coalesces(self) -> None:
+        """Advisory notices cannot crowd correlated responses out of the queue."""
+        transport = self._transport(max_inbound_messages=1)
+        notification = JsonRpcNotification(
+            "2.0", "notifications/tools/list_changed"
+        )
+        response = JsonRpcResponse("2.0", 7, {"ok": True})
+
+        # Fill the bounded queue, then overflow it with a notification burst
+        # before the correlated response arrives.
+        for _ in range(32):
+            self.assertTrue(transport._enqueue(notification))
+        self.assertTrue(transport._enqueue(response))
+        self.assertIsNone(transport._overflow_code)
+
+        observed = []
+        while True:
+            try:
+                observed.append(transport.read(timeout=0))
+            except TransportTimeout:
+                break
+        self.assertEqual([response], [item for item in observed if item == response])
+        self.assertEqual(
+            1,
+            sum(isinstance(item, JsonRpcNotification) for item in observed),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

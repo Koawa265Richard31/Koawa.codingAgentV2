@@ -47,8 +47,10 @@ I1 Stage C rewrite.  Contract highlights:
   reading, so a chatty child can never deadlock.
 
 - The inbound message queue is bounded (``max_inbound_messages``).  A full
-  queue fails closed: an ``inbound_queue_overflow`` error is latched and a
-  fail-closed cleanup is triggered.
+  queue fails closed for requests/responses: an ``inbound_queue_overflow``
+  error is latched and a fail-closed cleanup is triggered.  Notifications are
+  advisory and may be dropped when the queue is full; MCP session handling
+  coalesces them into the pending-refresh signal.
 
 - ``send()`` validates the outbound frame (UTF-8 strict, length capped by
   ``max_frame_bytes``) before touching the pipe and records the three-state
@@ -477,6 +479,11 @@ class StdioTransport:
         self._messages: queue.Queue[object] = queue.Queue(
             maxsize=max_inbound_messages
         )
+        # A notification burst may fill the bounded message queue.  Keep one
+        # coalesced advisory notice out-of-band so a full queue cannot hide a
+        # required catalog refresh or force correlated responses to overflow.
+        self._notification_overflow_lock = threading.Lock()
+        self._notification_overflow: JsonRpcNotification | None = None
         self._owned: OwnedProcess | None = None
         self._threads: list[threading.Thread] = []
         self._temp: tempfile.TemporaryDirectory[str] | None = None
@@ -677,6 +684,11 @@ class StdioTransport:
     ) -> JsonRpcRequest | JsonRpcResponse | JsonRpcNotification:
         if self._overflow_code is not None:
             raise TransportOverflow()
+        with self._notification_overflow_lock:
+            notification = self._notification_overflow
+            self._notification_overflow = None
+        if notification is not None:
+            return notification
         try:
             item = self._messages.get(timeout=timeout)
         except queue.Empty:
@@ -892,6 +904,34 @@ class StdioTransport:
         try:
             self._messages.put_nowait(item)
         except queue.Full:
+            # Notifications are advisory and the session layer coalesces them
+            # into one refresh signal.  Do not let a notification burst evict
+            # the bounded queue's capacity for correlated responses: the
+            # latter must remain fail-closed when the queue is genuinely
+            # saturated.  Requests are not expected from an MCP server, but
+            # retain the same strict behavior as responses if they arrive.
+            if isinstance(item, JsonRpcNotification):
+                with self._notification_overflow_lock:
+                    if self._notification_overflow is None:
+                        self._notification_overflow = item
+                return True
+            if isinstance(item, JsonRpcResponse):
+                # Preserve a correlated response when advisory notices have
+                # occupied every queue slot.  Queue internals are protected
+                # by their mutex; no task accounting is used by this queue.
+                with self._messages.mutex:
+                    retained: list[object] = []
+                    evicted = False
+                    while self._messages.queue:
+                        queued = self._messages.queue.popleft()
+                        if not evicted and isinstance(queued, JsonRpcNotification):
+                            evicted = True
+                            continue
+                        retained.append(queued)
+                    self._messages.queue.extend(retained)
+                    if evicted:
+                        self._messages.queue.append(item)
+                        return True
             # Bounded queue overflow: latch the failure and fail closed.
             if self._overflow_code is None:
                 self._overflow_code = "inbound_queue_overflow"

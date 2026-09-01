@@ -7,6 +7,7 @@ through injected spawners/launchers and the activation ledger.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -284,9 +285,18 @@ class V3ConfigTest(unittest.TestCase):
                 "resource_limits": {"cpus": 1.0},
             },
         ]
-        with self.assertRaises(RuntimeConfigError) as raised:
-            load_runtime_config(self._write(document))
-        self.assertEqual("duplicate_mcp_environment", raised.exception.code)
+        if os.name == "nt":
+            with self.assertRaises(RuntimeConfigError) as raised:
+                load_runtime_config(self._write(document))
+            self.assertEqual("duplicate_mcp_environment", raised.exception.code)
+        else:
+            # POSIX environment names are case-sensitive: FOO and foo are
+            # distinct entries and must survive config loading as-is.
+            loaded = load_runtime_config(self._write(document))
+            self.assertEqual(
+                (("FOO", "1"), ("foo", "2")),
+                loaded.mcp_servers[0].environment,
+            )
         document["mcp_servers"][0]["environment"] = [
             ["NODE_OPTIONS", "--max-old-space"],
         ]

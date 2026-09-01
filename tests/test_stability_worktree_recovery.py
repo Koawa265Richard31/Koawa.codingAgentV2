@@ -110,8 +110,9 @@ class WorktreeRecoveryTest(unittest.TestCase):
         target = self.manager.store.managed_root / record.resource_ref
         (residue / "gitdir").write_text(str(target / ".git") + "\n", encoding="utf-8")
         self.assertFalse(self.manager._registered(target))
-        outcome = self.manager.reconcile(self.effect_id, expected_version=record.version, base_commit=self.base)
-        self.assertEqual("outcome_unknown", outcome.state.value)
+        with self.assertRaises(AgentError) as caught:
+            self.manager.reconcile(self.effect_id, expected_version=record.version, base_commit=self.base)
+        self.assertEqual("workspace_metadata_unverifiable", caught.exception.code)
         self.assertTrue(residue.exists())
 
     def test_forward_slash_absolute_metadata_pointer_is_not_absence(self):
@@ -120,8 +121,9 @@ class WorktreeRecoveryTest(unittest.TestCase):
         residue.mkdir(parents=True)
         target = self.manager.store.managed_root / record.resource_ref
         (residue / "gitdir").write_text((target / ".git").as_posix() + "\n", encoding="utf-8")
-        outcome = self.manager.reconcile(self.effect_id, expected_version=record.version, base_commit=self.base)
-        self.assertEqual("outcome_unknown", outcome.state.value)
+        with self.assertRaises(AgentError) as caught:
+            self.manager.reconcile(self.effect_id, expected_version=record.version, base_commit=self.base)
+        self.assertEqual("workspace_metadata_unverifiable", caught.exception.code)
         self.assertTrue(residue.exists())
 
     def test_unc_absolute_metadata_pointer_parser_accepts_prefix(self):
@@ -143,6 +145,18 @@ class WorktreeRecoveryTest(unittest.TestCase):
             self.manager.reconcile(self.effect_id, expected_version=record.version, base_commit=self.base)
         self.assertEqual("workspace_metadata_unverifiable", caught.exception.code)
         self.assertEqual(before, event_digest(self.manager.store.event_store))
+        self.assertTrue(residue.exists())
+
+    def test_canonical_admin_name_with_noncanonical_pointer_is_unverifiable(self):
+        record = self.claimed()
+        residue = self.root / "repo" / ".git" / "worktrees" / str(record.resource_nonce)
+        residue.mkdir(parents=True)
+        target = self.manager.store.managed_root / record.resource_ref
+        pointer = self.root / "repo" / ".." / "managed" / record.resource_ref / ".git"
+        (residue / "gitdir").write_text(str(pointer) + "\n", encoding="utf-8")
+        with self.assertRaises(AgentError) as caught:
+            self.manager.reconcile(self.effect_id, expected_version=record.version, base_commit=self.base)
+        self.assertEqual("workspace_metadata_unverifiable", caught.exception.code)
         self.assertTrue(residue.exists())
 
     def test_git_stdout_and_stderr_are_bounded_while_draining(self):

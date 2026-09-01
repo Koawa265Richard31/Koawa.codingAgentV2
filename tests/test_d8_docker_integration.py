@@ -256,7 +256,13 @@ class D8DockerPrerequisiteTest(unittest.TestCase):
                     resolve_workspace_mount(workspace)
                 self.assertEqual("workspace_mount_link_escape", caught.exception.code)
             finally:
-                os.rmdir(link)
+                if os.name == "nt":
+                    # Junctions have directory semantics on Windows.
+                    os.rmdir(link)
+                else:
+                    # POSIX directory symlinks are unlinkable entries, not
+                    # directories; rmdir raises NotADirectoryError here.
+                    link.unlink()
 
     def test_workspace_mount_rejects_same_volume_hard_link_escape(self) -> None:
         with tempfile.TemporaryDirectory(prefix="koawa-d8-hardlink-") as directory:

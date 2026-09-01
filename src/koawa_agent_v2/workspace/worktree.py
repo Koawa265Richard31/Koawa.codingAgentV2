@@ -234,8 +234,13 @@ class WorktreeManager:
             return record  # No claim means the normal command can still start.
         if record.state is WorkspaceEffectState.FAILED_BEFORE_EFFECT:
             return record
+        # Audit Git's admin metadata before consulting ``worktree list``.  On
+        # Linux, Git can still report a worktree whose admin directory was
+        # renamed; treating that report as authoritative would bypass the
+        # metadata safety contract below.
+        metadata_present = self._metadata_present(target)
         registered = self._registered(target)
-        absent = not target.exists() and not registered and not self._metadata_present(target)
+        absent = not target.exists() and not registered and not metadata_present
         applied = absent if record.kind is WorkspaceEffectKind.WORKTREE_REMOVE else False
         if record.kind is WorkspaceEffectKind.WORKTREE_ADD and target.is_dir() and registered:
             try:
@@ -376,7 +381,15 @@ class WorktreeManager:
 
     def _registered(self, target: Path) -> bool:
         # A failed registry query is not authoritative absence.
+        # Git may list a stale admin pointer for a worktree path that no
+        # longer exists (notably after an admin directory is renamed on
+        # Linux). That is metadata to audit, not a normal registration.  The
+        # query must still run for an absent target so a failed registry read
+        # cannot be mistaken for authoritative absence.
+        target_exists = target.exists()
         output = self._git("worktree", "list", "--porcelain").decode("utf-8", "replace")
+        if not target_exists:
+            return False
         expected = os.path.normcase(str(target.resolve()))
         return any(
             line.startswith("worktree ") and os.path.normcase(str(Path(line[9:]).resolve())) == expected
@@ -398,16 +411,30 @@ class WorktreeManager:
                 if count >= 10000:
                     raise AgentError("workspace_metadata_limit")
                 # Git uses the target basename, adding a numeric suffix on a
-                # collision. Controller targets use unique UUID nonces.
+                # collision. Controller targets use unique UUID nonces. A
+                # matching admin directory with no gitdir is still evidence
+                # of an incomplete effect, but a present pointer must be
+                # validated rather than trusted from its basename.
                 suffix = entry.name.removeprefix(target.name)
-                if entry.name == target.name or (entry.name.startswith(target.name) and suffix.isdecimal()):
-                    return True
+                name_matches = entry.name == target.name or (
+                    entry.name.startswith(target.name) and suffix.isdecimal()
+                )
+                pointer_file = Path(entry.path) / "gitdir"
+                if name_matches:
+                    try:
+                        pointer_file.lstat()
+                    except FileNotFoundError:
+                        return True
+                    pointer = self._metadata_pointer(Path(entry.path))
+                    if os.path.normcase(str(pointer)) == os.path.normcase(str(target / ".git")):
+                        return True
+                    raise AgentError("workspace_metadata_unverifiable")
                 # Administrative directories may have been renamed independently
                 # of the worktree. Their gitdir pointer, not the basename, is the
                 # remaining resource identity. Unreadable metadata is not absence.
                 pointer = self._metadata_pointer(Path(entry.path))
                 if os.path.normcase(str(pointer)) == os.path.normcase(str(target / ".git")):
-                    return True
+                    raise AgentError("workspace_metadata_unverifiable")
         try:
             after = admin_root.lstat()
         except OSError:

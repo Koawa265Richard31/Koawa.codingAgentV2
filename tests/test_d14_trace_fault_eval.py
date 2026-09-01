@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,7 +76,7 @@ class D14TraceTest(unittest.TestCase):
                     "id": "a",
                     "files": {"x.txt": "x\n"},
                     "patch": {"x.txt": "x\npatched\n"},
-                    "test": ["python", "-c", "assert 'patched' in open('x.txt').read()"],
+                    "test": [sys.executable, "-c", "assert 'patched' in open('x.txt').read()"],
                     "oracle": {"x.txt": "x\npatched\n"},
                 }
             ),

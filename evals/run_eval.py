@@ -19,6 +19,16 @@ from koawa_agent_v2.telemetry.faults import FaultInjector, classify_failure
 from koawa_agent_v2.telemetry.trace import TraceStore
 
 
+def _portable_test_command(command: Any) -> list[str]:
+    """Resolve fixture Python aliases without relying on PATH naming."""
+    if not isinstance(command, (list, tuple)):
+        raise TypeError("task test command must be a sequence")
+    resolved = [str(argument) for argument in command]
+    if resolved and resolved[0].casefold() in {"python", "python3", "python.exe", "python3.exe"}:
+        resolved[0] = sys.executable
+    return resolved
+
+
 def run_task(
     task: dict[str, Any],
     *,
@@ -42,7 +52,7 @@ def run_task(
         for name, content in task.get("patch", {}).items():
             (repo / name).write_text(content, encoding="utf-8")
         test = subprocess.run(
-            task["test"],
+            _portable_test_command(task["test"]),
             cwd=str(repo),
             capture_output=True,
             text=True,

@@ -25,6 +25,8 @@ REPO = Path(__file__).resolve().parents[1]
 for directory in (REPO, REPO / "src"):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
+from koawa_agent_v2.recovery.redaction import redact_text
+
 LANES = {
     "pr-fast": ("tests",),
     "integration": ("tests.test_d11_agent_process_kill", "tests.test_d12_workspace_integration", "tests.test_stability_fault_matrix"),
@@ -37,6 +39,23 @@ LANES = {
 MANDATORY_LANES = frozenset({"docker", "golden", "mcp", "integration", "soak", "provider-opt-in"})
 PROVIDER_EVIDENCE_ENV = "KOAWA_I9_PROVIDER_EVIDENCE_FILE"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_DETAIL_LIMIT = 512
+_DETAIL_TRUNCATION_MARKER = "\n...[truncated]...\n"
+
+
+def _bounded_detail(detail: str) -> str:
+    """Return a bounded, redacted failure detail with both traceback ends."""
+    redacted = redact_text(detail if isinstance(detail, str) else str(detail))
+    if len(redacted) <= _DETAIL_LIMIT:
+        return redacted
+    available = _DETAIL_LIMIT - len(_DETAIL_TRUNCATION_MARKER)
+    head_length = available // 2
+    tail_length = available - head_length
+    return (
+        redacted[:head_length]
+        + _DETAIL_TRUNCATION_MARKER
+        + redacted[-tail_length:]
+    )
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -72,7 +91,7 @@ class LaneResult(unittest.TestResult):
 
     def _record(self, test, status: str, detail: str = "") -> None:
         self.tests.append({"test_id": test.id(), "status": status,
-                           "detail": detail[:512],
+                           "detail": _bounded_detail(detail),
                            "duration_ms": round((time.perf_counter() - self._starts.pop(test, time.perf_counter())) * 1000, 3)})
 
     def addSuccess(self, test): self._record(test, "PASS"); super().addSuccess(test)

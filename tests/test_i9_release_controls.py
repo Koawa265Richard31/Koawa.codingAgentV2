@@ -16,6 +16,27 @@ from scripts import release_manifest, stability_gate
 
 
 class I9GateTest(unittest.TestCase):
+    def test_failure_detail_preserves_traceback_head_and_tail_with_bound(self):
+        class LongFailureProbe(unittest.TestCase):
+            def test_long_failure(self):
+                raise RuntimeError(
+                    ("x" * 2_000)
+                    + " stable-error-tail Authorization: Bearer "
+                    + "sk-do-not-persist-1234567890"
+                )
+
+        suite = unittest.TestSuite((LongFailureProbe("test_long_failure"),))
+        with patch.object(stability_gate, "_suite_for", return_value=suite):
+            document = stability_gate.run_lane("golden")
+        detail = document["tests"][0]["detail"]
+        self.assertEqual(stability_gate._DETAIL_LIMIT, len(detail))
+        self.assertTrue(detail.startswith("Traceback (most recent call last):"))
+        self.assertIn(stability_gate._DETAIL_TRUNCATION_MARKER, detail)
+        # The bounded suffix retains the stable part of the innermost error
+        # even when its message itself is very long.
+        self.assertIn("stable-error-tail", detail)
+        self.assertNotIn("sk-do-not-persist-1234567890", detail)
+
     def test_mandatory_skip_is_not_a_pass(self):
         class MandatorySkipProbe(unittest.TestCase):
             def test_explicit_mandatory_skip(self):
