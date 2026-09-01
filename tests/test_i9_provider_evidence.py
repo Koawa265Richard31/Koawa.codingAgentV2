@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import multiprocessing
 import os
 import re
@@ -46,6 +47,7 @@ _ENV_PROVIDER = "KOAWA_I9_PROVIDER_NAME"
 _ENV_EVIDENCE = "KOAWA_I9_PROVIDER_EVIDENCE_FILE"
 _ENV_BUILD = "KOAWA_I9_PROVIDER_BUILD_ARTIFACT_DIGEST"
 _ENV_TIMEOUT = "KOAWA_I9_PROVIDER_TIMEOUT_PROBE_SECONDS"
+_ENV_REQUEST_TIMEOUT = "KOAWA_I9_PROVIDER_REQUEST_TIMEOUT_SECONDS"
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -59,7 +61,7 @@ class ProviderOptInUnavailable(ValueError):
 
 def _configuration(
     environ: Mapping[str, str] | None = None,
-) -> tuple[str, str, str, str, str | None, str]:
+) -> tuple[str, str, str, str, str | None, str, float]:
     """Read only the supplied mapping; an explicit empty mapping stays empty."""
     values = os.environ if environ is None else environ
     base_url = values.get(_ENV_BASE_URL, "").strip()
@@ -76,7 +78,14 @@ def _configuration(
     if not provider or not _NAME.fullmatch(provider):
         raise ProviderOptInUnavailable("provider_opt_in_provider_invalid")
     evidence_path = values.get(_ENV_EVIDENCE) or None
-    return base_url, model, provider, api_key, evidence_path, key_name
+    timeout_raw = values.get(_ENV_REQUEST_TIMEOUT, "30")
+    try:
+        request_timeout = float(timeout_raw)
+    except (TypeError, ValueError) as error:
+        raise ProviderOptInUnavailable("provider_opt_in_request_timeout_invalid") from error
+    if not math.isfinite(request_timeout) or not 1.0 <= request_timeout <= 300.0:
+        raise ProviderOptInUnavailable("provider_opt_in_request_timeout_invalid")
+    return base_url, model, provider, api_key, evidence_path, key_name, request_timeout
 
 
 def _git_head() -> str | None:
@@ -171,9 +180,17 @@ def _write_evidence(path: str, evidence: dict) -> None:
             os.unlink(temporary)
 
 
-def _safe_config_digest(base_url: str, model: str, provider: str, scope_name: str) -> str:
+def _safe_config_digest(
+    base_url: str,
+    model: str,
+    provider: str,
+    scope_name: str,
+    timeout_seconds: float = 30.0,
+) -> str:
     # Deliberately omit the credential value. This binds only non-secret scope.
-    value = "|".join((provider, model, scope_name, base_url.split("?")[0]))
+    value = "|".join(
+        (provider, model, scope_name, base_url.split("?")[0], str(timeout_seconds))
+    )
     return hashlib.sha256(value.encode("utf-8", "strict")).hexdigest()
 
 
@@ -240,13 +257,14 @@ def _run_scenario(
     model: str,
     provider: str,
     api_key: str,
+    request_timeout: float = 30.0,
 ) -> dict:
     before = _resource_snapshot()
     events: tuple = ()
     special_result: dict | None = None
     try:
         if scenario == "smoke":
-            client = _client(base_url, api_key, provider)
+            client = _client(base_url, api_key, provider, timeout=request_timeout)
             events = tuple(
                 client.stream(
                     _request(provider, model, "Reply with one short word for I9 smoke.")
@@ -255,7 +273,7 @@ def _run_scenario(
             turn = assemble_model_stream(events)
             outcome = "completed"
         elif scenario == "multi_turn":
-            client = _client(base_url, api_key, provider)
+            client = _client(base_url, api_key, provider, timeout=request_timeout)
             first_events = tuple(
                 client.stream(
                     _request(provider, model, "Remember the token I9-CONTEXT-7.")
@@ -284,7 +302,7 @@ def _run_scenario(
             turn = assemble_model_stream(events)
             outcome = "two_turn_context_completed"
         elif scenario == "empty_completion":
-            client = _client(base_url, api_key, provider)
+            client = _client(base_url, api_key, provider, timeout=request_timeout)
             try:
                 events = tuple(
                     client.stream(
@@ -346,7 +364,7 @@ def _run_scenario(
             else:
                 raise ProviderOptInUnavailable("provider_opt_in_timeout_not_observed")
 
-            cancel_client = _client(base_url, api_key, provider)
+            cancel_client = _client(base_url, api_key, provider, timeout=request_timeout)
             checks = 0
 
             def cancel_after_request_progress() -> None:
@@ -422,6 +440,7 @@ def _aggregate_evidence(
     model: str,
     provider: str,
     scope_name: str,
+    request_timeout: float = 30.0,
     candidate: dict,
     scenarios: dict[str, dict],
     started_at: str,
@@ -442,7 +461,9 @@ def _aggregate_evidence(
         "provider": provider,
         "model": model,
         "credential_scope_digest": hashlib.sha256(scope_name.encode("utf-8")).hexdigest(),
-        "safe_config_digest": _safe_config_digest(base_url, model, provider, scope_name),
+        "safe_config_digest": _safe_config_digest(
+            base_url, model, provider, scope_name, request_timeout
+        ),
         "execution_mode": "real-provider",
         "real_provider_executed": True,
         "started_at": started_at,
@@ -466,7 +487,7 @@ def _record_scenario(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> dict:
-    base_url, model, provider, api_key, evidence_path, scope_name = _configuration(environ)
+    base_url, model, provider, api_key, evidence_path, scope_name, request_timeout = _configuration(environ)
     values = os.environ if environ is None else environ
     build_digest = values.get(_ENV_BUILD)
     candidate = _candidate_identity(build_digest)
@@ -486,13 +507,16 @@ def _record_scenario(
         model=model,
         provider=provider,
         api_key=api_key,
+        request_timeout=request_timeout,
     )
     evidence = {
         "schema_version": 1,
         "provider": provider,
         "model": model,
         "credential_scope_digest": hashlib.sha256(scope_name.encode("utf-8")).hexdigest(),
-        "safe_config_digest": _safe_config_digest(base_url, model, provider, scope_name),
+        "safe_config_digest": _safe_config_digest(
+            base_url, model, provider, scope_name, request_timeout
+        ),
         "execution_mode": "real-provider",
         "real_provider_executed": True,
         "started_at": existing.get("started_at", started_at),
@@ -507,6 +531,7 @@ def _record_scenario(
             model=model,
             provider=provider,
             scope_name=scope_name,
+            request_timeout=request_timeout,
             candidate=candidate,
             scenarios=scenarios,
             started_at=evidence["started_at"],
@@ -522,6 +547,48 @@ def run_real_provider_smoke(*, environ: dict[str, str] | None = None) -> dict:
 
 
 class ProviderOptInSmokeTest(unittest.TestCase):
+    def test_request_timeout_defaults_and_is_strictly_bounded(self) -> None:
+        base = {
+            _ENV_BASE_URL: "https://provider.example/v1",
+            _ENV_MODEL: "test-model",
+            _ENV_API_KEY: "PROVIDER_KEY",
+            "PROVIDER_KEY": "secret",
+        }
+        self.assertEqual(30.0, _configuration(base)[-1])
+        for invalid in ("", "nan", "inf", "0.99", "300.01", "not-a-number"):
+            values = dict(base)
+            values[_ENV_REQUEST_TIMEOUT] = invalid
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    ProviderOptInUnavailable, "request_timeout_invalid"
+                ):
+                    _configuration(values)
+
+    def test_request_timeout_is_forwarded_to_normal_client(self) -> None:
+        sentinel = RuntimeError("stop before network")
+        with patch(
+            __name__ + "._client", side_effect=sentinel
+        ) as mocked_client:
+            with self.assertRaises(RuntimeError) as raised:
+                _run_scenario(
+                    "smoke",
+                    base_url="https://provider.example/v1",
+                    model="test-model",
+                    provider="test-provider",
+                    api_key="secret",
+                    request_timeout=123.0,
+                )
+            self.assertIs(sentinel, raised.exception)
+        mocked_client.assert_called_once_with(
+            "https://provider.example/v1", "secret", "test-provider", timeout=123.0
+        )
+
+    def test_safe_config_digest_binds_timeout_without_secret(self) -> None:
+        first = _safe_config_digest("https://provider.example/v1", "model", "p", "scope", 30.0)
+        second = _safe_config_digest("https://provider.example/v1", "model", "p", "scope", 31.0)
+        self.assertNotEqual(first, second)
+        self.assertNotIn("secret", first)
+
     def test_explicit_empty_mapping_never_falls_back_to_host_secret(self) -> None:
         with patch.dict(
             os.environ,

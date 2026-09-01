@@ -16,6 +16,7 @@ from koawa_agent_v2.model.protocol import (
     ModelRequest,
     ModelStreamFailure,
     StreamFailed,
+    StreamFailureKind,
     ToolCallItem,
     ToolDefinition,
     TurnCompleted,
@@ -26,6 +27,7 @@ from koawa_agent_v2.model.openai_client import (
     OpenAICompatibleChatClient,
     OpenAICompatibleClientError,
     ReasoningEffort,
+    _AdapterFault,
     _reasoning_effort_body,
     _request_body,
     reasoning_family,
@@ -141,6 +143,13 @@ def _sse(*events, done: bool = True) -> bytes:
 
 
 class OpenAICompatibleChatClientTest(unittest.TestCase):
+    def test_adapter_fault_allows_traceback_assignment(self) -> None:
+        fault = _AdapterFault("stable.code", StreamFailureKind.STREAM_INTERRUPTED, True)
+        fault.__traceback__ = None
+        self.assertEqual("stable.code", fault.code)
+        self.assertEqual(StreamFailureKind.STREAM_INTERRUPTED, fault.kind)
+        self.assertTrue(fault.retryable)
+
     def test_streams_text_usage_and_safe_request_projection(self) -> None:
         """文本 delta、usage 和完整 Turn snapshot 保持同一身份与严格顺序。"""
         body = _sse(

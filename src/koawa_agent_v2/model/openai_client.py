@@ -57,13 +57,20 @@ class OpenAICompatibleClientError(ModelError):
     """尚未建立 response identity 时产生的安全适配器错误。"""
 
 
-@dataclass(frozen=True, slots=True)
 class _AdapterFault(Exception):
     """只携带稳定错误分类，绝不携带 Provider 原始正文。"""
 
-    code: str
-    kind: StreamFailureKind
-    retryable: bool = False
+    __slots__ = ("code", "kind", "retryable")
+
+    def __init__(
+        self, code: str, kind: StreamFailureKind, retryable: bool = False
+    ) -> None:
+        # Do not freeze an Exception subclass: unittest and the interpreter
+        # attach/update ``__traceback__`` while propagating it.
+        super().__init__()
+        self.code = code
+        self.kind = kind
+        self.retryable = retryable
 
 
 class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
