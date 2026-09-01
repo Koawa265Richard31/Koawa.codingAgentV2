@@ -488,7 +488,7 @@ def _real_main(argv: list[str]) -> int:
         return 0
     if arguments.command == "release-audit":
         from .config import RuntimeConfigError, load_runtime_config
-        from scripts.release_audit import AuditError, audit_database, write_report
+        from .release_audit import AuditError, audit_database, write_report
         try:
             config = load_runtime_config(arguments.config)
             report = audit_database(config.db)

@@ -28,7 +28,7 @@ for directory in (REPO, REPO / "src"):
 LANES = {
     "pr-fast": ("tests",),
     "integration": ("tests.test_d11_agent_process_kill", "tests.test_d12_workspace_integration", "tests.test_stability_fault_matrix"),
-    "mcp": ("tests.test_d10_connection_binding", "tests.test_d10_integration", "tests.test_d11_mcp_activation", "tests.test_stability_fault_matrix"),
+    "mcp": ("tests.test_d9_approval", "tests.test_d9_integration", "tests.test_d9_policy", "tests.test_d10_connection_binding", "tests.test_d10_integration", "tests.test_d11_mcp_activation", "tests.test_stability_fault_matrix"),
     "docker": ("tests.test_d8_docker_integration", "tests.test_d12_workspace_integration"),
     "golden": ("tests.test_golden_composite_e2e",),
     "soak": ("tests.test_stability_soak", "tests.test_stability_load", "tests.test_stability_resources"),

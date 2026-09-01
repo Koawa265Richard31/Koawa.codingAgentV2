@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts import release_audit
+from koawa_agent_v2.runtime import release_audit
 
 
 class ReleaseAuditTruthTest(unittest.TestCase):

@@ -11,7 +11,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts import release_audit, release_manifest, stability_gate
+from koawa_agent_v2.runtime import release_audit
+from scripts import release_manifest, stability_gate
 
 
 class I9GateTest(unittest.TestCase):
@@ -107,6 +108,33 @@ class I9AuditTest(unittest.TestCase):
             self.assertNotIn(str(config), output.getvalue())
             self.assertNotIn(str(report), output.getvalue())
             self.assertIn('"ok": false', output.getvalue())
+
+    def test_release_audit_console_script_imports_outside_repo_root(self):
+        # The installed console script must reach the release-audit import
+        # chain without the repository root on sys.path; before the module
+        # moved into the package this crashed with ModuleNotFoundError.
+        import shutil
+        import subprocess
+
+        if shutil.which("koawa-agent-v2") is None:
+            self.skipTest("console_script_not_on_path")
+        with tempfile.TemporaryDirectory() as raw:
+            config = Path(raw) / "missing-config.json"
+            report = Path(raw) / "report.json"
+            completed = subprocess.run(
+                [
+                    "koawa-agent-v2", "release-audit",
+                    "--config", str(config), "--report", str(report),
+                ],
+                cwd=raw,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        self.assertEqual(1, completed.returncode)
+        self.assertNotIn("Traceback", completed.stderr)
+        self.assertNotIn("Traceback", completed.stdout)
+        self.assertIn('"ok": false', completed.stdout)
 
 
 class I9ManifestTest(unittest.TestCase):

@@ -17,12 +17,12 @@ import re
 import subprocess
 import tempfile
 import threading
-from time import monotonic
+from time import monotonic, sleep
 import unittest
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 from uuid import uuid4
 
 from koawa_agent_v2.execution.loop import AgentLoopCancelled
@@ -215,13 +215,25 @@ def _request(provider: str, model: str, content: str, *, context=()) -> ModelReq
     )
 
 
-def _client(base_url: str, api_key: str, provider: str, *, timeout: float = 30.0) -> OpenAICompatibleChatClient:
+def _client(
+    base_url: str,
+    api_key: str,
+    provider: str,
+    *,
+    timeout: float = 30.0,
+    reasoning_effort: str | None = None,
+) -> OpenAICompatibleChatClient:
+    kwargs = {
+        "provider": provider,
+        "timeout_seconds": timeout,
+        "max_stream_seconds": timeout,
+    }
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
     return OpenAICompatibleChatClient(
         base_url,
         api_key,
-        provider=provider,
-        timeout_seconds=timeout,
-        max_stream_seconds=timeout,
+        **kwargs,
     )
 
 
@@ -264,7 +276,10 @@ def _run_scenario(
     special_result: dict | None = None
     try:
         if scenario == "smoke":
-            client = _client(base_url, api_key, provider, timeout=request_timeout)
+            client = _client(
+                base_url, api_key, provider, timeout=request_timeout,
+                reasoning_effort="off",
+            )
             events = tuple(
                 client.stream(
                     _request(provider, model, "Reply with one short word for I9 smoke.")
@@ -273,7 +288,10 @@ def _run_scenario(
             turn = assemble_model_stream(events)
             outcome = "completed"
         elif scenario == "multi_turn":
-            client = _client(base_url, api_key, provider, timeout=request_timeout)
+            client = _client(
+                base_url, api_key, provider, timeout=request_timeout,
+                reasoning_effort="off",
+            )
             first_events = tuple(
                 client.stream(
                     _request(provider, model, "Remember the token I9-CONTEXT-7.")
@@ -364,7 +382,10 @@ def _run_scenario(
             else:
                 raise ProviderOptInUnavailable("provider_opt_in_timeout_not_observed")
 
-            cancel_client = _client(base_url, api_key, provider, timeout=request_timeout)
+            cancel_client = _client(
+                base_url, api_key, provider, timeout=request_timeout,
+                reasoning_effort="off",
+            )
             checks = 0
 
             def cancel_after_request_progress() -> None:
@@ -403,7 +424,13 @@ def _run_scenario(
         else:
             raise AssertionError("provider_opt_in_scenario_unknown")
     finally:
-        after = _resource_snapshot()
+        # Determinize Python-side transport release before measuring: exception
+        # tracebacks can pin generator frames in reference cycles, so handle
+        # close timing otherwise depends on the cyclic GC schedule.
+        import gc
+
+        gc.collect()
+        after, _settle_rounds = _settled_after_snapshot(before)
         cleanup = _cleanup_facts(before, after)
     if not cleanup["zero_delta"]:
         raise AssertionError("provider_opt_in_resource_leak")
@@ -480,6 +507,61 @@ def _aggregate_evidence(
         },
         "resource_cleanup": aggregate_cleanup,
     }
+
+
+_WARMED_UP = False
+
+
+def _warm_up_process_once() -> None:
+    """One minimal provider round-trip before the first measured scenario.
+
+    The first HTTPS request in a fresh process allocates one-time runtime
+    handles (TLS/DNS/socket machinery) that persist for the process lifetime;
+    scenarios assert steady-state zero deltas, so a cold process would bill
+    that warmup to whichever real scenario runs first. Warmup failure never
+    decides a scenario outcome: the scenario itself surfaces its own errors.
+    """
+    global _WARMED_UP
+    if _WARMED_UP:
+        return
+    _WARMED_UP = True
+    try:
+        base_url, model, provider, api_key, _evidence, _scope, request_timeout = _configuration(None)
+        client = _client(
+            base_url, api_key, provider, timeout=request_timeout,
+            reasoning_effort="off",
+        )
+        tuple(
+            client.stream(
+                _request(provider, model, "I9 warmup: reply with ok.")
+            )
+        )
+    except (ProviderOptInUnavailable, OpenAICompatibleClientError):
+        pass
+
+
+def _settled_after_snapshot(before: dict, *, attempts: int = 4, settle_seconds: float = 0.05) -> tuple[dict, int]:
+    """Measure the after-state, resampling only the OS handle counter.
+
+    Sockets closed during a scenario can finish OS-level teardown slightly
+    after close() returns (observed on Windows), so a single immediate sample
+    intermittently bills in-flight teardown to the scenario. Python-side
+    facts (non-daemon threads, active children) are exact immediately and are
+    never resampled. A real leak persists across the whole bounded window and
+    still fails the zero-delta assert.
+    """
+    after = _resource_snapshot()
+    settled = 0
+    while (
+        settled < attempts
+        and after["non_daemon_threads"] == before["non_daemon_threads"]
+        and after["active_children"] == before["active_children"]
+        and after["handles_or_fds"] != before["handles_or_fds"]
+    ):
+        settled += 1
+        sleep(settle_seconds)
+        after = _resource_snapshot()
+    return after, settled
 
 
 def _record_scenario(
@@ -580,7 +662,59 @@ class ProviderOptInSmokeTest(unittest.TestCase):
                 )
             self.assertIs(sentinel, raised.exception)
         mocked_client.assert_called_once_with(
-            "https://provider.example/v1", "secret", "test-provider", timeout=123.0
+            "https://provider.example/v1", "secret", "test-provider",
+            timeout=123.0, reasoning_effort="off",
+        )
+
+    def test_scenario_reasoning_controls_are_explicit(self) -> None:
+        common = {
+            "base_url": "https://provider.example/v1",
+            "model": "test-model",
+            "provider": "test-provider",
+            "api_key": "secret",
+            "request_timeout": 123.0,
+        }
+        client_args = ("https://provider.example/v1", "secret", "test-provider")
+        for scenario, expected in (
+            ("smoke", call(*client_args, timeout=123.0, reasoning_effort="off")),
+            ("multi_turn", call(*client_args, timeout=123.0, reasoning_effort="off")),
+            ("empty_completion", call(*client_args, timeout=123.0)),
+        ):
+            with self.subTest(scenario=scenario):
+                sentinel = RuntimeError("stop before network")
+                with patch(__name__ + "._client", side_effect=sentinel) as mocked:
+                    with self.assertRaises(RuntimeError):
+                        _run_scenario(scenario, **common)
+                self.assertEqual([expected], mocked.call_args_list)
+
+        class TimeoutProbe:
+            def stream(self, request):
+                import time
+
+                time.sleep(0.05)
+                raise OpenAICompatibleClientError("openai.transport_error")
+
+        class CancelProbe:
+            def stream_controlled(self, request, *, progress_guard):
+                progress_guard()
+                progress_guard()
+
+        with patch.dict(os.environ, {_ENV_TIMEOUT: "0.05"}, clear=False):
+            with patch(
+                __name__ + "._client",
+                side_effect=(TimeoutProbe(), CancelProbe()),
+            ) as mocked:
+                _run_scenario("timeout_cancel", **common)
+        self.assertEqual(
+            [
+                call(
+                    *client_args, timeout=0.05,
+                ),
+                call(
+                    *client_args, timeout=123.0, reasoning_effort="off",
+                ),
+            ],
+            mocked.call_args_list,
         )
 
     def test_safe_config_digest_binds_timeout_without_secret(self) -> None:
@@ -618,6 +752,7 @@ class ProviderOptInSmokeTest(unittest.TestCase):
         )
 
     def _real(self, scenario: str) -> None:
+        _warm_up_process_once()
         try:
             evidence = _record_scenario(scenario)
         except ProviderOptInUnavailable as error:
