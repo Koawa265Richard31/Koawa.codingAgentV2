@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -12,6 +13,38 @@ from collections import defaultdict
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import quote
+
+from ..recovery.redaction import _ASSIGNMENT, _BEARER, _OPENAI_KEY
+
+
+# Keep the release canary detector aligned with the persisted-text redaction
+# shapes.  The provider-specific environment assignment is kept as a separate
+# shape because ``OPENAI_API_KEY``/``SILICONFLOW_API_KEY`` do not match the
+# word-boundary at the start of the shared assignment expression.
+_PROVIDER_KEY_ASSIGNMENT = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(?:openai|siliconflow)[_-]?api[_-]?key\s*[:=]"
+)
+_CREDENTIAL_FIELD = re.compile(
+    r"(?ix)(?<![A-Za-z0-9_])"
+    r"[\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"client[_-]?secret|private[_-]?key|password|passwd|secret|token|credential)"
+    r"s?[\"']?\s*[:=]"
+)
+
+
+def _credential_literals_present(raw: bytes) -> bool:
+    """Detect credential-shaped persisted text without substring false positives."""
+    text = raw.decode("utf-8", errors="ignore")
+    return any(
+        pattern.search(text)
+        for pattern in (
+            _BEARER,
+            _OPENAI_KEY,
+            _ASSIGNMENT,
+            _PROVIDER_KEY_ASSIGNMENT,
+            _CREDENTIAL_FIELD,
+        )
+    )
 
 
 class AuditError(RuntimeError):
@@ -244,7 +277,6 @@ def audit_database(path: Path) -> dict:
     raw = path.read_bytes()
     finished_at = datetime.now(timezone.utc)
     # Presence-only canary result: never copy or print matching database text.
-    canary_patterns = (b"OPENAI_API_KEY=", b"sk-", b"Authorization: Bearer ")
     return {
         "report_schema_version": 1,
         "generated_at": generated_at.isoformat(),
@@ -273,7 +305,7 @@ def audit_database(path: Path) -> dict:
         "mcp_allocations": active["mcp_allocations"],
         "workspace_effects": workspace_effect_truth,
         "trace": trace_truth,
-        "canary_scan": {"credential_literals_present": any(marker in raw for marker in canary_patterns)},
+        "canary_scan": {"credential_literals_present": _credential_literals_present(raw)},
         "read_only": True,
     }
 

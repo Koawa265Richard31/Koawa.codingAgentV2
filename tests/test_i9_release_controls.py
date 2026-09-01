@@ -73,6 +73,39 @@ class I9GateTest(unittest.TestCase):
 
 
 class I9AuditTest(unittest.TestCase):
+    def _audit_payload(self, payload: str) -> bool:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "state.db"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("CREATE TABLE events(event_type TEXT NOT NULL, payload_json TEXT)")
+                connection.execute(
+                    "INSERT INTO events VALUES (?, ?)",
+                    (
+                        "message.delivered.v2",
+                        payload if payload.startswith("{") else json.dumps({"text": payload}),
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            return release_audit.audit_database(path)["canary_scan"]["credential_literals_present"]
+
+    def test_audit_canary_scan_does_not_match_short_sk_substrings(self):
+        self.assertFalse(self._audit_payload("repository task-repo remains clean"))
+
+    def test_audit_canary_scan_matches_credential_shapes(self):
+        for payload in (
+            "sk-key12345678",
+            "Authorization: Bearer abcdefgh",
+            "token=opaque-secret",
+            '{"credential": "opaque-secret"}',
+            "OPENAI_API_KEY=opaque-secret",
+            "SILICONFLOW_API_KEY=opaque-secret",
+        ):
+            with self.subTest(payload=payload):
+                self.assertTrue(self._audit_payload(payload))
+
     def test_audit_is_read_only_and_reports_canary_presence_only(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "state.db"
