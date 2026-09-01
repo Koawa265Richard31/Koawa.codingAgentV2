@@ -547,7 +547,11 @@ class ThreadRuntime:
         if receipt := self._committed_receipt(
             resolved_command_id, fingerprint, _lease_stream(resolved_turn_id)
         ):
-            return self._turn_from_receipt(resolved_turn_id, receipt)
+            # Heartbeats are recorded on the dedicated recovery-lease stream;
+            # the Turn stream is intentionally unchanged.  Replaying an
+            # idempotent heartbeat therefore cannot rebuild a Turn from the
+            # lease receipt's result stream (that stream does not exist).
+            return self._get_turn_at_version(resolved_turn_id, expected_version)
         self._require_lease_fence(resolved_turn_id, resolved_run_id, resolved_token)
         turn = self._get_turn_at_version(resolved_turn_id, expected_version)
         if turn.status is not TurnStatus.RUNNING:

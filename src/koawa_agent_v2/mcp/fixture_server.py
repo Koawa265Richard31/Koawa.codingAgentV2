@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 
@@ -213,6 +214,21 @@ def _canonical(document: Any) -> str:
     )
 
 
+def _append_call_marker(path: str, document: dict[str, Any]) -> None:
+    """Persist fixture-only evidence that a tool body was entered.
+
+    The marker is deliberately opt-in through the fixture environment.  It is
+    used by the I8 real-process kill matrix to distinguish a request that was
+    merely sent from one whose external body actually ran.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = (_canonical(document) + "\n").encode("utf-8", "strict")
+    with target.open("ab", buffering=0) as handle:
+        handle.write(payload)
+        os.fsync(handle.fileno())
+
+
 def main() -> int:
     protocol_version = os.environ.get(
         "KOAWA_MCP_FIXTURE_PROTOCOL_VERSION", DEFAULT_PROTOCOL_VERSION
@@ -229,6 +245,7 @@ def main() -> int:
     malformed = os.environ.get("KOAWA_MCP_FIXTURE_MALFORMED_FIRST_FRAME", "")
     huge_frame = _env_int("KOAWA_MCP_FIXTURE_HUGE_FRAME_BYTES", 0)
     stderr_bytes = _env_int("KOAWA_MCP_FIXTURE_STDERR_BYTES", 0)
+    call_marker = os.environ.get("KOAWA_MCP_FIXTURE_CALL_MARKER")
     tools_by_name = {str(tool.get("name", "")): tool for tool in tools}
 
     if malformed == "garbage":
@@ -318,6 +335,15 @@ def main() -> int:
             if tool is None:
                 respond_error(request_id, -32602, "unknown tool")
                 return
+            with state_lock:
+                call_count += 1
+                ordinal = call_count
+            if call_marker:
+                _append_call_marker(call_marker, {
+                    "ordinal": ordinal,
+                    "pid": os.getpid(),
+                    "tool_name": tool_name,
+                })
             if tool_name == "slow" and call_delay_ms > 0:
                 import time
 
@@ -362,7 +388,6 @@ def main() -> int:
                     result["isError"] = True
             respond(request_id, result)
             with state_lock:
-                call_count += 1
                 if list_changed_after > 0 and call_count == list_changed_after:
                     notification = _canonical(
                         {

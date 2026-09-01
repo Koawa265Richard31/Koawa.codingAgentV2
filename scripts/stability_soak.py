@@ -20,6 +20,7 @@ for directory in (REPO, REPO / "src"):
         sys.path.insert(0, str(directory))
 
 from scripts.stability_benchmark import _environment, _git_commit, atomic_json, canonical_bytes
+from scripts import stability_reference as reference
 from scripts.stability_load import _control, _root, _spawn, concurrent_spawn, event_digest, mcp_pending_storm, resources
 from scripts.stability_resources import assess_soak, snapshot
 from scripts.stability_scenarios import NOW, seed_execution, operation
@@ -160,25 +161,49 @@ def main() -> int:
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--reference-environment-digest")
+    parser.add_argument("--reference-attestation", type=Path)
     args = parser.parse_args()
     if not 0 < args.hours <= 24 or not 1 <= args.sample_seconds <= 60:
         parser.error("hours must be in (0,24], sample-seconds in [1,60]")
-    environment = _environment(60 if args.reference_environment_digest else .2)
+    attestation = (
+        reference.load_attestation(args.reference_attestation)
+        if args.reference_attestation is not None else None
+    )
+    environment = _environment(
+        60 if attestation is not None else .2,
+        reference_attestation=attestation,
+    )
     identity = environment["identity"]
-    hardware = all((identity["filesystem"], identity["power_profile"], identity["local_ssd"], identity["exclusive_cpus"]))
-    reference = bool(not args.quick and args.hours == 24 and args.sample_seconds == 60 and hardware and
-                     args.reference_environment_digest == environment["environment_digest"] and
-                     environment["background_system_cpu_ratio"] is not None and
-                     environment["background_system_cpu_ratio"] < .05)
+    qualification_reasons = reference.identity_qualification_reasons(
+        identity,
+        reference_digest=args.reference_environment_digest,
+        environment_digest=environment["environment_digest"],
+        attestation=attestation,
+    )
+    if args.quick:
+        qualification_reasons.append("quick_test_shape")
+    if args.hours != 24 or args.sample_seconds != 60:
+        qualification_reasons.append("soak_shape_not_24h_60s")
+    if (
+        environment["background_sample_seconds"] < 60
+        or environment["background_system_cpu_ratio"] is None
+        or environment["background_system_cpu_ratio"] >= .05
+    ):
+        qualification_reasons.append("background_cpu_not_qualified")
+    reference_qualified = not qualification_reasons
     result = run_soak(duration_seconds=args.hours * 3600, sample_interval=args.sample_seconds,
-                      reference_qualified=reference, quick=args.quick)
+                      reference_qualified=reference_qualified, quick=args.quick)
     report = {"protocol_version": "stability-soak-v1", "commit": _git_commit(REPO),
-              "environment": environment, "reference_qualified": reference, "result": result}
+              "environment": environment, "reference_qualified": reference_qualified,
+              "qualification_reasons": qualification_reasons,
+              "reference_attestation_digest": identity.get("reference_attestation_digest"),
+              "reference_attestation": attestation,
+              "result": result}
     report["report_digest"] = hashlib.sha256(canonical_bytes(report)).hexdigest()
     atomic_json(args.report, report)
-    print(json.dumps({"report": str(args.report.resolve()), "reference_qualified": reference,
+    print(json.dumps({"report": str(args.report.resolve()), "reference_qualified": reference_qualified,
                       "passed": result["passed"], "operations": result["operation_counts"]}))
-    return 1 if result["sample_errors"] or (reference and not result["passed"]) else 0
+    return 1 if result["sample_errors"] or (reference_qualified and not result["passed"]) else 0
 
 
 if __name__ == "__main__":

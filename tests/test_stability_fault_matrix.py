@@ -33,6 +33,10 @@ from tests.fixtures.stability_fault_worker import TERMINAL_POINTS
 from tests.fixtures.stability_activation_faults import ACTIVATION_POINTS
 from tests.fixtures.stability_artifact_faults import ARTIFACT_POINTS
 from tests.fixtures.stability_allocation_faults import ALLOCATION_POINTS
+from tests.fixtures.stability_mcp_faults import (
+    MCP_POINTS, process_alive, terminate_fixture_process,
+)
+from tests.fixtures.stability_d11_faults import D11_REMAINING_POINTS
 from tests.fixtures.stability_s3_faults import (
     CANARY, CHECKPOINT_POINTS, EXPORT_POINTS, MIGRATION_POINTS, S3_POINTS,
 )
@@ -177,6 +181,109 @@ class I8FaultBehaviorTest(unittest.TestCase):
 
 
 class I8ProcessKillTest(unittest.TestCase):
+    def test_remaining_d11_windows_recover_to_identical_typed_history(self):
+        repo = Path(__file__).resolve().parents[1]
+        worker = repo / "tests/fixtures/stability_fault_worker.py"
+        environment = {**os.environ, "PYTHONPATH": os.pathsep.join((str(repo), str(repo / "src")))}
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for point in D11_REMAINING_POINTS:
+            sequences = []
+            for repetition in range(2):
+                with self.subTest(point=point, repetition=repetition), tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    process = subprocess.Popen(
+                        [sys.executable, str(worker), "crash", str(root), point],
+                        cwd=repo, env=environment, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, creationflags=flags,
+                    )
+                    try:
+                        deadline = time.monotonic() + 30
+                        while not (root / "ready.json").exists():
+                            if process.poll() is not None:
+                                output, error = process.communicate()
+                                self.fail(f"D11 worker exited before {point}: {output}\n{error}")
+                            if time.monotonic() >= deadline:
+                                self.fail(f"D11 worker failed to reach {point}")
+                            time.sleep(.02)
+                        marker = json.loads((root / "ready.json").read_text())
+                        self.assertEqual(FAULT_SPECS[point].point_class.value, marker["point_class"])
+                        process.kill()
+                        process.communicate(timeout=10)
+                        recovered = subprocess.run(
+                            [sys.executable, str(worker), "recover", str(root)],
+                            cwd=repo, env=environment, capture_output=True, text=True,
+                            timeout=40, creationflags=flags,
+                        )
+                        self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
+                        result = json.loads((root / "recovered.json").read_text())
+                        sequences.append({
+                            "events": result["events"],
+                            "worker_state": result["worker_state"],
+                            "message_states": result["message_states"],
+                        })
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.communicate(timeout=10)
+            self.assertEqual(sequences[0], sequences[1])
+
+    def test_mcp_stdio_windows_rebuild_session_without_replaying_external_call(self):
+        repo = Path(__file__).resolve().parents[1]
+        worker = repo / "tests/fixtures/stability_fault_worker.py"
+        environment = {**os.environ, "PYTHONPATH": os.pathsep.join((str(repo), str(repo / "src")))}
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for point in MCP_POINTS:
+            sequences = []
+            for repetition in range(2):
+                with self.subTest(point=point, repetition=repetition), tempfile.TemporaryDirectory() as raw:
+                    root = Path(raw)
+                    process = subprocess.Popen(
+                        [sys.executable, str(worker), "crash", str(root), point],
+                        cwd=repo, env=environment, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, creationflags=flags,
+                    )
+                    child_pid = None
+                    try:
+                        deadline = time.monotonic() + 30
+                        while not (root / "ready.json").exists():
+                            if process.poll() is not None:
+                                output, error = process.communicate()
+                                self.fail(f"MCP worker exited before {point}: {output}\n{error}")
+                            if time.monotonic() >= deadline:
+                                self.fail(f"MCP worker failed to reach {point}")
+                            time.sleep(.02)
+                        marker = json.loads((root / "ready.json").read_text())
+                        child_pid = marker["child_pid"]
+                        self.assertEqual(point, marker["point"])
+                        self.assertTrue(process_alive(child_pid))
+                        self.assertEqual(FAULT_SPECS[point].point_class.value, marker["point_class"])
+                        process.kill()
+                        process.communicate(timeout=10)
+                        recovered = subprocess.run(
+                            [sys.executable, str(worker), "recover", str(root)],
+                            cwd=repo, env=environment, capture_output=True, text=True,
+                            timeout=40, creationflags=flags,
+                        )
+                        self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
+                        result = json.loads((root / "recovered.json").read_text())
+                        self.assertFalse(result["old_child_alive"])
+                        sequences.append({
+                            "fresh_generation": result["fresh_generation"],
+                            "catalog_digest": result["catalog_digest"],
+                            "tools": result["tools"],
+                            "calls": [
+                                {"ordinal": item["ordinal"], "tool_name": item["tool_name"]}
+                                for item in result["calls"]
+                            ],
+                        })
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                            process.communicate(timeout=10)
+                        if child_pid is not None:
+                            terminate_fixture_process(child_pid)
+            self.assertEqual(sequences[0], sequences[1])
+
     def test_allocation_and_external_process_windows_reconcile_exact_identity(self):
         repo = Path(__file__).resolve().parents[1]
         worker = repo / "tests/fixtures/stability_fault_worker.py"

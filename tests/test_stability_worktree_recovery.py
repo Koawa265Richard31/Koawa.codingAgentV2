@@ -114,6 +114,23 @@ class WorktreeRecoveryTest(unittest.TestCase):
         self.assertEqual("outcome_unknown", outcome.state.value)
         self.assertTrue(residue.exists())
 
+    def test_forward_slash_absolute_metadata_pointer_is_not_absence(self):
+        record = self.claimed()
+        residue = self.root / "repo" / ".git" / "worktrees" / "forward-slash-admin"
+        residue.mkdir(parents=True)
+        target = self.manager.store.managed_root / record.resource_ref
+        (residue / "gitdir").write_text((target / ".git").as_posix() + "\n", encoding="utf-8")
+        outcome = self.manager.reconcile(self.effect_id, expected_version=record.version, base_commit=self.base)
+        self.assertEqual("outcome_unknown", outcome.state.value)
+        self.assertTrue(residue.exists())
+
+    def test_unc_absolute_metadata_pointer_parser_accepts_prefix(self):
+        residue = self.root / "repo" / ".git" / "worktrees" / "unc-admin"
+        residue.mkdir(parents=True)
+        (residue / "gitdir").write_text("//server/share/worktree/.git\n", encoding="utf-8")
+        pointer = self.manager._metadata_pointer(residue)
+        self.assertTrue(pointer.is_absolute())
+
     def test_equivalent_noncanonical_metadata_pointer_is_not_absence(self):
         record = self.claimed()
         residue = self.root / "repo" / ".git" / "worktrees" / "renamed-noncanonical"

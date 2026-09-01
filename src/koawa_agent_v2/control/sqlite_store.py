@@ -118,7 +118,7 @@ class SqliteEventStore:
         single clock even if host wall clocks drift.
         """
 
-        connection = self._connect()
+        connection = self._read_connect()
         try:
             row = connection.execute(
                 "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')"
@@ -454,7 +454,7 @@ class SqliteEventStore:
 
         resolved_key = _require_uuid(idempotency_key, "idempotency_key")
         request_hash = _fingerprint_hash(_require_fingerprint(request_fingerprint))
-        connection = self._connect()
+        connection = self._read_connect()
         try:
             row = connection.execute(
                 "SELECT request_hash, receipt_json, "
@@ -505,7 +505,7 @@ class SqliteEventStore:
         if not isinstance(stream_id, StreamId):
             raise TypeError("stream_id must be StreamId")
         _validate_page(after_version, limit, cursor_name="after_version", minimum=-1)
-        connection = self._connect()
+        connection = self._read_connect()
         try:
             rows = connection.execute(
                 _EVENT_SELECT
@@ -526,7 +526,7 @@ class SqliteEventStore:
         scan boundary; the append-only log never changes underneath it.
         """
 
-        connection = self._connect()
+        connection = self._read_connect()
         try:
             row = connection.execute(
                 "SELECT COALESCE(MAX(global_position), 0) AS high_water FROM events"
@@ -563,7 +563,7 @@ class SqliteEventStore:
                 or through_position < 0
             ):
                 raise ValueError("through_position must be an integer >= 0")
-        connection = self._connect()
+        connection = self._read_connect()
         try:
             statement = (
                 _EVENT_SELECT
@@ -638,6 +638,24 @@ class SqliteEventStore:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA synchronous = FULL")
         connection.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
+        return connection
+
+    def _read_connect(self) -> sqlite3.Connection:
+        """Open a short query-only connection without writer-only PRAGMAs.
+
+        ``synchronous`` governs durability of writes and setting it on every
+        read connection forces needless filesystem work on Windows.  Reads
+        still use SQLite's WAL snapshot and busy deadline, while ``query_only``
+        makes accidental mutation through this path fail closed.
+        """
+        connection = sqlite3.connect(
+            self._database_path,
+            timeout=self._busy_timeout_ms / 1000,
+            isolation_level=None,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
+        connection.execute("PRAGMA query_only = ON")
         return connection
 
     # ------------------------------------------------------------------
@@ -930,7 +948,7 @@ class SqliteEventStore:
             connection.close()
 
     def load_checkpoint_cache(self, turn_id: UUID) -> CheckpointCacheRecord | None:
-        connection = self._connect()
+        connection = self._read_connect()
         try:
             row = connection.execute(
                 "SELECT * FROM checkpoint_cache WHERE turn_id = ?",
@@ -976,7 +994,7 @@ class SqliteEventStore:
             raise ValueError("limit must be between 1 and 10000")
         if not isinstance(expired_before, datetime):
             raise TypeError("expired_before must be a datetime")
-        connection = self._connect()
+        connection = self._read_connect()
         try:
             statement = (
                 "SELECT turn_id, turn_version, run_id, lease_expires_at "
@@ -1009,7 +1027,7 @@ class SqliteEventStore:
         run_id: UUID,
         owner_id: str,
     ) -> RunLease | None:
-        connection = self._connect()
+        connection = self._read_connect()
         try:
             row = connection.execute(
                 "SELECT * FROM run_leases WHERE turn_id=? AND run_id=? AND owner_id=? "

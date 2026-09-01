@@ -120,7 +120,13 @@ if __name__ == "__main__":
         from tests.fixtures.stability_activation_faults import ACTIVATION_POINTS, crash_activation
         from tests.fixtures.stability_artifact_faults import ARTIFACT_POINTS, crash_artifact
         from tests.fixtures.stability_allocation_faults import ALLOCATION_POINTS, crash_allocation
-        if sys.argv[3] in ALLOCATION_POINTS:
+        from tests.fixtures.stability_mcp_faults import MCP_POINTS, crash_mcp
+        from tests.fixtures.stability_d11_faults import D11_REMAINING_POINTS, crash_d11
+        if sys.argv[3] in D11_REMAINING_POINTS:
+            crash_d11(root, sys.argv[3])
+        elif sys.argv[3] in MCP_POINTS:
+            crash_mcp(root, sys.argv[3])
+        elif sys.argv[3] in ALLOCATION_POINTS:
             crash_allocation(root, sys.argv[3])
         elif sys.argv[3] in ARTIFACT_POINTS:
             crash_artifact(root, sys.argv[3])
@@ -141,8 +147,14 @@ if __name__ == "__main__":
         from tests.fixtures.stability_activation_faults import ACTIVATION_POINTS, recover_activation
         from tests.fixtures.stability_artifact_faults import ARTIFACT_POINTS, recover_artifact
         from tests.fixtures.stability_allocation_faults import ALLOCATION_POINTS, recover_allocation
+        from tests.fixtures.stability_mcp_faults import MCP_POINTS, recover_mcp
+        from tests.fixtures.stability_d11_faults import D11_REMAINING_POINTS, recover_d11
         point = json.loads((root / "ready.json").read_text(encoding="utf-8"))["point"]
-        if point in ALLOCATION_POINTS:
+        if point in D11_REMAINING_POINTS:
+            recover_d11(root)
+        elif point in MCP_POINTS:
+            recover_mcp(root)
+        elif point in ALLOCATION_POINTS:
             recover_allocation(root)
         elif point in ARTIFACT_POINTS:
             recover_artifact(root)

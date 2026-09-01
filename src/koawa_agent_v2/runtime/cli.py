@@ -368,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         "deny",
         "interactive",
         "export-legacy-store",
+        "release-audit",
     }:
         if argv[1] in {"export-legacy-store"} or "--config" in argv or "--help" in argv or "-h" in argv:
             return _real_main(argv)
@@ -442,6 +443,9 @@ def _real_main(argv: list[str]) -> int:
     )
     export_parser.add_argument("--source", required=True)
     export_parser.add_argument("--destination", required=True)
+    audit_parser = subparsers.add_parser("release-audit", help="read-only durable truth audit")
+    audit_parser.add_argument("--config", required=True)
+    audit_parser.add_argument("--report", required=True)
     interactive_parser = subparsers.add_parser(
         "interactive", help="conversational session over one repo"
     )
@@ -481,6 +485,23 @@ def _real_main(argv: list[str]) -> int:
                 ensure_ascii=False,
             )
         )
+        return 0
+    if arguments.command == "release-audit":
+        from .config import RuntimeConfigError, load_runtime_config
+        from scripts.release_audit import AuditError, audit_database, write_report
+        try:
+            config = load_runtime_config(arguments.config)
+            report = audit_database(config.db)
+            digest = write_report(Path(arguments.report), report)
+        except (RuntimeConfigError, AuditError) as exc:
+            print(json.dumps({"ok": False, "code": exc.code}, sort_keys=True))
+            return 1
+        except (OSError, ValueError):
+            # The release command is an operator boundary: filesystem/JSON/
+            # SQLite details (including host paths) are never exposed.
+            print(json.dumps({"ok": False, "code": "release_audit_failed"}, sort_keys=True))
+            return 1
+        print(json.dumps({"ok": True, "report": str(Path(arguments.report).resolve()), "digest": digest}, sort_keys=True))
         return 0
     # app is closed in the `finally` block below on every exit path (normal,
     # exception and KeyboardInterrupt) for every configured subcommand.

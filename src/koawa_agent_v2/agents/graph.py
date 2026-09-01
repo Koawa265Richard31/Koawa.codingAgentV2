@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
+from threading import RLock
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -186,7 +187,12 @@ def _optional_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
+def rebuild_agent(
+    agent_id: UUID,
+    events: tuple,
+    *,
+    initial: AgentRecord | None = None,
+) -> AgentRecord | None:
     """Replay one agent stream into its current durable state.
 
     Supports the I2/I3 wire: spawned.v1/.v2, child-spawn-authorized.v1,
@@ -197,7 +203,9 @@ def rebuild_agent(agent_id: UUID, events: tuple) -> AgentRecord | None:
     illegal history fails closed as corrupt_agent_stream.
     """
 
-    record: AgentRecord | None = None
+    if initial is not None and initial.agent_id != agent_id:
+        raise AgentError("corrupt_agent_stream")
+    record: AgentRecord | None = initial
     for event in events:
         payload = event.payload
         if event.event_type == "agent.spawned.v1":
@@ -522,39 +530,63 @@ class AgentGraph:
         if not hasattr(event_store, "read_stream"):
             raise TypeError("event_store must implement read_stream")
         self._event_store = event_store
+        # The log remains authoritative.  This cache only stores a projection
+        # plus its exact stream version; every load asks the store for the tail
+        # after that version, so writes from other processes remain visible.
+        self._cache: dict[UUID, AgentRecord] = {}
+        self._cache_lock = RLock()
+        self._spawn_cursor = 0
+        self._children_by_parent: dict[UUID, list[UUID]] = {}
 
     def load(self, agent_id: UUID) -> AgentRecord | None:
         if not isinstance(agent_id, UUID):
             raise TypeError("agent_id must be UUID")
-        events = self._read_all(StreamId("agent", agent_id))
-        return None if not events else rebuild_agent(agent_id, events)
+        with self._cache_lock:
+            cached = self._cache.get(agent_id)
+            events = self._read_all(
+                StreamId("agent", agent_id),
+                after_version=-1 if cached is None else cached.version,
+            )
+            if not events:
+                return cached
+            rebuilt = rebuild_agent(agent_id, events, initial=cached)
+            if rebuilt is not None:
+                self._cache[agent_id] = rebuilt
+            return rebuilt
 
     def children(self, parent_agent_id: UUID) -> list[AgentRecord]:
         """Return children whose spawn event names this parent."""
-
-        results: list[AgentRecord] = []
-        cursor = 0
-        while True:
-            page = self._event_store.read_all(after_position=cursor, limit=500)
-            for event in page:
-                if event.event_type not in ("agent.spawned.v1", "agent.spawned.v2"):
-                    continue
-                payload = event.payload
-                raw_parent = payload.get("parent_agent_id")
-                if raw_parent != str(parent_agent_id):
-                    continue
-                raw_agent = payload.get("agent_id")
-                if not isinstance(raw_agent, str):
-                    continue
-                try:
-                    record = self.load(UUID(raw_agent))
-                except ValueError:
-                    continue
-                if record is not None:
-                    results.append(record)
-            if len(page) < 500:
-                break
-            cursor = page[-1].global_position
+        if not isinstance(parent_agent_id, UUID):
+            raise TypeError("parent_agent_id must be UUID")
+        with self._cache_lock:
+            cursor = self._spawn_cursor
+            while True:
+                page = self._event_store.read_all(after_position=cursor, limit=500)
+                for event in page:
+                    if event.event_type not in ("agent.spawned.v1", "agent.spawned.v2"):
+                        continue
+                    raw_parent = event.payload.get("parent_agent_id")
+                    raw_agent = event.payload.get("agent_id")
+                    if not isinstance(raw_parent, str) or not isinstance(raw_agent, str):
+                        continue
+                    try:
+                        parent_id, agent_id = UUID(raw_parent), UUID(raw_agent)
+                    except ValueError:
+                        continue
+                    children = self._children_by_parent.setdefault(parent_id, [])
+                    if agent_id not in children:
+                        children.append(agent_id)
+                if page:
+                    cursor = page[-1].global_position
+                    self._spawn_cursor = cursor
+                if len(page) < 500:
+                    break
+            child_ids = tuple(self._children_by_parent.get(parent_agent_id, ()))
+        results = []
+        for child_id in child_ids:
+            record = self.load(child_id)
+            if record is not None:
+                results.append(record)
         return sorted(results, key=lambda item: str(item.agent_id))
 
     def has_cycle(self, parent_agent_id: UUID, child_agent_id: UUID) -> bool:
@@ -568,9 +600,9 @@ class AgentGraph:
             current = record.parent_agent_id if record is not None else None
         return False
 
-    def _read_all(self, stream: StreamId) -> tuple:
+    def _read_all(self, stream: StreamId, *, after_version: int = -1) -> tuple:
         values = []
-        cursor = -1
+        cursor = after_version
         while True:
             page = self._event_store.read_stream(
                 stream, after_version=cursor, limit=500
@@ -579,4 +611,3 @@ class AgentGraph:
             if len(page) < 500:
                 return tuple(values)
             cursor = page[-1].stream_version
-

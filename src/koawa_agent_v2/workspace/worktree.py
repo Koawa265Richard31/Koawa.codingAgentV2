@@ -453,9 +453,20 @@ class WorktreeManager:
             raw = raw.rstrip(b"\r\n")
             if not raw or any(char in raw for char in (b"\x00", b"\r", b"\n")):
                 raise ValueError("invalid pointer")
-            pointer = Path(os.fsdecode(raw))
-            if (not pointer.is_absolute() or ".." in pointer.parts
-                    or os.path.normpath(os.fsdecode(raw)) != os.fsdecode(raw)):
+            raw_text = os.fsdecode(raw)
+            pointer = Path(raw_text)
+            # Git writes absolute Windows pointers with forward slashes even
+            # though normpath() returns backslashes.  Compare after normalizing
+            # only the equivalent separator spelling; retain strict rejection
+            # of traversal, dot segments, internal duplicate separators, and
+            # trailing separators through the canonical-text check below.
+            canonical_text = raw_text.replace("\\", "/")
+            if (
+                not pointer.is_absolute()
+                or ".." in pointer.parts
+                or any(part == "." for part in canonical_text.split("/"))
+                or os.path.normpath(raw_text).replace("\\", "/") != canonical_text
+            ):
                 raise ValueError("relative pointer")
             return pointer
         except (OSError, ValueError):

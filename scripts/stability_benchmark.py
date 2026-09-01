@@ -160,7 +160,6 @@ def _environment(sample_seconds: float, *, reference_attestation: dict | None = 
         "os": platform.platform(), "machine": platform.machine(), "processor": platform.processor(),
         "logical_cpu_count": os.cpu_count(), "memory_bytes": _memory_bytes(),
         "affinity_cpus": _affinity_cpus(),
-        "affinity_cpus": _affinity_cpus(),
         "sqlite_version": sqlite3.sqlite_version,
         "filesystem": None, "power_profile": None, "local_ssd": None, "exclusive_cpus": None,
     }, reference_attestation)
@@ -377,7 +376,6 @@ def run(
         "reference_attestation_digest": (
             environment["identity"].get("reference_attestation_digest")
         ),
-        "reference_attestation": reference_attestation,
         "reference_attestation": reference_attestation,
         "dataset": {"seed": DATA_SEED, **asdict(shape)}, "datasets": datasets,
         "dataset_digest": hashlib.sha256(canonical_bytes(datasets)).hexdigest(),

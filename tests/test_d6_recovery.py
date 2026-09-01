@@ -142,6 +142,37 @@ class D6RecoveryTest(unittest.TestCase):
                 running.turn_id, running.current_run_id, "old",
             )
 
+    def test_heartbeat_idempotent_replay_reads_turn_stream(self):
+        claim = self.runtime.claim_recovery_run(
+            self.running.turn_id,
+            expected_version=self.running.version,
+            owner_id="old",
+            lease_seconds=30,
+        )
+        lease_event = self.store.read_stream(
+            StreamId("recovery-lease", self.running.turn_id), limit=500,
+        )[-1]
+        command_id = uuid4()
+        first = self.runtime.heartbeat_recovery_run(
+            self.running.turn_id,
+            expected_version=claim.version,
+            run_id=self.running.current_run_id,
+            claim_token=UUID(lease_event.payload["claim_token"]),
+            lease_seconds=30,
+            owner_id="old",
+            command_id=command_id,
+        )
+        replay = self.runtime.heartbeat_recovery_run(
+            self.running.turn_id,
+            expected_version=claim.version,
+            run_id=self.running.current_run_id,
+            claim_token=UUID(lease_event.payload["claim_token"]),
+            lease_seconds=30,
+            owner_id="old",
+            command_id=command_id,
+        )
+        self.assertEqual(first, replay)
+
     def test_truncated_unknown_and_hash_bad_checkpoint_fall_back(self):
         item = self.checkpoints.list_recoverable_turns()[0]
         with closing(sqlite3.connect(self.path)) as c: row = c.execute("SELECT checkpoint_json FROM checkpoint_cache").fetchone()[0]
