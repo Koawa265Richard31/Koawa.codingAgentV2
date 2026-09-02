@@ -1,0 +1,18 @@
+{
+ "id": "t23",
+ "files": {
+  "conf.py": "LIMIT = 3\n",
+  "queue_.py": "import conf\n\ndef clip(items):\n    return items[:5]\n",
+  "tests.py": "from queue_ import clip\nimport conf\nassert clip([1, 2, 3, 4, 5]) == [1, 2, 3]\nassert conf.LIMIT == 3\nprint('ok')\n"
+ },
+ "patch": {
+  "queue_.py": "import conf\n\ndef clip(items):\n    return items[: conf.LIMIT]\n"
+ },
+ "test": [
+  "python",
+  "tests.py"
+ ],
+ "oracle": {
+  "queue_.py": "import conf\n\ndef clip(items):\n    return items[: conf.LIMIT]\n"
+ }
+}

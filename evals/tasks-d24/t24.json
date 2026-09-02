@@ -1,0 +1,20 @@
+{
+ "id": "t24",
+ "files": {
+  "model.py": "class User:\n    def __init__(self, mail):\n        self.mail = mail\n",
+  "api.py": "from model import User\n\ndef describe(user):\n    return 'mail=' + user.mail\n",
+  "tests.py": "from model import User\nfrom api import describe\nu = User('a@b.c')\nassert describe(u) == 'email=a@b.c'\nprint('ok')\n"
+ },
+ "patch": {
+  "model.py": "class User:\n    def __init__(self, email):\n        self.email = email\n",
+  "api.py": "from model import User\n\ndef describe(user):\n    return 'email=' + user.email\n"
+ },
+ "test": [
+  "python",
+  "tests.py"
+ ],
+ "oracle": {
+  "model.py": "class User:\n    def __init__(self, email):\n        self.email = email\n",
+  "api.py": "from model import User\n\ndef describe(user):\n    return 'email=' + user.email\n"
+ }
+}

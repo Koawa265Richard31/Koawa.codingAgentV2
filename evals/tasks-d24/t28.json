@@ -1,0 +1,19 @@
+{
+ "id": "t28",
+ "files": {
+  "auth.py": "def check(token):\n    return True\n",
+  "routes.py": "from auth import check\n\ndef handler(token):\n    if not check(token):\n        return 403\n    return 200\n",
+  "tests.py": "from routes import handler\nassert handler('') == 403\nassert handler('secret') == 200\nprint('ok')\n"
+ },
+ "patch": {
+  "auth.py": "def check(token):\n    return bool(token)\n",
+  "routes.py": "from auth import check\n\ndef handler(token):\n    if not check(token):\n        return 403\n    return 200\n"
+ },
+ "test": [
+  "python",
+  "tests.py"
+ ],
+ "oracle": {
+  "auth.py": "def check(token):\n    return bool(token)\n"
+ }
+}

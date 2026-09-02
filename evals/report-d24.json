@@ -1,0 +1,79 @@
+{
+  "failure_classification": {
+    "success": 8
+  },
+  "injector": {
+    "script": [],
+    "seed": "eval-seed",
+    "triggered": []
+  },
+  "mandatory_reliability": "scripted_deterministic_provider",
+  "success": 8,
+  "tasks": [
+    {
+      "failure_class": "",
+      "id": "t21",
+      "oracle_pass": true,
+      "success": true,
+      "tests_pass": true,
+      "tool_calls": 2
+    },
+    {
+      "failure_class": "",
+      "id": "t22",
+      "oracle_pass": true,
+      "success": true,
+      "tests_pass": true,
+      "tool_calls": 2
+    },
+    {
+      "failure_class": "",
+      "id": "t23",
+      "oracle_pass": true,
+      "success": true,
+      "tests_pass": true,
+      "tool_calls": 1
+    },
+    {
+      "failure_class": "",
+      "id": "t24",
+      "oracle_pass": true,
+      "success": true,
+      "tests_pass": true,
+      "tool_calls": 2
+    },
+    {
+      "failure_class": "",
+      "id": "t25",
+      "oracle_pass": true,
+      "success": true,
+      "tests_pass": true,
+      "tool_calls": 2
+    },
+    {
+      "failure_class": "",
+      "id": "t26",
+      "oracle_pass": true,
+      "success": true,
+      "tests_pass": true,
+      "tool_calls": 2
+    },
+    {
+      "failure_class": "",
+      "id": "t27",
+      "oracle_pass": true,
+      "success": true,
+      "tests_pass": true,
+      "tool_calls": 3
+    },
+    {
+      "failure_class": "",
+      "id": "t28",
+      "oracle_pass": true,
+      "success": true,
+      "tests_pass": true,
+      "tool_calls": 2
+    }
+  ],
+  "total": 8
+}

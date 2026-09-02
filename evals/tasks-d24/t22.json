@@ -1,0 +1,20 @@
+{
+ "id": "t22",
+ "files": {
+  "fmt.py": "def render(name):\n    return 'hello ' + name\n",
+  "app.py": "import fmt\n\ndef greet(names):\n    return [fmt.render(n) for n in names]\n",
+  "tests.py": "from app import greet\nout = greet(['a', 'b'])\nassert out == ['Hello a!', 'Hello b!'], out\nprint('ok')\n"
+ },
+ "patch": {
+  "fmt.py": "def render(name):\n    return f'Hello {name}!'\n",
+  "app.py": "import fmt\n\ndef greet(names):\n    return [fmt.render(n.strip()) for n in names]\n"
+ },
+ "test": [
+  "python",
+  "tests.py"
+ ],
+ "oracle": {
+  "fmt.py": "def render(name):\n    return f'Hello {name}!'\n",
+  "app.py": "import fmt\n\ndef greet(names):\n    return [fmt.render(n.strip()) for n in names]\n"
+ }
+}

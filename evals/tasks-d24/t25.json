@@ -1,0 +1,19 @@
+{
+ "id": "t25",
+ "files": {
+  "reader.py": "def read_int(text):\n    return int(text)\n",
+  "worker.py": "from reader import read_int\n\ndef run(lines):\n    return [read_int(line) for line in lines]\n",
+  "tests.py": "from worker import run\nout = run(['1', 'x', '3'])\nassert out == [1, None, 3], out\nprint('ok')\n"
+ },
+ "patch": {
+  "reader.py": "def read_int(text):\n    try:\n        return int(text)\n    except ValueError:\n        return None\n",
+  "worker.py": "from reader import read_int\n\ndef run(lines):\n    return [read_int(line) for line in lines]\n"
+ },
+ "test": [
+  "python",
+  "tests.py"
+ ],
+ "oracle": {
+  "reader.py": "def read_int(text):\n    try:\n        return int(text)\n    except ValueError:\n        return None\n"
+ }
+}

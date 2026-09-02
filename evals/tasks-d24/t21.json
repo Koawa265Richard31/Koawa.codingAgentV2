@@ -1,0 +1,20 @@
+{
+ "id": "t21",
+ "files": {
+  "calc.py": "def add(a, b):\n    return a - b\n",
+  "main.py": "from calc import add\n\ndef total(xs):\n    return add(sum(xs), 0)\n",
+  "tests.py": "from main import total\nassert total([1, 2, 3]) == 6\nprint('ok')\n"
+ },
+ "patch": {
+  "calc.py": "def add(a, b):\n    return a + b\n",
+  "main.py": "from calc import add\n\ndef total(xs):\n    return add(sum(xs), 0) if xs else 0\n"
+ },
+ "test": [
+  "python",
+  "tests.py"
+ ],
+ "oracle": {
+  "calc.py": "def add(a, b):\n    return a + b\n",
+  "main.py": "from calc import add\n\ndef total(xs):\n    return add(sum(xs), 0) if xs else 0\n"
+ }
+}

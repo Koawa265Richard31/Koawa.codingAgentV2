@@ -1,0 +1,21 @@
+{
+ "id": "t27",
+ "files": {
+  "parse.py": "def parse(line):\n    return line.split(',')\n",
+  "transform.py": "def clean(parts):\n    return [p for p in parts if p]\n",
+  "emit.py": "from parse import parse\nfrom transform import clean\n\ndef process(text):\n    return clean(parse(text))\n",
+  "tests.py": "from emit import process\nassert process('a,,b, c ,d') == ['a', 'b', 'c', 'd']\nprint('ok')\n"
+ },
+ "patch": {
+  "parse.py": "def parse(line):\n    return [p.strip() for p in line.split(',')]\n",
+  "transform.py": "def clean(parts):\n    return [p for p in parts if p]\n",
+  "emit.py": "from parse import parse\nfrom transform import clean\n\ndef process(text):\n    return clean(parse(text))\n"
+ },
+ "test": [
+  "python",
+  "tests.py"
+ ],
+ "oracle": {
+  "parse.py": "def parse(line):\n    return [p.strip() for p in line.split(',')]\n"
+ }
+}

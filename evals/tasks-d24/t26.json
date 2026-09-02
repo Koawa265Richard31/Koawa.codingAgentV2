@@ -1,0 +1,20 @@
+{
+ "id": "t26",
+ "files": {
+  "store.py": "def pack(pair):\n    return {'a': pair[0], 'b': pair[1]}\n",
+  "view.py": "from store import pack\n\ndef show(pair):\n    d = pack(pair)\n    return d['a'] + '/' + d['b']\n",
+  "tests.py": "from view import show\nassert show(('x', 'y')) == 'x|y'\nprint('ok')\n"
+ },
+ "patch": {
+  "store.py": "def pack(pair):\n    return {'left': pair[0], 'right': pair[1]}\n",
+  "view.py": "from store import pack\n\ndef show(pair):\n    d = pack(pair)\n    return d['left'] + '|' + d['right']\n"
+ },
+ "test": [
+  "python",
+  "tests.py"
+ ],
+ "oracle": {
+  "store.py": "def pack(pair):\n    return {'left': pair[0], 'right': pair[1]}\n",
+  "view.py": "from store import pack\n\ndef show(pair):\n    d = pack(pair)\n    return d['left'] + '|' + d['right']\n"
+ }
+}

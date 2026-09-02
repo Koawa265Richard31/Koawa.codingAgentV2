@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-02T07:33:22.163941+00:00",
+  "commit": "e1fd348fa24901992ec3f45417ab0dd0bd8dfa7b",
+  "python": "3.14.3",
+  "os": "Windows-11-10.0.26200-SP0",
+  "harness_mode": "scripted_deterministic_provider",
+  "note": "offline deterministic harness (patch+oracle); real-provider behavior covered by I9 provider evidence (4 scenarios, 10/10)",
+  "tasks_dir": "evals/tasks-d24",
+  "success": 8,
+  "total": 8
+}
