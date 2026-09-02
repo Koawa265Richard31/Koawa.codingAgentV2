@@ -603,6 +603,7 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
         SessionHistoryError,
         SessionHistoryLimits,
         SessionTurn,
+        load_project_note,
         summarize_via_client,
     )
     from .turn_conclusion import TurnConclusionStore
@@ -690,6 +691,11 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
                 except PlanError:
                     pass
         history.plan_projection = plan_board.authoritative_projection
+
+    # D24 W2: repo-root AGENTS.md enters as untrusted, redacted project data.
+    project_note = load_project_note(config.repo)
+    if project_note is not None:
+        history.project_note = project_note
 
     def drain_approvals() -> None:
         pending = app.pending_approvals().payload.get("pending_approvals", [])
