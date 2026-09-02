@@ -22,6 +22,7 @@ from ..tools.repository import (
     register_repository_tools,
 )
 from ..tools.errors import ToolConfigurationError, tool_error_result
+from ..tools.repo_map import register_repo_map_tool
 from ..tools.schema import ToolSpec
 from .runner import (
     CommandProfile,
@@ -259,6 +260,7 @@ def build_verified_coding_tool_registry(
         _register_verification_tools(registry, runner, git, verification, tool_limits)
         if plan_board is not None:
             register_plan_tool(registry, plan_board)
+        register_repo_map_tool(registry, resolver)
         return registry
     except BaseException:
         resolver.close()
