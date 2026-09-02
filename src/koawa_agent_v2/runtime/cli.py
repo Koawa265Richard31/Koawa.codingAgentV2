@@ -606,6 +606,7 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
         summarize_via_client,
     )
     from .turn_conclusion import TurnConclusionStore
+    from ..plan import PlanDurableJournal, PlanError
 
     config = app.config
     limits = SessionHistoryLimits(
@@ -663,6 +664,32 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
             )
         except SessionHistoryError:
             thread_id = None
+
+    # D24 W1: bind the assembly-owned plan board to the durable thread stream
+    # and project it into every context build. Journal load/bind failure is
+    # non-fatal (session proceeds with an in-memory plan) but is reported.
+    plan_board = getattr(app.assembled, "plan_board", None)
+    if plan_board is not None:
+        plan_journal = None
+        if thread_id is not None:
+            try:
+                plan_journal = PlanDurableJournal(app.assembled.store, thread_id)
+                persisted = plan_journal.load()
+            except PlanError as error:
+                print(
+                    _json.dumps(
+                        {"ok": False, "code": error.code}, sort_keys=True
+                    )
+                )
+                persisted = ()
+                plan_journal = None
+            plan_board.restore(persisted)
+            if plan_journal is not None:
+                try:
+                    plan_board.bind_journal(plan_journal.append)
+                except PlanError:
+                    pass
+        history.plan_projection = plan_board.authoritative_projection
 
     def drain_approvals() -> None:
         pending = app.pending_approvals().payload.get("pending_approvals", [])

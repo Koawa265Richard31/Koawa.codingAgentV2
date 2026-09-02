@@ -147,3 +147,18 @@ class PlanBoard:
         if self._on_change is not None:
             self._on_change(items)
         self._items = items
+
+    def bind_journal(self, hook: Callable[[tuple[PlanItem, ...]], None]) -> None:
+        """绑定持久化 write-ahead 钩子；只允许绑定一次。"""
+        if self._on_change is not None:
+            raise PlanError("plan_change_hook_bound")
+        if not callable(hook):
+            raise PlanError("plan_change_hook_invalid")
+        self._on_change = hook
+
+    def restore(self, items: Sequence[PlanItem]) -> None:
+        """直接重放持久化状态（不触发钩子）；条目已由 PlanItem 校验。"""
+        for item in items:
+            if not isinstance(item, PlanItem):
+                raise PlanError("plan_item_invalid")
+        self._items = tuple(items)

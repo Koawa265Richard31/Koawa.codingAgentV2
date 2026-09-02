@@ -14,6 +14,8 @@ from .git import GitDiffSnapshot, GitFacade, GitFacadeError, GitLimits
 from ..editing.protocol import PatchLimits
 from ..editing.tools import register_patch_tool
 from ..editing.transaction import FaultInjector
+from ..plan import PlanBoard
+from ..plan.tools import register_plan_tool
 from ..tools.repository import (
     RepositoryToolLimits,
     RepositoryToolRegistry,
@@ -211,6 +213,7 @@ def build_verified_coding_tool_registry(
     tool_limits: D5ToolLimits | None = None,
     fault_injector: FaultInjector | None = None,
     git_facade: GitFacade | None = None,
+    plan_board: PlanBoard | None = None,
 ) -> CodingToolRegistry:
     """构建 D3 read/search + D4 patch + D5 test/git/finalize 的完整目录。"""
     repository_limits = repository_limits or RepositoryToolLimits()
@@ -254,6 +257,8 @@ def build_verified_coding_tool_registry(
             observer=verification.record_patch,
         )
         _register_verification_tools(registry, runner, git, verification, tool_limits)
+        if plan_board is not None:
+            register_plan_tool(registry, plan_board)
         return registry
     except BaseException:
         resolver.close()

@@ -5,14 +5,23 @@
 """
 
 from .board import PlanBoard, PlanError, PlanItem, PlanLimits
-from .tools import PlanToolRegistry, UpdatePlanArguments, plan_tool_spec
+from .durable import PLAN_EVENT_TYPE, PlanDurableJournal
+from .tools import (
+    PlanToolRegistry,
+    UpdatePlanArguments,
+    plan_tool_spec,
+    register_plan_tool,
+)
 
 __all__ = [
+    "PLAN_EVENT_TYPE",
     "PlanBoard",
+    "PlanDurableJournal",
     "PlanError",
     "PlanItem",
     "PlanLimits",
     "PlanToolRegistry",
     "UpdatePlanArguments",
     "plan_tool_spec",
+    "register_plan_tool",
 ]

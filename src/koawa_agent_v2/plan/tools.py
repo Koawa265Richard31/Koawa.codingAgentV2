@@ -86,17 +86,50 @@ class PlanToolRegistry(ToolRegistry):
         context: ToolExecutionContext,
     ) -> ToolExecutionResult:
         del context
-        try:
-            items = self._board.replace(arguments.texts, arguments.statuses)
-        except PlanError as error:
-            return tool_error_result(error.code)
-        pending = [item.item_id for item in items if item.status == "pending"]
-        payload: dict[str, Any] = {
-            "ok": True,
-            "items": len(items),
-            "pending_ids": pending,
-            "done_count": len(items) - len(pending),
-        }
-        return ToolExecutionResult(
-            content=json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        )
+        return update_plan_handler(self._board, arguments)
+
+
+def update_plan_handler(
+    board: PlanBoard,
+    arguments: UpdatePlanArguments,
+) -> ToolExecutionResult:
+    try:
+        items = board.replace(arguments.texts, arguments.statuses)
+    except PlanError as error:
+        return tool_error_result(error.code)
+    pending = [item.item_id for item in items if item.status == "pending"]
+    payload: dict[str, Any] = {
+        "ok": True,
+        "items": len(items),
+        "pending_ids": pending,
+        "done_count": len(items) - len(pending),
+    }
+    return ToolExecutionResult(
+        content=json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    )
+
+
+def register_plan_tool(registry: ToolRegistry, board: PlanBoard) -> None:
+    """把 update_plan 并入既有 sealed 装配（如 verified coding registry）。"""
+    if not isinstance(board, PlanBoard):
+        raise PlanError("plan_board_invalid")
+    registry.register(
+        plan_tool_spec(board.limits),
+        _BoundPlanHandler(board),
+    )
+
+
+class _BoundPlanHandler:
+    """绑定具体 board 的 handler；保持 registry.register 的可调用合同。"""
+
+    def __init__(self, board: PlanBoard) -> None:
+        self._board = board
+
+    def __call__(
+        self,
+        arguments: UpdatePlanArguments,
+        *,
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        del context
+        return update_plan_handler(self._board, arguments)

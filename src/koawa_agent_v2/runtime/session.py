@@ -179,6 +179,7 @@ class SessionHistory:
         summarize: Callable[[str], str] | None = None,
         conclusions: object | None = None,
         memory: MemoryConfig | None = None,
+        plan_projection: Callable[[], str] | None = None,
     ) -> None:
         if not isinstance(provider, str) or not provider.strip():
             raise ValueError("provider must be non-empty")
@@ -188,17 +189,30 @@ class SessionHistory:
             hasattr(conclusions, "build") and hasattr(conclusions, "load")
         ):
             raise TypeError("conclusions must implement TurnConclusionStore or None")
+        if plan_projection is not None and not callable(plan_projection):
+            raise TypeError("plan_projection must be callable or None")
         self._provider = provider
         self._limits = limits or SessionHistoryLimits()
         self._summarize = summarize
         self._conclusions = conclusions
         self._memory = memory or MemoryConfig()
+        self._plan_projection = plan_projection
         self._turns: list[SessionTurn] = []
         self._compacted: list[CompactionResult] = []
         self._compacted_up_to = 0
         # D23 §7 journal reminder state (turns since last successful journal).
         self._last_journal_turn_count = 0
         self._journal_changed_files: set[str] = set()
+
+    @property
+    def plan_projection(self) -> Callable[[], str] | None:
+        return self._plan_projection
+
+    @plan_projection.setter
+    def plan_projection(self, value: Callable[[], str] | None) -> None:
+        if value is not None and not callable(value):
+            raise TypeError("plan_projection must be callable or None")
+        self._plan_projection = value
 
     @property
     def limits(self) -> SessionHistoryLimits:
@@ -289,6 +303,12 @@ class SessionHistory:
         """
         self.maybe_compact()
         items: list[ModelContextItem] = []
+        if self._plan_projection is not None:
+            plan_text = self._plan_projection()
+            if plan_text.strip():
+                items.append(
+                    UserMessage(input_id="session:plan", content=plan_text)
+                )
         reminder = self._journal_reminder()
         if reminder is not None:
             items.append(reminder)

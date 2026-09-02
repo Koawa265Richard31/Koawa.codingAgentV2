@@ -79,6 +79,7 @@ from ..verification.runner import (
 )
 from ..verification.git import GitFacade, GitFacadeError
 from ..verification.tools import build_verified_coding_tool_registry
+from ..plan import PlanBoard
 from .composite_registry import CompositeToolRegistry
 from .config import (
     McpExecutionProfile,
@@ -135,6 +136,9 @@ class AssembledRuntime:
     correlation_id: object
     loop: AgentLoop
     mcp_sessions: tuple[tuple[McpServerConfig, McpSession, McpCatalog], ...] = ()
+    # D24 W1: thread-lifetime plan board shared by the tool registry and the
+    # session projection; durable journal binding happens per session.
+    plan_board: object | None = None
     # Idempotent teardown marker (frozen dataclass: mutated via object.__setattr__).
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
 
@@ -494,10 +498,12 @@ def assemble_execution_plane(
     correlation_id = control.correlation_id
     try:
         runner = _build_command_runner(config, store)
+        plan_board = PlanBoard()
         builtin_registry = build_verified_coding_tool_registry(
             config.repo,
             command_runner=runner,
             git_facade=control.git,
+            plan_board=plan_board,
         )
         mcp_sessions, mcp_bindings = _connect_execution_mcp_servers(
             control, granted_plan, launcher_builder=launcher_builder,
@@ -578,6 +584,7 @@ def assemble_execution_plane(
             correlation_id=correlation_id,
             loop=loop,
             mcp_sessions=mcp_sessions,
+            plan_board=plan_board,
         )
         control.attach_execution(assembled)
         return assembled
