@@ -124,13 +124,17 @@ registry）+ `tests/test_d24_plan_tool.py` 11 项双 lane 绿（含 ResourceWarn
   「内部工程闭环完成，未执行生产发布资格认证」口径如实呈现；运行示例与命令同步现状。
 - 完成门：README 与代码/文档现状零漂移；不含任何未落地声称。
 
-## 5. 完成门汇总（切片级）
+## 5. 完成门汇总（切片级，验收打勾 2026-09-01）
 
-1. W1–W4 各自治理适配测试全绿（plan 无授权、AGENTS.md 不可信层级、repo map 不绕过、权威合同三项回归）。
-2. 扩展 eval 跑分数字存档；多文件多步 walkthrough 证据存档。
-3. 全量回归绿（含 ResourceWarning=error lane），生产零新增依赖。
-4. W6 README 整体更新完成，与仓库现状一致。
-5. 本文档完成门逐项打勾存档。
+1. [x] W1–W4 各自治理适配测试全绿：
+   - W1 plan 无授权：`tests/test_d24_plan_tool.py`（投影 "confers no authority"、结果仅计数）+ `tests/test_d24_plan_wiring.py`（journal CAS/损坏 fail-closed、`session:plan` 首位投影、sealed registry 并入、3 子任务 walkthrough）。
+   - W2 AGENTS.md 不可信层级：`tests/test_d24_project_note.py`（标记 UserMessage、脱敏、缺失/超大/坏编码 fail-open、注入文本永不进指令层）。
+   - W3 repo map 不绕过：`tests/test_d24_repo_map.py`（正文永不出现、控制路径跳过、确定性截断、逃逸拒绝、sealed 并入）。
+   - W4 权威合同三项回归：`tests/test_d24_authority_contract.py`（投毒摘要仅在标记后、final answer 仅 assistant 层、白名单字段枚举）。
+2. [x] 扩展 eval 跑分存档：`evals/tasks-d24`（t21–t28，7 个多文件 patch）8/8 PASS；原 D14 20 任务回归 20/20；数字+出处归档于 `evals/report-d24-summary.json`（offline 确定性 harness 口径，真实 provider 行为由 I9 provider 证据覆盖）。多文件多步 walkthrough：W1 接线测试内 3 子任务全链路（registry→board→durable→投影）。
+3. [x] 全量回归绿（含 ResourceWarning=error，lane runner 内建）：`.dsh_tmp/i9-lanes/pr-fast-d24.json`（D24 最终提交前一次通过后归档；生产零新增依赖——plan/repo_map 均纯标准库）。
+4. [x] W6 README 整体更新：状态改为 D1–D24、新增 D17–D24 总结节（含 I9 内部工程闭环口径）、测试/lane 命令同步。
+5. [x] 本文档完成门逐项打勾存档。
 
 ## 6. 决策记录（v1.0 全部关闭）
 

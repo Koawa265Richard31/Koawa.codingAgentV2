@@ -46,7 +46,13 @@ It records the current status, dependency graph, per-day interfaces, failure mat
 acceptance gates, prohibited shortcuts, and the exact startup procedure for a new
 conversation. Read it before starting the next slice; this README is only the index.
 
-## Current state: D1–D15 complete
+## Current state: D1–D24 complete
+
+D1–D15 are detailed below. D16 (interactive sessions), D17–D20 (robustness
+and repair), D21 (agent-security authenticity package), D22 (hardening),
+D23 (long-task memory closure), and D24 (capability parity) are summarized in
+the sections after the provider instructions; design docs live under
+`docs/day-*.md` and `docs/stability/`.
 
 D1 remains the durable control plane: append-only Thread/Turn streams, exact-version
 writes, semantic command receipts, and per-attempt `run_id` fencing. D2 adds the
@@ -296,6 +302,52 @@ py -3.14 -B examples/day16_interactive_session.py
 ```
 
 Session design and tradeoffs: [docs/day-16-interactive-session.md](docs/day-16-interactive-session.md).
+
+## D17–D24: robustness, memory closure, capability parity
+
+- **D17–D22** hardened the real-model loop: configurable budgets with
+  repairable tool errors (detail/expected/example), exception/thinking
+  handling, stream retry, completion gates, baseline fingerprints, and the
+  I1–I9 stabilization track (durable JSON hard bounds, mailbox/spawn atomic
+  transactions, schema manager v2, unified run truth, fault-injection
+  matrix with 77 named kill points).
+- **D23** closed the long-task memory loop: authoritative per-turn
+  `TurnConclusion` rebuilt from typed facts, turn-memory stream persistence,
+  grouped compaction with untrusted summaries, conclusion-block dedup, and
+  real-provider verification (opt-in evidence in
+  `docs/day-23-memory-layer-upgrade.md`).
+- **D24** aligned core capabilities with mainstream harnesses while keeping
+  the threat model (`docs/day-24-capability-parity.md`):
+  - `update_plan` tool — durable task decomposition as `memory.plan-updated.v1`
+    on a thread-keyed CAS stream, projected into every context build as the
+    authoritative `session:plan` item; the plan confers no authority.
+  - Repo-root `AGENTS.md` loads as bounded, redacted, **untrusted project
+    data** (a marked user-level message, never the instruction tier).
+  - `repo_map` tool — bounded directory tree plus Python symbol outline;
+    metadata only, resolver-enforced, control paths skipped.
+  - Memory-layer authority-contract regressions: poisoned summaries stay
+    behind the untrusted marker, poisoned final answers reflow only at
+    assistant level, and the session projection whitelist has no
+    tool-output channel.
+  - Eval extended with 8 multi-file/multi-step tasks (t21–t28): 8/8 pass,
+    numbers archived with provenance in `evals/report-d24-summary.json`
+    (offline deterministic harness; real-provider behavior is covered by the
+    I9 provider evidence, 4 scenarios 10/10).
+- **I9 status**: closed as an *internal engineering loop* (Windows full
+  regression, a real Linux lane on WSL2-ext4, outside-repo fresh-install
+  smoke, credential canary scan, real provider 10/10, independent audit with
+  no P0/P1). Production release qualification was deliberately **not**
+  executed — see `docs/stability/i9-progress.md` §0 for the exact scope.
+
+## Run the test suite and lanes
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH='src'
+python -B -m unittest discover -s tests -v          # full suite (Python 3.12+)
+python -B -m unittest tests.test_d24_plan_tool tests.test_d24_plan_wiring tests.test_d24_project_note tests.test_d24_repo_map tests.test_d24_authority_contract -v
+py -3.14 -B scripts/stability_gate.py --lane pr-fast --report out.json   # I9 lane runner
+```
 
 ## Run D1 through D15 tests
 

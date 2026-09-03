@@ -283,6 +283,7 @@ class _VerticalModel:
             "git_status",
             "list_files",
             "read_file",
+            "repo_map",
             "run_test_profile",
             "search_text",
         }
