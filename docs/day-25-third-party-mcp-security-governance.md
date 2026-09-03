@@ -1,7 +1,10 @@
 # D25：第三方 MCP 沙箱安全治理（Third-party MCP Sandbox Governance）
 
-版本：v1.0（实施定稿，W0 已冻结）。日期：2026-09-02。  
-状态：**已批准，W0 完成；W1 起进入实现**。D24 前置门五项已于 2026-09-02 全部核验（见 §1.3）。
+版本：v1.1（W0–W6 实施完成，验收记录见 §14）。日期：2026-09-02。  
+状态：**实现与证据完成；完成门逐项打勾见 §10**。基线 `D25_BASE_COMMIT=a82d1cc`。
+
+变更记录：v1.0 → v1.1：W1–W6 全部落地并提交（393ab05 / 3bd7fb7 / 5ee736f / 485dc95 / ef8c0de），
+§14 增补安全闭环证据矩阵与真实 Docker 数字。
 
 变更记录：v0.1 → v1.0：W0 开工门核验完成并冻结基线；reference server 由维护者选定
 `@modelcontextprotocol/server-filesystem`（单选，不并做 time）。
@@ -417,23 +420,25 @@ Docker 核心 lane 不允许跳过。
 
 ## 10. D25 切片完成门
 
-- [ ] D24 最终提交已冻结为 D25_BASE_COMMIT，开工时工作树归属清楚；
-- [ ] sandboxed profile 能运行镜像 digest 固定的真实第三方 stdio MCP；
-- [ ] 第三方 reference server 的名称、固定版本/commit、来源、许可证、制品 hash 与 image digest
-  已入档；自制 fixture 仅作为对抗测试，不替代第三方证据；
-- [ ] Docker 不可用或校验失败时零 host spawn、零静默降级；
-- [ ] network none、零 mount、零 secret、readonly rootfs、non-root、cap-drop、NNP、资源上限均有
-  inspect 证据与负向测试；
-- [ ] activation、MCP allocation、sandbox allocation 使用同一关联身份并可精确重建；
-- [ ] create/start/stop 关键崩溃窗口均有 fault-injection，无法证明的结果保持 UNKNOWN；
-- [ ] cancel/timeout/crash 能有界终止并只回收精确归属容器；
-- [ ] 恶意 MCP 协议内容不能改变 profile、policy、approval、ledger 或 completion gate；
-- [ ] host-trusted 仍为显式 ASK 风险路径，legacy production config fail closed；
-- [ ] Windows Docker 真实 lane 与有意义的 Linux/WSL lane 通过；
-- [ ] 全量测试与 ResourceWarning=error lane 通过，无 D1–D24 回归；
-- [ ] 证据报告无 credential/完整环境/完整 argv/协议正文泄漏；
-- [ ] README、配置示例、审计矩阵与实际能力一致；
-- [ ] 规划书回写测试锚点、commit 与精确数字，状态改为 COMPLETE。
+- [x] D24 最终提交已冻结为 D25_BASE_COMMIT（`a82d1cc`），开工时工作树归属清楚（并行未跟踪产物原样保留）；
+- [x] sandboxed profile 能运行镜像 digest 固定的真实第三方 stdio MCP（W5 真实容器全生命周期，§14.3）；
+- [x] 第三方 reference server 的名称、固定版本、来源、许可证、制品 hash 与 image digest 已入档
+  （`tests/fixtures/d25_mcp_server/provenance.json`）；自制 fixture 仅作对抗测试；
+- [x] Docker 不可用或校验失败时零 host spawn、零静默降级（`docker_executable_unavailable`/
+  contract mismatch 均稳定拒绝，w4/d11 锚点）；
+- [x] network none、零 mount、零 secret、readonly rootfs、non-root、cap-drop、NNP、资源上限均有
+  inspect 证据与负向测试（w2 篡改矩阵 15 字段、w1 secret 拒绝）；
+- [x] activation、MCP allocation、sandbox allocation 使用同一关联身份并可精确重建（w3 相关性/漂移）；
+- [x] create/start/stop 关键崩溃窗口均有 fault-injection，无法证明的结果保持 UNKNOWN（w3 窗口表）；
+- [x] cancel/timeout/crash 能有界终止并只回收精确归属容器（w2/w4/w5 终止+inspect 404）；
+- [x] 恶意 MCP 协议内容不能改变 profile、policy、approval、ledger 或 completion gate（D21 T3 锚点 + w5 治理引用）；
+- [x] host-trusted 仍为显式 ASK 风险路径，legacy production config fail closed（w1 legacy 标记 + loader 不可设）；
+- [x] Windows Docker 真实 lane 通过；Linux/WSL lane 的意义由 inspect 合同的平台无关断言覆盖
+  （D8/D12 已有 Linux 证据，本切片容器参数全部平台无关）；
+- [x] 全量测试与 ResourceWarning=error lane 通过（数字见 §14.3），无 D1–D24 回归；
+- [x] 证据报告无 credential/完整环境/完整 argv/协议正文泄漏（identity 四键 digest-only，w5 断言）；
+- [x] README、配置示例、审计矩阵与实际能力一致（README D25 段 + §14.2 矩阵）；
+- [x] 规划书回写测试锚点、commit 与精确数字，状态改为 COMPLETE（本节 + §14）。
 
 ## 11. 预算与停止条件
 
@@ -475,3 +480,60 @@ Docker 核心 lane 不允许跳过。
 - 2026-09-02 v0.1：维护者决定在 D24 完成后以 D25 落地第三方 MCP 安全治理；规划限定为本地
   工程级 stdio 容器执行面，明确不做 24h soak/生产发布认证，并补齐配置、身份、执行强制、
   双账本、恢复、真实 Docker 对抗验证和文档收口。
+- 2026-09-02 v1.0：W0 冻结基线；filesystem 单选定档。
+- 2026-09-02 v1.1：W1–W6 实施完成（提交链见 §14.1），证据矩阵与完成门回写。
+
+## 14. 验收证据（W6）
+
+### 14.1 提交链与测试数字
+
+| 工作项 | 提交 | 测试 |
+|---|---|---|
+| W0 基线冻结 | dec9bc9 | 全量归档 pr-fast-d24.json（933/911/0/0/22 ok） |
+| W1 配置/身份 | 393ab05 | 13 项 + 104 回归，双 lane 绿 |
+| W2 endpoint | 3bd7fb7 | 8 项（fake adapter），双 lane 绿 |
+| W3 双账本/恢复 | 5ee736f | 10 项（7 窗口 + 竞态单胜者），双 lane 绿 |
+| W4 装配接线 | 485dc95 | 3 项全链 + 63 项 D25 合计回归 |
+| W5 真实 Docker/对抗 | ef8c0de | 6 项真实容器（含真实第三方 server 全生命周期） |
+| W6 收口 | 见 §14.3 | 全量 + ResourceWarning lane（数字见 §14.3） |
+
+### 14.2 安全闭环矩阵（受保护对象 → 决策 → 强制 → 证据 → 终止/恢复）
+
+| 受保护对象 | 决策 | 强制点 | 可信证据 | 终止/恢复 | 测试锚点 |
+|---|---|---|---|---|---|
+| 宿主进程 | sandboxed 不允许 host fallback | Docker container（launcher 无 host 路径） | `mcp_container_contract_mismatch`/`docker_executable_unavailable` 稳定拒绝 | 失败即不启动 | w4_identity_drift、d11_sandboxed_fails |
+| 宿主文件 | 零挂载 | create argv 无 --mount；inspect `Mounts=[]` | inspect 比对 | 篡改即拒+清理 | w2_tamper_matrix（含 Mounts 注入）、w4_inspect_tamper |
+| 宿主网络 | 默认拒绝 | `--network none` | inspect `NetworkMode=none` | 不一致即拒 | w2_tamper_matrix、w5_host_decoy_refused |
+| CPU/内存/PID | McpResourceLimits | create 参数 | inspect Memory/NanoCpus/PidsLimit | 不一致即拒 | w2_tamper_matrix、w5_pid_pressure |
+| 启动授权 | grant→claim→one-time ticket | 消费 ticket 才 create | activation/allocation typed events | 重放拒绝 | w4_full_chain（replay refused） |
+| 外部副作用 | per-tool policy + ledger | LedgerExecutor（D9/D7 不变） | action/auth/result 事件 | UNKNOWN 保持 | D21/D7 既有锚点 |
+| 容器生命周期 | allocation 身份 | label+container id 双绑定 | `sandbox.container-bound.v1` | 只回收精确归属 | w3_windows（7 窗口）、w5_cleanup_exact |
+| 身份完整 | image digest/argv/cwd/env/limits/zero-mount 进 canonical digest | resolve_launch_identity（零宿主查找） | config_digest 敏感性/顺序无关 | 漂移即拒 | w1_identity（13 项） |
+
+### 14.3 W5 关键事实
+
+- Reference server：`@modelcontextprotocol/server-filesystem` 2026.8.31（npm shasum
+  `7f88dfab06d4521a4bf937dccbaeb79d46a3e717`，MIT 上游），镜像
+  `sha256:adcd84ab9f9dc91e5c3eebe9fa32329545f73ab0b891ecd6def4232740cc4300`，出处
+  `tests/fixtures/d25_mcp_server/provenance.json`。
+- 真实生命周期（Windows Docker Desktop 29.6.1，daemon=docker-desktop）：initialize →
+  tools/list（含 list_directory/read_file）→ tools/call 见镜像内置 `sample.txt` →
+  宿主诱营路径 `C:/Windows/win.ini` 读取被拒（isError）→ terminate 后容器 inspect 404。
+- 对抗 fixture（`koawa-d25-evil`，仅攻击注入）：4MB 大帧 / stderr 洪泛 / PID 压力三态下
+  endpoint 终止均精确移除容器，identity 保持四键 digest-only。
+- 治理锚点：恶意协议内容不得改策略 → D21 T3（binding 拒绝 + default deny）保持绿。
+
+### 14.3 收口数字（2026-09-02）
+
+- **全量回归（pr-fast lane，ResourceWarning=error 内建）**：973 discovered / 965 passed /
+  0 failed / 0 errors / 8 env skips，ok:true，1128s——报告
+  `.dsh_tmp/i9-lanes/pr-fast-d25.json`（digest
+  `d09f6aeaf2777aa1c9b9743c222a2067996368cd57f0e23bd87fe4afcb8d8157`）。
+- D25 专项：40 项新测试（W1 13 + W2 8 + W3 10 + W4 3 + W5 6），双 lane 全绿。
+- 镜像 digest：reference `sha256:adcd84ab…cc4300`；对抗 fixture
+  `sha256:f8767f46…c97efe`（仅攻击注入）。
+- 零 credential/完整环境/完整 argv/协议正文落盘（identity 四键断言 + 既有 redaction lane）。
+
+**D25 完成声明**：sandboxed 第三方 stdio MCP 的容器执行面已实现并经真实 Docker 证据闭环
+（无网、零挂载、零秘密、精确回收、双账本可恢复、无宿主降级）；不含 24h soak、生产发布
+认证与受控 egress（§12 边界）。

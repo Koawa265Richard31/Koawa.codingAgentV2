@@ -333,6 +333,18 @@ Session design and tradeoffs: [docs/day-16-interactive-session.md](docs/day-16-i
     numbers archived with provenance in `evals/report-d24-summary.json`
     (offline deterministic harness; real-provider behavior is covered by the
     I9 provider evidence, 4 scenarios 10/10).
+- **D25** turned the `sandboxed` MCP profile into a real container execution
+  plane (`docs/day-25-third-party-mcp-security-governance.md`): third-party
+  stdio MCP servers run inside Docker with an exact image digest, network=none,
+  zero mounts, zero secrets, read-only rootfs, non-root, cap-drop ALL,
+  no-new-privileges and bounded cpu/mem/pids/tmpfs — created only after the
+  activation ticket is consumed, verified by an exact `docker inspect`
+  contract, and dual-bound to the MCP and sandbox allocation ledgers with
+  crash-window reconciliation. Reference integration: the pinned upstream
+  `server-filesystem` (version/tarball/image digest in
+  `tests/fixtures/d25_mcp_server/provenance.json`); adversarial fixtures
+  (frame flood, stderr flood, PID pressure) prove bounded cleanup. There is
+  no host fallback; `host_trusted` remains an explicit ASK escape hatch.
 - **I9 status**: closed as an *internal engineering loop* (Windows full
   regression, a real Linux lane on WSL2-ext4, outside-repo fresh-install
   smoke, credential canary scan, real provider 10/10, independent audit with
