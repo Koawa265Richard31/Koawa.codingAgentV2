@@ -861,10 +861,21 @@ class LauncherTest(unittest.TestCase):
         ticket = self.service.claim(
             intent, view, principal_id="root",
         )
-        launcher = SandboxedLauncher(self.service, plan)
+        # D25 W4: an unreachable Docker executable is a pre-create failure -
+        # recorded failed_before_start, zero host spawn, stable code.
+        from koawa_agent_v2.sandbox.runtime import SandboxAllocationStore
+
+        launcher = SandboxedLauncher(
+            self.service,
+            plan,
+            sandbox_store=SandboxAllocationStore(self.store),
+            docker_executable="definitely-not-a-docker-binary",
+        )
         with self.assertRaises(McpActivationError) as raised:
             launcher.launch(ticket)
-        self.assertEqual("mcp_sandbox_unavailable", raised.exception.code)
+        self.assertEqual(
+            "docker_executable_unavailable", raised.exception.code
+        )
         self.assertEqual(0, self.spawner.count)
 
 

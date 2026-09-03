@@ -312,25 +312,138 @@ class HostTrustedLauncher:
 
 
 class SandboxedLauncher:
-    """sandboxed profile: D8-equivalent container boundary or explicit fail.
+    """sandboxed profile: real container boundary, never a host fallback.
 
-    This slice never degrades to a bare host spawn: without a bound
-    container runner every attempt fails with mcp_sandbox_unavailable and
-    zero process calls.
+    Launch order is intent → create → inspect-verify → attach → bind →
+    start → record started.  Any pre-create failure is
+    ``failed_before_start``; cleanup uncertainty after an external side
+    effect is ``outcome_unknown`` - both recorded on the dual-bound
+    allocation before the error surfaces (W3 state machine).
     """
 
     def __init__(
-        self, activation, plan: StagedLaunchPlan, *, docker_runner=None,
+        self,
+        activation,
+        plan: StagedLaunchPlan,
+        *,
+        sandbox_store,
+        docker_adapter=None,
+        docker_executable: str = "docker",
+        container_labels: tuple[tuple[str, str], ...] = (),
+        process_start_timeout_seconds: float = 30.0,
+        deadline_seconds: float = 300.0,
     ) -> None:
         self._activation = activation
         self._plan = plan
-        self._docker_runner = docker_runner
+        self._sandbox_store = sandbox_store
+        self._docker_adapter = docker_adapter
+        self._docker_executable = docker_executable
+        self._container_labels = container_labels
+        self._process_start_timeout_seconds = float(process_start_timeout_seconds)
+        self._deadline_seconds = float(deadline_seconds)
 
     def launch(
         self, ticket: AuthorizedLaunchTicket,
     ) -> McpProcessEndpoint:
+        import time as _time
+        from datetime import datetime, timedelta, timezone
+
+        from .docker_endpoint import (
+            DockerEndpointError,
+            DockerAdapter,
+            launch_container_endpoint,
+        )
+        from .sandbox_reconcile import ensure_sandbox_intent
+        from ..sandbox.docker_primitives import ContainerSpec
+        from ..sandbox.runtime import SandboxError
+
         self._activation.consume_ticket(ticket)
-        raise McpActivationError("mcp_sandbox_unavailable")
+        if ticket.launch_identity_digest != self._plan.identity.config_digest:
+            raise McpActivationError("mcp_launch_identity_mismatch")
+        config = self._plan.config
+        if config.execution_profile is not _profile_enum().SANDBOXED:
+            raise McpActivationError("mcp_sandbox_profile_required")
+        adapter = self._docker_adapter or DockerAdapter()
+
+        def _failed_before_start(code: str) -> McpActivationError:
+            try:
+                self._activation.record_failed_before_start(ticket, reason=code)
+            except McpActivationError:
+                pass
+            return McpActivationError(code)
+
+        try:
+            ensure_sandbox_intent(
+                self._sandbox_store,
+                ticket,
+                image_id=config.image_id,
+                launch_identity_digest=ticket.launch_identity_digest,
+                deadline_at=datetime.now(timezone.utc)
+                + timedelta(seconds=self._deadline_seconds),
+            )
+        except SandboxError as error:
+            raise _failed_before_start(error.code) from None
+
+        limits = config.resource_limits or _mcp_resource_limits()()
+        spec = ContainerSpec(
+            image_id=config.image_id,
+            argv=tuple(config.command),
+            container_working_directory=config.container_working_directory,
+            environment=tuple(config.environment),
+            cpus=limits.cpus,
+            memory_bytes=limits.memory_bytes,
+            pids_limit=limits.pids,
+            tmpfs_bytes=limits.tmpfs_bytes,
+            container_name=f"koawa-mcp-{ticket.allocation_id}",
+            labels=self._container_labels
+            + (
+                ("koawa.mcp.allocation", str(ticket.allocation_id)),
+                ("koawa.mcp.owner", str(ticket.request_id)),
+            ),
+        )
+        try:
+            endpoint = launch_container_endpoint(
+                spec,
+                docker_executable=self._docker_executable,
+                process_start_timeout_seconds=self._process_start_timeout_seconds,
+                adapter=adapter,
+            )
+        except (SandboxError, DockerEndpointError) as error:
+            code = getattr(error, "code", "mcp_sandbox_unavailable")
+            uncertain = code in {
+                "mcp_container_stop_failed",
+                "mcp_container_remove_failed",
+                "mcp_container_cleanup_failed",
+            }
+            try:
+                if uncertain:
+                    self._activation.record_outcome_unknown(ticket, reason=code)
+                else:
+                    self._activation.record_failed_before_start(
+                        ticket, reason=code,
+                    )
+            except McpActivationError:
+                pass
+            raise McpActivationError(code) from None
+        try:
+            self._sandbox_store.bind(ticket.allocation_id, endpoint.container_id)
+            self._sandbox_store.start(ticket.allocation_id)
+            self._activation.record_started(ticket)
+        except (SandboxError, McpActivationError) as error:
+            try:
+                endpoint.kill_tree(deadline=_time.monotonic() + 30.0)
+            except Exception:
+                pass
+            raise McpActivationError(
+                getattr(error, "code", "mcp_sandbox_bind_failed")
+            ) from None
+        return endpoint
+
+
+def _profile_enum():
+    from ..runtime.config import McpExecutionProfile
+
+    return McpExecutionProfile
 
 
 def _argv_digest(argv: tuple[str, ...]) -> str:

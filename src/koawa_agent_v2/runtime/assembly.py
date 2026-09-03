@@ -421,7 +421,13 @@ def _process_start_decision(
             return ("deny", scope)
         return ("ask", scope)
     if profile is McpExecutionProfile.SANDBOXED:
-        raise RuntimeAssemblyError("mcp_sandbox_unavailable")
+        # D25 W4: a valid sandboxed profile is a controlled allow inside the
+        # mcp.use scope - the container boundary is the safety story, and the
+        # per-tool policy/ledger chain still applies afterwards.
+        scope = process_start_scope(profile)
+        if scope not in scopes:
+            return ("deny", scope)
+        return ("allow", scope)
     # D25 W1: legacy (None-profile) configs lost the implicit allow in normal
     # assembly.  Only an explicitly marked test fixture keeps the old
     # decision; file-borne configs can never carry the marker.
@@ -897,7 +903,19 @@ def _default_launcher(
     plan: StagedLaunchPlan,
 ) -> McpProcessLauncher:
     if server_config.execution_profile is McpExecutionProfile.SANDBOXED:
-        return SandboxedLauncher(control.activation, plan)
+        from ..sandbox.runtime import SandboxAllocationStore
+        from .mcp_sandbox_labels import MCP_SANDBOX_LABELS
+
+        return SandboxedLauncher(
+            control.activation,
+            plan,
+            sandbox_store=SandboxAllocationStore(control.store),
+            docker_executable=control.config.sandbox.docker_executable,
+            container_labels=MCP_SANDBOX_LABELS,
+            process_start_timeout_seconds=(
+                server_config.process_start_timeout_seconds
+            ),
+        )
     return HostTrustedLauncher(
         control.activation,
         plan,
