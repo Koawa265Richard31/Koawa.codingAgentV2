@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "slice": "D25",
+  "role": "reference-integration (third-party stdio MCP server)",
+  "project": "@modelcontextprotocol/server-filesystem",
+  "npm_version": "2026.8.31",
+  "tarball_shasum": "7f88dfab06d4521a4bf937dccbaeb79d46a3e717",
+  "tarball_url": "https://registry.npmjs.org/@modelcontextprotocol/server-filesystem/-/server-filesystem-2026.8.31.tgz",
+  "upstream": "https://github.com/modelcontextprotocol/servers",
+  "license": "MIT (upstream repo LICENSE; npm metadata: SEE LICENSE IN LICENSE)",
+  "pinned_on": "2026-09-02",
+  "base_image": "node:22-alpine",
+  "image_tag_at_build": "koawa-d25-filesystem:fixed",
+  "image_id": "sha256:adcd84ab9f9dc91e5c3eebe9fa32329545f73ab0b891ecd6def4232740cc4300",
+  "entrypoint": "/usr/local/bin/node",
+  "server_entry": "/usr/local/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+  "runtime_policy": "network=none, zero mounts, read-only rootfs, user 65532:65532, cap-drop ALL, no-new-privileges, bounded cpu/mem/pids/tmpfs",
+  "notes": "Image is built locally from tests/fixtures/d25_mcp_server/Dockerfile; floating tags never authorize execution (doc §4.4). Self-made adversarial fixtures are separate and do not replace this third-party evidence."
+}

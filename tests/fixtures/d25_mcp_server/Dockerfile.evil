@@ -1,0 +1,3 @@
+# D25 W5 adversarial fixture image (attack injection only; NOT third-party evidence).
+FROM node:22-alpine
+COPY evil.js /opt/evil.js
