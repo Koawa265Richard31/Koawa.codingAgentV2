@@ -422,6 +422,11 @@ def _process_start_decision(
         return ("ask", scope)
     if profile is McpExecutionProfile.SANDBOXED:
         raise RuntimeAssemblyError("mcp_sandbox_unavailable")
+    # D25 W1: legacy (None-profile) configs lost the implicit allow in normal
+    # assembly.  Only an explicitly marked test fixture keeps the old
+    # decision; file-borne configs can never carry the marker.
+    if not server_config.legacy_fixture:
+        raise RuntimeAssemblyError("mcp_legacy_profile_requires_migration")
     return ("allow", process_start_scope(None))
 
 

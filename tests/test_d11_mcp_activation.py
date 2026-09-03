@@ -839,9 +839,13 @@ class LauncherTest(unittest.TestCase):
     def test_sandboxed_profile_fails_explicitly_without_container(self) -> None:
         server = McpServerConfig(
             server_id="sandboxed",
-            command=_fixture_command(),
+            # D25 W1: sandboxed configs are container-typed - image-internal
+            # absolute argv, container cwd, bounded resources.
+            command=("/usr/local/bin/koawa-mcp-fixture",),
             execution_profile=McpExecutionProfile.SANDBOXED,
             image_id="sha256:" + "a" * 64,
+            resource_limits=McpResourceLimits(),
+            container_working_directory="/work",
         )
         plan = stage_code_artifacts(
             server, base_dir=self.base, staging_root=self.staging,

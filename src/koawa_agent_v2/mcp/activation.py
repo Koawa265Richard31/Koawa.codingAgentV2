@@ -256,6 +256,81 @@ def resolve_launch_identity(
     # Compute the exact launch identity for one server config (§8.4).
     if not isinstance(config, object):
         raise TypeError("config must be McpServerConfig")
+    profile_enum = _mcp_execution_profile()
+    # D25 W1: sandboxed identity is built purely from the declared container
+    # facts - no host executable lookup, no staging, no mount identity.  The
+    # config layer enforces the invariants; this function must not perform a
+    # single host-side code resolution for this profile.
+    if config.execution_profile is profile_enum.SANDBOXED:
+        image_identity = config.image_id.strip().lower()
+        argv_digest = _sha256(_canonical_json({"argv": list(config.command)}))
+        cwd_identity_digest = _sha256(
+            _canonical_json({"container_cwd": config.container_working_directory})
+        )
+        environment = tuple(
+            sorted(
+                (
+                    EnvironmentIdentity(name, value_digest)
+                    for name, value_digest in _environment_identities()(
+                        dict(config.environment)
+                    )
+                ),
+                key=lambda entry: entry.name,
+            )
+        )
+        resource_digest = _sha256(
+            _canonical_json(
+                (config.resource_limits or _mcp_resource_limits()()).to_document()
+            )
+        )
+        deadline_limit_digest = _sha256(_canonical_json({
+            "process_start_timeout_seconds": config.process_start_timeout_seconds,
+            "initialize_timeout_seconds": config.initialize_timeout_seconds,
+            "tools_list_timeout_seconds": config.tools_list_timeout_seconds,
+            "tool_call_timeout_seconds": config.tool_call_timeout_seconds,
+            "io_poll_timeout_seconds": config.io_poll_timeout_seconds,
+            "shutdown_timeout_seconds": config.shutdown_timeout_seconds,
+            "max_pending_requests": config.max_pending_requests,
+            "max_inbound_messages": config.max_inbound_messages,
+            "max_list_pages": config.max_list_pages,
+            "max_tools": config.max_tools,
+            "max_notifications_per_window": config.max_notifications_per_window,
+            "max_cursor_bytes": config.max_cursor_bytes,
+            "max_frame_bytes": config.max_frame_bytes,
+            "max_stderr_bytes": config.max_stderr_bytes,
+            "max_result_bytes": config.max_result_bytes,
+        }))
+        image_digest = _sha256(image_identity)
+        config_digest = _sha256(_canonical_json({
+            "server_id": config.server_id,
+            "execution_profile": "sandboxed",
+            "image_identity": image_identity,
+            "argv_digest": argv_digest,
+            "container_cwd_digest": cwd_identity_digest,
+            "environment": [
+                {"name": entry.name, "value_digest": entry.value_digest}
+                for entry in environment
+            ],
+            "image_digest": image_digest,
+            "read_only_mounts": [],
+            "mount_policy": "zero",
+            "resource_digest": resource_digest,
+            "deadline_limit_digest": deadline_limit_digest,
+            "code_artifacts": [],
+        }))
+        return McpLaunchIdentity(
+            server_id=config.server_id,
+            execution_profile="sandboxed",
+            code_artifacts=(),
+            argv_digest=argv_digest,
+            cwd_identity_digest=cwd_identity_digest,
+            environment=environment,
+            image_digest=image_digest,
+            read_only_mounts=(),
+            resource_digest=resource_digest,
+            deadline_limit_digest=deadline_limit_digest,
+            config_digest=config_digest,
+        )
     executable = _resolve_executable(config, base_dir)
     code_indexes: dict[int, tuple[str, Path]] = {
         0: ("executable", executable),

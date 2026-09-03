@@ -48,6 +48,31 @@ _MCP_INJECTION_ENV_CASEFOLD = frozenset({
     )
 })
 
+# D25 W1: sandboxed configs accept only a locally resolvable immutable image
+# identity; tags and other reference forms never authorize execution.
+_IMMUTABLE_IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+# D25 W1 zero-secret baseline: credential-bearing names and credential-shaped
+# values are rejected at the config boundary for sandboxed servers.
+_MCP_SECRET_NAME_TOKENS = (
+    "secret", "token", "password", "passwd", "credential", "api_key", "apikey",
+)
+_SECRET_VALUE_SHAPES = re.compile(
+    r"(sk-[A-Za-z0-9]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,}|-----BEGIN[ A-Z]+PRIVATE KEY-----)",
+    re.ASCII,
+)
+
+
+def _validate_container_working_directory(value: str) -> None:
+    """Container-absolute POSIX directory; host meaning can never leak in."""
+    if not value.startswith("/") or "\\" in value or "\x00" in value:
+        raise RuntimeConfigError("invalid_mcp_container_working_directory")
+    if len(value.encode("utf-8")) > 4096:
+        raise RuntimeConfigError("invalid_mcp_container_working_directory")
+    parts = value.split("/")
+    if any(part in ("", ".", "..") for part in parts[1:]):
+        raise RuntimeConfigError("invalid_mcp_container_working_directory")
+
 # §6.5: the config file is bounded before parsing (bytes, not characters).
 CONFIG_MAX_BYTES = 1_048_576
 
@@ -380,6 +405,15 @@ class McpServerConfig:
     resource_limits: McpResourceLimits | None = None
     read_only_mounts: tuple[tuple[str, str], ...] = ()
     code_artifacts: tuple[McpCodeArtifact, ...] = ()
+    # D25 W1: sandboxed containers get their own absolute POSIX working
+    # directory; ``cwd`` keeps exclusive host-path semantics and both are
+    # never allowed on the same config.
+    container_working_directory: str | None = None
+    # D25 W1: legacy (None-profile) configs are fixture-only.  The flag can
+    # never arrive through a file document - the loader does not accept it -
+    # so a direct constructor must mark legacy configs explicitly for the
+    # normal assembly to keep the old allow decision.
+    legacy_fixture: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.server_id, str) or not _MCP_SERVER_ID.fullmatch(
@@ -497,14 +531,56 @@ class McpServerConfig:
             or len(self.image_id.encode("utf-8")) > 512
         ):
             raise RuntimeConfigError("invalid_mcp_server")
+        if not isinstance(self.legacy_fixture, bool):
+            raise RuntimeConfigError("invalid_mcp_server")
+        if self.container_working_directory is not None:
+            if not isinstance(self.container_working_directory, str):
+                raise RuntimeConfigError("invalid_mcp_server")
+            _validate_container_working_directory(
+                self.container_working_directory
+            )
+        if self.legacy_fixture and self.execution_profile is not None:
+            raise RuntimeConfigError("invalid_mcp_server")
         if self.execution_profile is McpExecutionProfile.SANDBOXED:
             if not self.image_id:
                 raise RuntimeConfigError("mcp_sandbox_requires_image")
+            # D25 W1 invariants (§4): immutable image identity, container
+            # argv/cwd semantics, zero mounts, zero code staging, bounded
+            # resources, zero-secret environment - every failure is a stable
+            # content-free code.
+            if not _IMMUTABLE_IMAGE_DIGEST.fullmatch(self.image_id):
+                raise RuntimeConfigError("mcp_sandbox_image_digest_required")
+            if not self.command[0].startswith("/") or "\\" in self.command[0]:
+                raise RuntimeConfigError("mcp_sandbox_container_command_required")
+            if self.cwd is not None:
+                raise RuntimeConfigError("mcp_sandbox_host_cwd_forbidden")
+            if self.container_working_directory is None:
+                raise RuntimeConfigError("mcp_sandbox_container_cwd_required")
+            if not isinstance(self.resource_limits, McpResourceLimits):
+                raise RuntimeConfigError("mcp_sandbox_limits_required")
+            if self.read_only_mounts:
+                raise RuntimeConfigError("mcp_sandbox_zero_mounts_required")
+            if self.code_artifacts:
+                raise RuntimeConfigError("mcp_sandbox_code_artifacts_forbidden")
+            for name, value in self.environment:
+                casefolded = name.casefold()
+                if any(token in casefolded for token in _MCP_SECRET_NAME_TOKENS):
+                    raise RuntimeConfigError("mcp_sandbox_environment_secret_forbidden")
+                if _SECRET_VALUE_SHAPES.search(value):
+                    raise RuntimeConfigError("mcp_sandbox_environment_secret_forbidden")
         elif self.execution_profile is McpExecutionProfile.HOST_TRUSTED:
             if self.image_id is not None:
                 raise RuntimeConfigError("mcp_host_trusted_no_image")
+            if self.container_working_directory is not None:
+                raise RuntimeConfigError("mcp_host_trusted_no_container_cwd")
             if not isinstance(self.resource_limits, McpResourceLimits):
                 raise RuntimeConfigError("invalid_mcp_resource_limits")
+        else:
+            # Legacy (None-profile): container-only fields must not creep in
+            # outside an explicitly marked test fixture, and a file-borne
+            # image_id means an unmigrated document.
+            if self.container_working_directory is not None:
+                raise RuntimeConfigError("mcp_container_cwd_requires_sandbox")
         if self.resource_limits is not None and not isinstance(
             self.resource_limits, McpResourceLimits
         ):
@@ -1266,6 +1342,7 @@ def _parse_mcp_servers(
             "resource_limits",
             "read_only_mounts",
             "code_artifacts",
+            "container_working_directory",
         }
         _reject_unknown(item, allowed, "invalid_mcp_server")
         # §8.3: v3 JSON must declare an explicit execution_profile for every
@@ -1352,6 +1429,9 @@ def _parse_mcp_servers(
                     resource_limits=resource_limits,
                     read_only_mounts=read_only_mounts,
                     code_artifacts=code_artifacts,
+                    container_working_directory=item.get(
+                        "container_working_directory"
+                    ),
                 )
             )
         except RuntimeConfigError:
