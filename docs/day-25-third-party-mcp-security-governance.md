@@ -1,10 +1,14 @@
 # D25：第三方 MCP 沙箱安全治理（Third-party MCP Sandbox Governance）
 
-版本：v1.1（W0–W6 实施完成，验收记录见 §14）。日期：2026-09-02。  
-状态：**实现与证据完成；完成门逐项打勾见 §10**。基线 `D25_BASE_COMMIT=a82d1cc`。
+版本：v1.2（自审修正）。日期：2026-09-02。  
+状态：**实现完成（W0–W5 提交链）；证据缺口未闭合（见 §15），不得声称 COMPLETE**。
+基线 `D25_BASE_COMMIT=a82d1cc`。
 
-变更记录：v1.0 → v1.1：W1–W6 全部落地并提交（393ab05 / 3bd7fb7 / 5ee736f / 485dc95 / ef8c0de），
-§14 增补安全闭环证据矩阵与真实 Docker 数字。
+变更记录：v1.1 → v1.2（2026-09-02 自审）：修正 §10 两处与事实不符的勾选——Linux/WSL
+Docker lane 实际未运行（原勾选以"平台无关断言"合理化，违反 §W5 原文）；W3 崩溃窗口仅有
+fake 层覆盖，§W5 明文要求的真实 Docker 关键窗口（create-before-bind / start-before-event /
+stop-before-event）未执行。新增 §15 缺口清单；状态由 COMPLETE 降为 PARTIAL（实现完成，
+证据待补或待维护者豁免）。
 
 变更记录：v0.1 → v1.0：W0 开工门核验完成并冻结基线；reference server 由维护者选定
 `@modelcontextprotocol/server-filesystem`（单选，不并做 time）。
@@ -429,16 +433,31 @@ Docker 核心 lane 不允许跳过。
 - [x] network none、零 mount、零 secret、readonly rootfs、non-root、cap-drop、NNP、资源上限均有
   inspect 证据与负向测试（w2 篡改矩阵 15 字段、w1 secret 拒绝）；
 - [x] activation、MCP allocation、sandbox allocation 使用同一关联身份并可精确重建（w3 相关性/漂移）；
-- [x] create/start/stop 关键崩溃窗口均有 fault-injection，无法证明的结果保持 UNKNOWN（w3 窗口表）；
+- [~] create/start/stop 关键崩溃窗口均有 fault-injection，无法证明的结果保持 UNKNOWN——
+  fake 层 7 窗口全绿（w3）；**§W5 明文要求的真实 Docker 关键窗口未执行（缺口 G2）**；
 - [x] cancel/timeout/crash 能有界终止并只回收精确归属容器（w2/w4/w5 终止+inspect 404）；
 - [x] 恶意 MCP 协议内容不能改变 profile、policy、approval、ledger 或 completion gate（D21 T3 锚点 + w5 治理引用）；
 - [x] host-trusted 仍为显式 ASK 风险路径，legacy production config fail closed（w1 legacy 标记 + loader 不可设）；
-- [x] Windows Docker 真实 lane 通过；Linux/WSL lane 的意义由 inspect 合同的平台无关断言覆盖
-  （D8/D12 已有 Linux 证据，本切片容器参数全部平台无关）；
+- [~] Windows Docker 真实 lane 通过；**Linux/WSL Docker lane 未运行（缺口 G1）**——
+  v1.1 勾选以"inspect 合同平台无关"合理化，不符合 §W5 原文"至少覆盖 create/inspect/stdio/
+  cancel/reap"；
 - [x] 全量测试与 ResourceWarning=error lane 通过（数字见 §14.3），无 D1–D24 回归；
 - [x] 证据报告无 credential/完整环境/完整 argv/协议正文泄漏（identity 四键 digest-only，w5 断言）；
-- [x] README、配置示例、审计矩阵与实际能力一致（README D25 段 + §14.2 矩阵）；
-- [x] 规划书回写测试锚点、commit 与精确数字，状态改为 COMPLETE（本节 + §14）。
+- [~] README 与审计矩阵一致（README D25 段 ✓）；**可复制的安全配置示例 + doctor/运行/清理
+  说明（§W6 明确要求）未提供（缺口 G5）**；
+- [~] 规划书回写完成，但 v1.1 的状态声明不实，v1.2 修正为 PARTIAL（本节 + §14 + §15）。
+
+## 15. 证据缺口清单（v1.2 自审产出，待补做或维护者豁免）
+
+| # | 缺口 | 计划出处 | 现状 | 估时 |
+|---|---|---|---|---|
+| G1 | Linux/WSL Docker lane（create/inspect/stdio/cancel/reap） | §W5 完成门 | 未运行；需启用 Docker Desktop WSL 集成或在 WSL 内装 daemon | 0.5–1 天 |
+| G2 | 真实 Docker 崩溃窗口：create-before-bind / start-before-event / stop-before-event | §W5 矩阵第 6 条 | 仅 fake 层覆盖 | 0.5–1 天 |
+| G3 | 行为矩阵剩余项：协议（非法 JSON/错误 id/重复响应/通知风暴/无限分页）、生命周期（启动挂起/关闭挂起/取消中调用/attach 异常退出/daemon 不可达）、隔离（Docker socket/网关探测） | §W5 矩阵 2/4/5 | 7 类覆盖约 3.5 类 | ~1 天 |
+| G4 | sandboxed 端到端装配集成测试：真实 assembly 下 grant→…→StdioTransport（OwnedProcess 工厂已核实结构兼容）→McpSession→registry bind→policy/ledger→tool call→shutdown→release | §W4 测试 | launcher 层已测，transport 之上未接通验证 | 0.5–1 天 |
+| G5 | 可复制安全配置示例 + doctor/运行/清理说明 | §W6 | 未提供 | 0.5 天 |
+
+合计补做约 3–4.5 个工作日；或由维护者按 I9 §0.3 先例版本化豁免（豁免对象与理由须入档）。
 
 ## 11. 预算与停止条件
 
