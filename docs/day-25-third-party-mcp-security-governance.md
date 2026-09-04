@@ -579,3 +579,9 @@ daemon 不宜停机测试），其探测路径由 `mcp_container_absent`/`inspec
 **D25 完成声明**：sandboxed 第三方 stdio MCP 的容器执行面已实现并经真实 Docker 证据闭环
 （无网、零挂载、零秘密、精确回收、双账本可恢复、无宿主降级）；不含 24h soak、生产发布
 认证与受控 egress（§12 边界）。
+
+### 14.5 J1 联动（RT/J 轨道，2026-09-02）
+
+D25 的 sandboxed/配置合同成为 RT/J 冻结 profiles（T3/T6/T5 变体）的执行底座；J1 遏制回归
+ 已在冻结 profiles 上全绿（含 FE-FS 真实
+junction、FE-NET 正控 sink），其中 T6 config-boundary 锚点 = 本切片 W1 的 fail-closed 码。

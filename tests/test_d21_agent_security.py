@@ -665,13 +665,27 @@ class McpPoisoningTest(D21SecurityTest):
             (
                 "unsupported_mcp_schema",
                 {"name": "fetch", "inputSchema": {"type": "object",
-                 "properties": {}, "required": [], "additionalProperties": True}},
+                 "properties": {"url": {"type": "string",
+                  "pattern": "^https://"}},
+                 "required": ["url"], "additionalProperties": False}},
+            ),
+            # D25 normalization binds previously-rejected loose strings and
+            # forces additionalProperties:False (stricter decode, constraint-
+            # free meta keys stripped).  Binding-time rejection now applies
+            # to unmodelable constraint keywords (pattern above) and to
+            # out-of-subset types/enums below:
+            (
+                "unsupported_mcp_schema",
+                {"name": "fetch", "inputSchema": {"type": "object",
+                 "properties": {"url": {"type": "number"}},
+                 "required": ["url"], "additionalProperties": False}},
             ),
             (
                 "unsupported_mcp_schema",
                 {"name": "fetch", "inputSchema": {"type": "object",
-                 "properties": {"url": {"type": "string"}},
-                 "required": ["url"], "additionalProperties": False}},
+                 "properties": {"mode": {"type": "string",
+                  "enum": ["fast", "slow"]}},
+                 "required": ["mode"], "additionalProperties": False}},
             ),
         ]
         for code, tool in cases:
