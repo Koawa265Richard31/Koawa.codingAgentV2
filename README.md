@@ -345,6 +345,11 @@ Session design and tradeoffs: [docs/day-16-interactive-session.md](docs/day-16-i
   `tests/fixtures/d25_mcp_server/provenance.json`); adversarial fixtures
   (frame flood, stderr flood, PID pressure) prove bounded cleanup. There is
   no host fallback; `host_trusted` remains an explicit ASK escape hatch.
+  Sandboxed servers speak the official newline-delimited MCP stdio framing,
+  bind an admin-declared `tool_allowlist` subset, and ship with a worked
+  config + doctor/run/cleanup guide
+  (`examples/d25_sandboxed_mcp.example.json`,
+  `docs/d25-sandboxed-mcp-operations.md`).
 - **I9 status**: closed as an *internal engineering loop* (Windows full
   regression, a real Linux lane on WSL2-ext4, outside-repo fresh-install
   smoke, credential canary scan, real provider 10/10, independent audit with

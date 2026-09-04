@@ -119,7 +119,11 @@ class DualLedgerReconciler:
             document = self._docker.inspect(
                 Path(self._docker_executable), container_id, timeout=15.0
             )
-        except Exception:
+        except Exception as error:
+            # A "No such object" answer is provable absence (already removed
+            # by a graceful shutdown), not an unavailable oracle.
+            if getattr(error, "code", "") == "mcp_container_absent":
+                return False
             return None
         state = document.get("State") if isinstance(document, dict) else None
         if not isinstance(state, dict):
@@ -131,6 +135,16 @@ class DualLedgerReconciler:
         from pathlib import Path
 
         try:
+            document_probe = None
+            try:
+                self._docker.inspect(
+                    Path(self._docker_executable), container_id, timeout=15.0
+                )
+            except Exception as error:
+                if getattr(error, "code", "") == "mcp_container_absent":
+                    return True  # already removed: provable, nothing to do
+                return False
+            del document_probe
             self._docker.stop_and_remove(
                 Path(self._docker_executable),
                 container_id,

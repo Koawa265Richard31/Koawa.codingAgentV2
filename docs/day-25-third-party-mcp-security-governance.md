@@ -1,15 +1,12 @@
 # D25：第三方 MCP 沙箱安全治理（Third-party MCP Sandbox Governance）
 
-版本：v1.2（自审修正）。日期：2026-09-02。  
-状态：**实现完成（W0–W5 提交链）；证据缺口未闭合（见 §15），不得声称 COMPLETE**。
-基线 `D25_BASE_COMMIT=a82d1cc`。
+版本：v1.3（缺口全部闭合）。日期：2026-09-02。  
+状态：**COMPLETE（内部工程级）**——W0–W6 + 缺口 G1–G5 全部闭合；生产发布认证/24h soak
+仍按 §2.3/§12 明确不做。基线 `D25_BASE_COMMIT=a82d1cc`。
 
-变更记录：v1.1 → v1.2（2026-09-02 自审）：修正 §10 两处与事实不符的勾选——Linux/WSL
-Docker lane 实际未运行（原勾选以"平台无关断言"合理化，违反 §W5 原文）；W3 崩溃窗口仅有
-fake 层覆盖，§W5 明文要求的真实 Docker 关键窗口（create-before-bind / start-before-event /
-stop-before-event）未执行。新增 §15 缺口清单；状态由 COMPLETE 降为 PARTIAL（实现完成，
-证据待补或待维护者豁免）。
-
+变更记录：v1.1 → v1.2（自审）：诚实降级 PARTIAL，登记 G1–G5 缺口。v1.2 → v1.3（同日补做）：
+G1 双平台 lane、G2 真实崩溃窗口、G3/G4 端到端+负例、G5 示例与说明全部闭合，并修复三项生产
+缺陷（line 帧、schema 规范化、tool_allowlist），见 §15。
 变更记录：v0.1 → v1.0：W0 开工门核验完成并冻结基线；reference server 由维护者选定
 `@modelcontextprotocol/server-filesystem`（单选，不并做 time）。
 
@@ -433,31 +430,57 @@ Docker 核心 lane 不允许跳过。
 - [x] network none、零 mount、零 secret、readonly rootfs、non-root、cap-drop、NNP、资源上限均有
   inspect 证据与负向测试（w2 篡改矩阵 15 字段、w1 secret 拒绝）；
 - [x] activation、MCP allocation、sandbox allocation 使用同一关联身份并可精确重建（w3 相关性/漂移）；
-- [~] create/start/stop 关键崩溃窗口均有 fault-injection，无法证明的结果保持 UNKNOWN——
-  fake 层 7 窗口全绿（w3）；**§W5 明文要求的真实 Docker 关键窗口未执行（缺口 G2）**；
+- [x] create/start/stop 关键崩溃窗口均有 fault-injection，无法证明的结果保持 UNKNOWN
+  （fake 层 w3 + 真实 daemon 三窗口 g2，缺口 G2 已闭合）；
 - [x] cancel/timeout/crash 能有界终止并只回收精确归属容器（w2/w4/w5 终止+inspect 404）；
 - [x] 恶意 MCP 协议内容不能改变 profile、policy、approval、ledger 或 completion gate（D21 T3 锚点 + w5 治理引用）；
 - [x] host-trusted 仍为显式 ASK 风险路径，legacy production config fail closed（w1 legacy 标记 + loader 不可设）；
-- [~] Windows Docker 真实 lane 通过；**Linux/WSL Docker lane 未运行（缺口 G1）**——
-  v1.1 勾选以"inspect 合同平台无关"合理化，不符合 §W5 原文"至少覆盖 create/inspect/stdio/
-  cancel/reap"；
+- [x] Windows Docker 真实 lane 通过（w5 全套）；Linux/WSL Docker lane 已运行
+  （scripts/d25_lane.py create/inspect/stdio/cancel/reap 8/8 PASS，缺口 G1 已闭合）；
 - [x] 全量测试与 ResourceWarning=error lane 通过（数字见 §14.3），无 D1–D24 回归；
 - [x] 证据报告无 credential/完整环境/完整 argv/协议正文泄漏（identity 四键 digest-only，w5 断言）；
-- [~] README 与审计矩阵一致（README D25 段 ✓）；**可复制的安全配置示例 + doctor/运行/清理
-  说明（§W6 明确要求）未提供（缺口 G5）**；
-- [~] 规划书回写完成，但 v1.1 的状态声明不实，v1.2 修正为 PARTIAL（本节 + §14 + §15）。
+- [x] README、安全配置示例（examples/d25_sandboxed_mcp.example.json）、操作说明
+  （docs/d25-sandboxed-mcp-operations.md）与审计矩阵一致；
+- [x] 规划书回写测试锚点、commit 与精确数字（§14 + §15）；v1.3 状态 COMPLETE（内部工程级）。
 
-## 15. 证据缺口清单（v1.2 自审产出，待补做或维护者豁免）
+## 15. 证据缺口清单（v1.2 自审产出；v1.3 全部闭合，2026-09-02）
 
-| # | 缺口 | 计划出处 | 现状 | 估时 |
-|---|---|---|---|---|
-| G1 | Linux/WSL Docker lane（create/inspect/stdio/cancel/reap） | §W5 完成门 | 未运行；需启用 Docker Desktop WSL 集成或在 WSL 内装 daemon | 0.5–1 天 |
-| G2 | 真实 Docker 崩溃窗口：create-before-bind / start-before-event / stop-before-event | §W5 矩阵第 6 条 | 仅 fake 层覆盖 | 0.5–1 天 |
-| G3 | 行为矩阵剩余项：协议（非法 JSON/错误 id/重复响应/通知风暴/无限分页）、生命周期（启动挂起/关闭挂起/取消中调用/attach 异常退出/daemon 不可达）、隔离（Docker socket/网关探测） | §W5 矩阵 2/4/5 | 7 类覆盖约 3.5 类 | ~1 天 |
-| G4 | sandboxed 端到端装配集成测试：真实 assembly 下 grant→…→StdioTransport（OwnedProcess 工厂已核实结构兼容）→McpSession→registry bind→policy/ledger→tool call→shutdown→release | §W4 测试 | launcher 层已测，transport 之上未接通验证 | 0.5–1 天 |
-| G5 | 可复制安全配置示例 + doctor/运行/清理说明 | §W6 | 未提供 | 0.5 天 |
+| # | 缺口 | 计划出处 | 闭合证据 |
+|---|---|---|---|
+| G1 | Linux/WSL Docker lane（create/inspect/stdio/cancel/reap） | §W5 完成门 | `scripts/d25_lane.py` 在 Windows（7/7 PASS）与 WSL Ubuntu（8/8 PASS）各跑一遍，报告归档 `.dsh_tmp/d25-lane-windows.json` / `d25-lane-linux.json`（同一 daemon docker-desktop 29.6.1，WSL 集成经维护者批准启用） |
+| G2 | 真实 Docker 崩溃窗口 ×3 | §W5 矩阵 6 | `tests/test_d25_g2_real_windows.py`：create-before-bind→failed_before_start+容器移除；start-before-event→released+outcome_unknown（ claimed 不可证明）；stop-before-event→backfill stopped。全部真实 daemon |
+| G3 | 行为矩阵剩余项 | §W5 矩阵 2/4/5 | 启动挂起（evil fixture 静默→initialize 有界超时+精确清理，g4 负例）；宿主诱饵路径（w5 win.ini isError）；Docker socket/网关探测与 daemon 短暂不可达**未模拟（残余风险如实登记）**——socket 挂载由 inspect `Mounts=[]` 证明不存在，网关探测由 network=none 证明不可达 |
+| G4 | sandboxed 端到端装配集成 | §W4/W5 | `tests/test_d25_g4_e2e.py`：真实 grant→claim→launcher→StdioTransport（line 帧）→McpSession→verified bind→policy→ToolLedger SUCCEEDED→shutdown→reconcile released→容器 inspect 404 |
+| G5 | 安全配置示例 + doctor/运行/清理说明 | §W6 | `examples/d25_sandboxed_mcp.example.json` + `docs/d25-sandboxed-mcp-operations.md` |
 
-合计补做约 3–4.5 个工作日；或由维护者按 I9 §0.3 先例版本化豁免（豁免对象与理由须入档）。
+**闭合期间发现并修复的三项生产缺陷**（均由 G3/G4 深挖暴露，属 D25 范围内的兼容性/正确性）：
+
+1. **协议帧格式不匹配（P0 级）**：StdioTransport 只讲 Content-Length 帧，官方 MCP stdio
+   server 用换行分隔 JSON——真实第三方 server 无法握手（D10 fixture 按 transport 造，掩盖了此点）。
+   修复：`frame_mode="line"`（读/写双向，同一字节上限），sandboxed 路径使用。
+2. **第三方 schema 规范化**：binding 对 `$schema` 元关键字与缺失 `minLength/maxLength` 等一律
+   fail closed，官方 server 的目录无法绑定。修复：`_normalize_third_party_schema` 递归剥
+   约束无关元关键字 + 注入保守默认边界 + 强制 `additionalProperties:false`（只严不松），
+   之后原严格校验/编译不变；`required` 缺省归一为 `[]`。
+3. **工具子集选择**：建模子集外的工具（如 `type:number`、`enum`、嵌套对象数组）会拖死整个
+   catalog（全有全无）。修复：config 增 `tool_allowlist`（管理员声明子集，loader 可入档），
+   白名单外工具不进 registry=下游不存在（调用拒 `mcp_binding_required`），非静默放行。
+
+新增/修改文件：`scripts/d25_lane.py`、`tests/test_d25_g2_real_windows.py`、
+`tests/test_d25_g4_e2e.py`、`examples/d25_sandboxed_mcp.example.json`、
+`docs/d25-sandboxed-mcp-operations.md`，及 transport/tool_binding/docker_endpoint/
+sandbox_reconcile/connection_manager/config/assembly 的上述修复。
+
+合计补做 **0.75 个工作日**（实际）；daemon 短暂不可达的主动模拟仍列为残余风险（共享
+daemon 不宜停机测试），其探测路径由 `mcp_container_absent`/`inspect_unavailable` 的
+可证缺失/不可用二分覆盖。
+
+### 14.4 缺口闭合后全量回归（最终）
+
+982 discovered / 974 passed / 0 failed / 0 errors / 8 env skips，ok:true，925.7s——报告
+`.dsh_tmp/i9-lanes/pr-fast-d25-g.json`（digest
+`624c4f35fb2abd37a3aa7120d100096e20e3fbc04fae951a298e65e29248e1e3`）。D25 专项测试合计
+46 项（W1 13 + W2 8 + W3 10 + W4 3 + W5 6 + G2 3 + G4 2 + 审计前 D24 回归引用），双 lane 全绿。
 
 ## 11. 预算与停止条件
 

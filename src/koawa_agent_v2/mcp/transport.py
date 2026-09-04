@@ -421,7 +421,13 @@ class StdioTransport:
         # spawned endpoint instead of building env + spawning itself.
         process_factory: Callable[[], OwnedProcess] | None = None,
         allocation_state_reporter: Callable[[str], None] | None = None,
+        # D25: official MCP stdio servers speak newline-delimited JSON; the
+        # historical fixture framing stays the default for host/legacy paths.
+        frame_mode: str = "content-length",
     ) -> None:
+        if frame_mode not in ("content-length", "line"):
+            raise ValueError("invalid_frame_mode")
+        self._frame_mode = frame_mode
         if not isinstance(command, Sequence) or isinstance(command, (str, bytes)):
             raise TypeError("command must be a sequence")
         if not command or any(not isinstance(item, str) for item in command):
@@ -651,6 +657,32 @@ class StdioTransport:
             raise TransportPayloadInvalid() from None
         if len(body) > self._max_frame_bytes:
             raise TransportPayloadInvalid()
+        if self._frame_mode == "line":
+            # D25: newline-delimited JSON (official MCP stdio framing).
+            with self._write_lock:
+                owned = self._owned
+                if not self._is_open():
+                    raise TransportClosed()
+                stdin = owned.stdin
+                try:
+                    wrote = stdin.write(body + b"\n")
+                    stdin.flush()
+                except (BrokenPipeError, OSError) as error:
+                    self._send_state = "unknown"
+                    self._request_cleanup()
+                    raise TransportSendUncertain() from error
+                except ValueError:
+                    if self._is_terminal():
+                        raise TransportClosed() from None
+                    self._send_state = "unknown"
+                    self._request_cleanup()
+                    raise TransportSendUncertain() from None
+                if wrote != len(body) + 1:
+                    self._send_state = "unknown"
+                    self._request_cleanup()
+                    raise TransportSendUncertain()
+            self._send_state = "sent"
+            return
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
         with self._write_lock:
             owned = self._owned
@@ -804,22 +836,24 @@ class StdioTransport:
                 pass
             self._wait_bounded(owned, deadline=deadline, cap=0.5)
             # 2) Terminate the exact tree, bounded to a fixed SHARE of the one
-            #    shared deadline.  A graceful terminate is often a no-op for
-            #    console children (Windows taskkill without /F cannot close
-            #    them), so it must not be allowed to burn the whole budget.
-            if not self._process_exited(owned):
-                terminate_until = min(deadline, self._clock() + 0.5)
-                try:
-                    owned.terminate_tree(deadline=terminate_until)
-                except TransportError:
-                    pass
+            #    shared deadline.  This call is required even when the attach
+            #    client already exited: container-backed OwnedProcess facades
+            #    use it to release the secondary container object.  A graceful
+            #    terminate is often a no-op for console children (Windows
+            #    taskkill without /F cannot close them), so it must not be
+            #    allowed to burn the whole budget.
+            terminate_until = min(deadline, self._clock() + 0.5)
+            try:
+                owned.terminate_tree(deadline=terminate_until)
+            except Exception:
+                pass
             # 3) Force-kill the tree; the remaining shared budget is reserved
             #    for the force kill AND its reap (so Popen is never observed
             #    still-running at GC).
             if not self._process_exited(owned):
                 try:
                     owned.kill_tree(deadline=deadline)
-                except TransportError:
+                except Exception:
                     pass
             # 3b) Best-effort bounded reap with whatever budget remains.
             self._wait_bounded(owned, deadline=deadline, cap=None)
@@ -850,10 +884,20 @@ class StdioTransport:
             self._temp = None
         # 7) I6 §8.7: record what the close actually proved.  A phase that
         #    hit the shared shutdown deadline leaves outcome uncertain.
+        process_exited = (
+            self._process_exited(owned) if owned is not None else None
+        )
         self._close_report = CloseReport(
-            process_exited=self._process_exited(owned) if owned is not None else None,
-            process_terminated=owned is None or self._process_exited(owned),
-            uncertain=self._close_uncertain or self._cleanup_error is not None,
+            process_exited=process_exited,
+            process_terminated=owned is None or process_exited is True,
+            # A close is UNKNOWN whenever final reaping cannot prove that the
+            # owned process tree is gone, regardless of whether an earlier
+            # wait/kill phase happened to return without raising.
+            uncertain=(
+                self._close_uncertain
+                or process_exited is False
+                or self._cleanup_error is not None
+            ),
             stderr_truncated=self._stderr_truncated,
             stderr_bytes=self._stderr_bytes,
             cleanup_error=
@@ -875,7 +919,7 @@ class StdioTransport:
             return
         try:
             owned.wait(deadline=self._clock() + remaining)
-        except TransportError:
+        except Exception:
             pass
 
     def _collect_owned(self, owned: OwnedProcess) -> None:
@@ -945,9 +989,20 @@ class StdioTransport:
             return
         try:
             while True:
-                frame = _read_frame(
-                    stream, max_frame_bytes=self._max_frame_bytes
-                )
+                if self._frame_mode == "line":
+                    # D25: official MCP stdio servers speak newline-delimited
+                    # JSON; each line is one frame under the same byte cap.
+                    frame = stream.readline()
+                    if len(frame) > self._max_frame_bytes:
+                        raise TransportMalformedFrame("frame_too_large")
+                    if frame in (b"\n", b"\r\n"):
+                        continue
+                    if frame and not frame.endswith(b"\n"):
+                        raise TransportMalformedFrame("frame_truncated")
+                else:
+                    frame = _read_frame(
+                        stream, max_frame_bytes=self._max_frame_bytes
+                    )
                 if frame is None:
                     break
                 try:

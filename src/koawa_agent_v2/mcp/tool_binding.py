@@ -111,17 +111,77 @@ def _validate_value_schema(value: Any, *, allow_array: bool) -> None:
         raise McpBindingError("unsupported_mcp_schema")
 
 
+_META_KEYS = frozenset({"$schema", "$id", "title", "description", "examples", "default"})
+_SAFE_STRING_MAX = 4_096
+_SAFE_INT_MIN = -(2**53)
+_SAFE_INT_MAX = 2**53
+
+
+def _normalize_third_party_value(value: Any, *, allow_array: bool) -> dict[str, Any]:
+    """Normalize one untrusted property schema in place (constraint-neutral).
+
+    Meta keywords carry no constraint semantics and are stripped; missing
+    bounds get conservative defaults so the compiled decoder stays typed and
+    bounded.  Constraint keywords the compiler cannot model are left in
+    place and fail closed in the strict validator below.
+    """
+    if not isinstance(value, Mapping):
+        raise McpBindingError("unsupported_mcp_schema")
+    normalized = {key: item for key, item in value.items() if key not in _META_KEYS}
+    kind = normalized.get("type")
+    if kind == "string":
+        normalized.setdefault("minLength", 0)
+        normalized.setdefault("maxLength", _SAFE_STRING_MAX)
+    elif kind == "integer":
+        normalized.setdefault("minimum", _SAFE_INT_MIN)
+        normalized.setdefault("maximum", _SAFE_INT_MAX)
+    elif kind == "array" and allow_array:
+        normalized.setdefault("minItems", 0)
+        normalized.setdefault("maxItems", 64)
+        if "items" in normalized:
+            normalized["items"] = _normalize_third_party_value(
+                normalized["items"], allow_array=False
+            )
+    return {key: normalized[key] for key in sorted(normalized)}
+
+
+def _normalize_third_party_schema(schema: Any) -> dict[str, Any]:
+    """Bring an untrusted third-party inputSchema to the D3 boundary shape.
+
+    Only constraint-free meta keywords are removed and only *stricter*
+    defaults are introduced (absent ``additionalProperties`` becomes
+    ``False``; absent bounds become safe caps).  Anything genuinely outside
+    the modeled subset still fails closed in ``_validate_input_schema``.
+    """
+    if not isinstance(schema, Mapping):
+        raise McpBindingError("unsupported_mcp_schema")
+    normalized = {key: item for key, item in schema.items() if key not in _META_KEYS}
+    normalized["additionalProperties"] = False
+    properties = normalized.get("properties")
+    if isinstance(properties, Mapping):
+        normalized["properties"] = {
+            str(name): _normalize_third_party_value(prop, allow_array=True)
+            for name, prop in properties.items()
+        }
+    return {key: normalized[key] for key in sorted(normalized)}
+
+
 def _validate_input_schema(schema: Any) -> dict[str, Any]:
     if not isinstance(schema, Mapping):
         raise McpBindingError("unsupported_mcp_schema")
-    if set(schema) != {"type", "properties", "required", "additionalProperties"}:
+    normalized = dict(schema)
+    if "required" not in normalized:
+        # Normalization: a third-party object schema may declare no required
+        # list; absence means the same thing as an empty one.
+        normalized["required"] = []
+    if set(normalized) != {"type", "properties", "required", "additionalProperties"}:
         raise McpBindingError("unsupported_mcp_schema")
-    if schema.get("type") != "object":
+    if normalized.get("type") != "object":
         raise McpBindingError("unsupported_mcp_schema")
-    if schema.get("additionalProperties") is not False:
+    if normalized.get("additionalProperties") is not False:
         raise McpBindingError("unsupported_mcp_schema")
-    properties = schema.get("properties")
-    required = schema.get("required")
+    properties = normalized.get("properties")
+    required = normalized.get("required")
     if not isinstance(properties, Mapping) or len(properties) > _MAX_PROPERTIES:
         raise McpBindingError("unsupported_mcp_schema")
     if (
@@ -135,7 +195,7 @@ def _validate_input_schema(schema: Any) -> dict[str, Any]:
         if not _PROPERTY_NAME.fullmatch(str(name)):
             raise McpBindingError("unsupported_mcp_schema")
         _validate_value_schema(property_schema, allow_array=True)
-    return dict(schema)
+    return dict(normalized)
 
 
 def validate_server_tool(server_id: str, tool: Mapping[str, Any]) -> dict[str, Any]:
@@ -154,7 +214,7 @@ def validate_server_tool(server_id: str, tool: Mapping[str, Any]) -> dict[str, A
         maximum=_MAX_DESCRIPTION_CHARS,
         allow_empty=True,
     )
-    schema = _validate_input_schema(tool.get("inputSchema"))
+    schema = _validate_input_schema(_normalize_third_party_schema(tool.get("inputSchema")))
     return {
         "name": name,
         "description": description or None,
@@ -386,8 +446,23 @@ def bind_catalog(
     tools: list[Mapping[str, Any]],
     *,
     launch_identity_digest: str | None = None,
+    tool_allowlist: frozenset[str] | None = None,
 ) -> McpCatalog:
-    """Build the immutable generation catalog; any invalid tool fails closed."""
+    """Build the immutable generation catalog; any invalid tool fails closed.
+
+    ``tool_allowlist`` (D25) is an admin-declared subset of server tool names;
+    tools outside it never reach validation or the registry - they simply do
+    not exist downstream (calls deny with ``mcp_binding_required``).  Without
+    an allowlist every tool must validate or the catalog fails closed.
+    """
+    if tool_allowlist is not None:
+        if not isinstance(tool_allowlist, frozenset):
+            raise McpBindingError("invalid_mcp_tool_allowlist")
+        tools = [
+            tool for tool in tools
+            if isinstance(tool, Mapping)
+            and tool.get("name") in tool_allowlist
+        ]
 
     if not isinstance(server_id, str) or not _TOOL_NAME.fullmatch(server_id):
         raise McpBindingError("invalid_mcp_server_id")

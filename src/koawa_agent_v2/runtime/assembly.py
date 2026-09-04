@@ -753,6 +753,11 @@ def _connect_legacy_server(
         max_result_chars=server_config.max_result_bytes,
         trace_sink=trace_sink,
         correlation_id=correlation_id,
+        tool_allowlist=(
+            frozenset(server_config.tool_allowlist)
+            if server_config.tool_allowlist is not None
+            else None
+        ),
     )
     catalog = session.connect()
     adapter = build_mcp_registry(session, catalog)
@@ -815,10 +820,19 @@ def _connect_activated_server(
     ticket = activation.claim(
         intent, view, principal_id="root",
     )
+    # Keep one allocation-store facade for the launcher and the transport
+    # lifecycle reporter.  A normal endpoint close must release the matching
+    # sandbox allocation; otherwise the MCP ledger says ``stopped`` while
+    # the sandbox ledger remains an orphaned ``STARTED`` allocation.
+    from ..sandbox.runtime import SandboxAllocationStore
+
+    sandbox_store = SandboxAllocationStore(control.store)
     launcher = (
         launcher_builder(activation, server_config, plan)
         if launcher_builder is not None
-        else _default_launcher(control, server_config, plan)
+        else _default_launcher(
+            control, server_config, plan, sandbox_store=sandbox_store,
+        )
     )
 
     def factory():
@@ -828,7 +842,9 @@ def _connect_activated_server(
             raise TransportError(exc.code) from None
 
     def reporter(state: str) -> None:
-        _allocation_reporter(activation, ticket, state)
+        _allocation_reporter(
+            activation, ticket, state, sandbox_store=sandbox_store,
+        )
 
     transport = StdioTransport(
         (),
@@ -877,7 +893,11 @@ def _connect_activated_server(
 
 
 def _allocation_reporter(
-    activation: ActivationService, ticket: AuthorizedLaunchTicket, state: str,
+    activation: ActivationService,
+    ticket: AuthorizedLaunchTicket,
+    state: str,
+    *,
+    sandbox_store=None,
 ) -> None:
     # Map transport lifecycle states onto allocation events (§8.5).
     try:
@@ -888,7 +908,35 @@ def _allocation_reporter(
                 ticket, reason="launcher_failed",
             )
         elif state == "stopped":
-            activation.record_stopped(ticket)
+            # Stopped is the only close outcome that proves cleanup.  Mirror
+            # that proof into the sandbox ledger with exact-version appends;
+            # an uncertain close deliberately leaves the allocation open for
+            # DualLedgerReconciler instead of being cosmetically released.
+            release_failed = False
+            if sandbox_store is not None:
+                allocation = sandbox_store.load(ticket.allocation_id)
+                if allocation is not None:
+                    state_value = getattr(allocation.state, "value", None)
+                    if state_value in {"intended", "bound", "started"}:
+                        try:
+                            sandbox_store.finish(
+                                allocation.allocation_id,
+                                outcome="stopped",
+                                exit_code=None,
+                                oom_killed=None,
+                            )
+                            sandbox_store.release(
+                                allocation.allocation_id,
+                                reason="transport_stopped",
+                            )
+                        except Exception:
+                            release_failed = True
+            if release_failed:
+                activation.record_outcome_unknown(
+                    ticket, reason="sandbox_release_failed",
+                )
+            else:
+                activation.record_stopped(ticket)
         elif state == "outcome_unknown":
             activation.record_outcome_unknown(
                 ticket, reason="cleanup_uncertain",
@@ -901,15 +949,20 @@ def _default_launcher(
     control: ControlPlaneRuntime,
     server_config: McpServerConfig,
     plan: StagedLaunchPlan,
+    *,
+    sandbox_store=None,
 ) -> McpProcessLauncher:
     if server_config.execution_profile is McpExecutionProfile.SANDBOXED:
         from ..sandbox.runtime import SandboxAllocationStore
         from .mcp_sandbox_labels import MCP_SANDBOX_LABELS
 
+        if sandbox_store is None:
+            sandbox_store = SandboxAllocationStore(control.store)
+
         return SandboxedLauncher(
             control.activation,
             plan,
-            sandbox_store=SandboxAllocationStore(control.store),
+            sandbox_store=sandbox_store,
             docker_executable=control.config.sandbox.docker_executable,
             container_labels=MCP_SANDBOX_LABELS,
             process_start_timeout_seconds=(

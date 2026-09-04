@@ -236,6 +236,12 @@ class DockerAdapter:
             timeout_seconds=timeout,
         )
         if result.returncode != 0 or result.timed_out:
+            if b"No such container" in (result.stderr or b"") or (
+                b"No such object" in (result.stderr or b"")
+            ):
+                # Provably absent: a durable fact (already removed), not an
+                # unavailable oracle.  Reconciliation consumes this.
+                raise DockerEndpointError("mcp_container_absent")
             raise DockerEndpointError("mcp_container_inspect_unavailable")
         try:
             document = _json.loads(result.stdout.decode("utf-8", "strict"))
@@ -270,6 +276,31 @@ class DockerAdapter:
         except (OSError, ValueError):
             raise DockerEndpointError("mcp_container_attach_failed") from None
         return _AttachProcess(popen)
+
+    def list_by_labels(self, docker: Path, labels: tuple[tuple[str, str], ...]) -> list[str]:
+        """All containers (running or exited) carrying every given label.
+
+        Used by crash-window reconciliation: a container created right
+        before a host crash is usually not running, so ``-a`` is mandatory.
+        """
+        # Docker abbreviates ``.ID`` to 12 hex characters unless explicitly
+        # told otherwise.  Reconciliation identity is container-id based and
+        # must remain unambiguous across daemon state, so request the complete
+        # 64-hex id before validating it below.
+        argv = ["ps", "-a", "--no-trunc", "--format", "{{.ID}}"]
+        for name, value in labels:
+            argv.extend((f"--filter", f"label={name}={value}"))
+        result = _run_cli(docker, tuple(argv), timeout_seconds=20.0)
+        if result.returncode != 0 or result.timed_out:
+            raise DockerEndpointError("mcp_container_probe_failed")
+        ids = [
+            line.strip().lower()
+            for line in result.stdout.decode("ascii", "replace").splitlines()
+            if line.strip()
+        ]
+        if any(not _CONTAINER_ID.fullmatch(item) for item in ids):
+            raise DockerEndpointError("mcp_container_probe_invalid_id")
+        return ids
 
     def stop_and_remove(
         self,

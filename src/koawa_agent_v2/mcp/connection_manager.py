@@ -118,6 +118,8 @@ class McpSession:
         # I6 §8.7: resolved launch identity the session audits against.
         launch_identity: object | None = None,
         fault_port: FaultPort = NO_OP_FAULT_PORT,
+        # D25: admin-declared subset of server tool names to bind (None=all).
+        tool_allowlist: frozenset[str] | None = None,
     ) -> None:
         from .tool_binding import _TOOL_NAME
 
@@ -127,6 +129,9 @@ class McpSession:
             if not callable(getattr(transport, method, None)):
                 raise TypeError(f"transport must implement {method}()")
         self._server_id = server_id
+        self._tool_allowlist = (
+            frozenset(tool_allowlist) if tool_allowlist is not None else None
+        )
         self._transport = transport
         self._protocol_version = protocol_version
         # Legacy request_timeout maps to the tool-call phase ONLY (I1).
@@ -518,6 +523,7 @@ class McpSession:
                 generation,
                 tools,
                 launch_identity_digest=self.launch_identity_digest,
+                tool_allowlist=self._tool_allowlist,
             )
         except McpBindingError as error:
             raise McpSessionError(error.code) from None

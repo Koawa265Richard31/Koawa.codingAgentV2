@@ -1,0 +1,64 @@
+{
+  "_comment": [
+    "D25 sandboxed third-party stdio MCP server - minimal secure example.",
+    "Read with the runtime config loader (config_schema_version 3).",
+    "Invariants enforced by code (not by this file): network=none, zero mounts,",
+    "zero secrets, read-only rootfs, non-root, cap-drop ALL, no-new-privileges,",
+    "bounded cpu/mem/pids/tmpfs, exact sha256 image digest, tool_allowlist.",
+    "tool_allowlist omits tools whose schemas are outside the modeled subset;",
+    "omitted tools never enter the registry (calls deny as unbound)."
+  ],
+  "config_schema_version": 3,
+  "repo": "D:/path/to/task_repo",
+  "db": "./agent.sqlite3",
+  "provider": {
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key_env": "SF_CodingAgentTestKey",
+    "model": "Qwen/Qwen3.5-35B-A3B",
+    "provider": "siliconflow",
+    "reasoning_effort": "off"
+  },
+  "sandbox": {
+    "runner": "docker",
+    "docker_executable": "docker"
+  },
+  "test_profiles": [
+    {
+      "profile_id": "python_unittest",
+      "argv": ["/usr/local/bin/python", "-m", "unittest", "discover", "-s", "tests"]
+    }
+  ],
+  "policy": {
+    "policy_version": "policy-v1",
+    "read_decision": "allow",
+    "patch_decision": "ask"
+  },
+  "mcp_servers": [
+    {
+      "server_id": "files",
+      "execution_profile": "sandboxed",
+      "image_id": "sha256:adcd84ab9f9dc91e5c3eebe9fa32329545f73ab0b891ecd6def4232740cc4300",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/data"
+      ],
+      "container_working_directory": "/data",
+      "resource_limits": {
+        "cpus": 1.0,
+        "memory_bytes": 268435456,
+        "pids": 128,
+        "tmpfs_bytes": 33554432
+      },
+      "tool_allowlist": [
+        "list_directory",
+        "get_file_info",
+        "create_directory",
+        "move_file"
+      ],
+      "decision": "allow",
+      "side_effect_class": "read_only",
+      "recovery_mode": "retry"
+    }
+  ]
+}

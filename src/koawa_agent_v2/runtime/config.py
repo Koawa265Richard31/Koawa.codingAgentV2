@@ -70,7 +70,7 @@ def _validate_container_working_directory(value: str) -> None:
     if len(value.encode("utf-8")) > 4096:
         raise RuntimeConfigError("invalid_mcp_container_working_directory")
     parts = value.split("/")
-    if any(part in ("", ".", "..") for part in parts[1:]):
+    if value != "/" and any(part in ("", ".", "..") for part in parts[1:]):
         raise RuntimeConfigError("invalid_mcp_container_working_directory")
 
 # §6.5: the config file is bounded before parsing (bytes, not characters).
@@ -409,6 +409,9 @@ class McpServerConfig:
     # directory; ``cwd`` keeps exclusive host-path semantics and both are
     # never allowed on the same config.
     container_working_directory: str | None = None
+    # D25: admin-declared subset of server tool names to bind; None binds all
+    # (and any schema outside the modeled subset fails the whole catalog).
+    tool_allowlist: tuple[str, ...] | None = None
     # D25 W1: legacy (None-profile) configs are fixture-only.  The flag can
     # never arrive through a file document - the loader does not accept it -
     # so a direct constructor must mark legacy configs explicitly for the
@@ -1343,6 +1346,7 @@ def _parse_mcp_servers(
             "read_only_mounts",
             "code_artifacts",
             "container_working_directory",
+            "tool_allowlist",
         }
         _reject_unknown(item, allowed, "invalid_mcp_server")
         # §8.3: v3 JSON must declare an explicit execution_profile for every
@@ -1431,6 +1435,11 @@ def _parse_mcp_servers(
                     code_artifacts=code_artifacts,
                     container_working_directory=item.get(
                         "container_working_directory"
+                    ),
+                    tool_allowlist=(
+                        None
+                        if item.get("tool_allowlist") is None
+                        else tuple(item.get("tool_allowlist"))
                     ),
                 )
             )
