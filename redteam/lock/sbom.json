@@ -1,0 +1,675 @@
+{
+ "schema_version": 1,
+ "format": "koawa-cyclodx-lite",
+ "generated_at": "2026-09-02",
+ "environment": "redteam/.venv (Python 3.11)",
+ "root": "pyrit==1.0.1",
+ "components": [
+  {
+   "name": "aiofiles",
+   "version": "25.1.0",
+   "license": "Apache-2.0",
+   "purl": "pkg:pypi/aiofiles@25.1.0"
+  },
+  {
+   "name": "aiohappyeyeballs",
+   "version": "2.7.1",
+   "license": "PSF-2.0",
+   "purl": "pkg:pypi/aiohappyeyeballs@2.7.1"
+  },
+  {
+   "name": "aiohttp",
+   "version": "3.14.3",
+   "license": "Apache-2.0 AND MIT",
+   "purl": "pkg:pypi/aiohttp@3.14.3"
+  },
+  {
+   "name": "aiosignal",
+   "version": "1.4.0",
+   "license": "Apache 2.0",
+   "purl": "pkg:pypi/aiosignal@1.4.0"
+  },
+  {
+   "name": "alembic",
+   "version": "1.19.1",
+   "license": "MIT (pypi metadata)",
+   "purl": "pkg:pypi/alembic@1.19.1"
+  },
+  {
+   "name": "annotated-doc",
+   "version": "0.0.5",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/annotated-doc@0.0.5"
+  },
+  {
+   "name": "annotated-types",
+   "version": "0.8.0",
+   "license": "MIT License",
+   "purl": "pkg:pypi/annotated-types@0.8.0"
+  },
+  {
+   "name": "anyio",
+   "version": "4.14.2",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/anyio@4.14.2"
+  },
+  {
+   "name": "appdirs",
+   "version": "1.4.4",
+   "license": "MIT",
+   "purl": "pkg:pypi/appdirs@1.4.4"
+  },
+  {
+   "name": "art",
+   "version": "6.5",
+   "license": "MIT",
+   "purl": "pkg:pypi/art@6.5"
+  },
+  {
+   "name": "attrs",
+   "version": "26.1.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/attrs@26.1.0"
+  },
+  {
+   "name": "av",
+   "version": "18.1.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/av@18.1.0"
+  },
+  {
+   "name": "azure-ai-contentsafety",
+   "version": "1.0.0",
+   "license": "MIT License",
+   "purl": "pkg:pypi/azure-ai-contentsafety@1.0.0"
+  },
+  {
+   "name": "azure-core",
+   "version": "1.41.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/azure-core@1.41.0"
+  },
+  {
+   "name": "azure-identity",
+   "version": "1.25.3",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/azure-identity@1.25.3"
+  },
+  {
+   "name": "azure-keyvault-secrets",
+   "version": "4.11.2",
+   "license": "MIT License",
+   "purl": "pkg:pypi/azure-keyvault-secrets@4.11.2"
+  },
+  {
+   "name": "azure-storage-blob",
+   "version": "12.30.1",
+   "license": "MIT License",
+   "purl": "pkg:pypi/azure-storage-blob@12.30.1"
+  },
+  {
+   "name": "base2048",
+   "version": "0.1.3",
+   "license": "MIT",
+   "purl": "pkg:pypi/base2048@0.1.3"
+  },
+  {
+   "name": "certifi",
+   "version": "2026.7.22",
+   "license": "MPL-2.0",
+   "purl": "pkg:pypi/certifi@2026.7.22"
+  },
+  {
+   "name": "cffi",
+   "version": "2.1.1",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/cffi@2.1.1"
+  },
+  {
+   "name": "charset-normalizer",
+   "version": "3.5.1",
+   "license": "MIT",
+   "purl": "pkg:pypi/charset-normalizer@3.5.1"
+  },
+  {
+   "name": "click",
+   "version": "8.5.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/click@8.5.0"
+  },
+  {
+   "name": "colorama",
+   "version": "0.4.6",
+   "license": "BSD License",
+   "purl": "pkg:pypi/colorama@0.4.6"
+  },
+  {
+   "name": "confusable-homoglyphs",
+   "version": "3.3.1",
+   "license": "MIT",
+   "purl": "pkg:pypi/confusable-homoglyphs@3.3.1"
+  },
+  {
+   "name": "confusables",
+   "version": "1.2.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/confusables@1.2.0"
+  },
+  {
+   "name": "cryptography",
+   "version": "50.0.1",
+   "license": "BSD (license file)",
+   "purl": "pkg:pypi/cryptography@50.0.1"
+  },
+  {
+   "name": "datasets",
+   "version": "5.0.1",
+   "license": "Apache 2.0",
+   "purl": "pkg:pypi/datasets@5.0.1"
+  },
+  {
+   "name": "dill",
+   "version": "0.4.1",
+   "license": "BSD-3-Clause",
+   "purl": "pkg:pypi/dill@0.4.1"
+  },
+  {
+   "name": "ecoji",
+   "version": "0.1.1",
+   "license": "Apache",
+   "purl": "pkg:pypi/ecoji@0.1.1"
+  },
+  {
+   "name": "et_xmlfile",
+   "version": "2.0.0",
+   "license": "MIT",
+   "purl": "pkg:pypi/et_xmlfile@2.0.0"
+  },
+  {
+   "name": "fastapi",
+   "version": "0.141.1",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/fastapi@0.141.1"
+  },
+  {
+   "name": "filelock",
+   "version": "3.32.4",
+   "license": "MIT License",
+   "purl": "pkg:pypi/filelock@3.32.4"
+  },
+  {
+   "name": "frozenlist",
+   "version": "1.8.0",
+   "license": "Apache-2.0",
+   "purl": "pkg:pypi/frozenlist@1.8.0"
+  },
+  {
+   "name": "fsspec",
+   "version": "2026.6.0",
+   "license": "BSD (license file)",
+   "purl": "pkg:pypi/fsspec@2026.6.0"
+  },
+  {
+   "name": "greenlet",
+   "version": "3.5.5",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/greenlet@3.5.5"
+  },
+  {
+   "name": "h11",
+   "version": "0.16.0",
+   "license": "MIT",
+   "purl": "pkg:pypi/h11@0.16.0"
+  },
+  {
+   "name": "h2",
+   "version": "4.4.1",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/h2@4.4.1"
+  },
+  {
+   "name": "hf-xet",
+   "version": "1.6.0",
+   "license": "Apache Software License",
+   "purl": "pkg:pypi/hf-xet@1.6.0"
+  },
+  {
+   "name": "hpack",
+   "version": "4.2.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/hpack@4.2.0"
+  },
+  {
+   "name": "httpcore",
+   "version": "1.0.9",
+   "license": "BSD License",
+   "purl": "pkg:pypi/httpcore@1.0.9"
+  },
+  {
+   "name": "httpcore2",
+   "version": "2.12.0",
+   "license": "BSD License",
+   "purl": "pkg:pypi/httpcore2@2.12.0"
+  },
+  {
+   "name": "httptools",
+   "version": "0.8.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/httptools@0.8.0"
+  },
+  {
+   "name": "httpx",
+   "version": "0.28.1",
+   "license": "BSD-3-Clause",
+   "purl": "pkg:pypi/httpx@0.28.1"
+  },
+  {
+   "name": "httpx2",
+   "version": "2.12.0",
+   "license": "BSD License",
+   "purl": "pkg:pypi/httpx2@2.12.0"
+  },
+  {
+   "name": "huggingface_hub",
+   "version": "1.29.0",
+   "license": "Apache-2.0",
+   "purl": "pkg:pypi/huggingface_hub@1.29.0"
+  },
+  {
+   "name": "hyperframe",
+   "version": "6.1.0",
+   "license": "MIT License",
+   "purl": "pkg:pypi/hyperframe@6.1.0"
+  },
+  {
+   "name": "idna",
+   "version": "3.19",
+   "license": "BSD (license file)",
+   "purl": "pkg:pypi/idna@3.19"
+  },
+  {
+   "name": "isodate",
+   "version": "0.7.2",
+   "license": "BSD License",
+   "purl": "pkg:pypi/isodate@0.7.2"
+  },
+  {
+   "name": "Jinja2",
+   "version": "3.1.6",
+   "license": "BSD License",
+   "purl": "pkg:pypi/jinja2@3.1.6"
+  },
+  {
+   "name": "jiter",
+   "version": "0.16.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/jiter@0.16.0"
+  },
+  {
+   "name": "lxml",
+   "version": "6.1.2",
+   "license": "BSD-3-Clause",
+   "purl": "pkg:pypi/lxml@6.1.2"
+  },
+  {
+   "name": "Mako",
+   "version": "1.4.1",
+   "license": "MIT (pypi metadata)",
+   "purl": "pkg:pypi/mako@1.4.1"
+  },
+  {
+   "name": "markdown-it-py",
+   "version": "4.2.0",
+   "license": "MIT License",
+   "purl": "pkg:pypi/markdown-it-py@4.2.0"
+  },
+  {
+   "name": "MarkupSafe",
+   "version": "3.0.3",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/markupsafe@3.0.3"
+  },
+  {
+   "name": "mdurl",
+   "version": "0.1.2",
+   "license": "MIT License",
+   "purl": "pkg:pypi/mdurl@0.1.2"
+  },
+  {
+   "name": "msal",
+   "version": "1.38.0",
+   "license": "MIT",
+   "purl": "pkg:pypi/msal@1.38.0"
+  },
+  {
+   "name": "msal-extensions",
+   "version": "1.3.1",
+   "license": "MIT License",
+   "purl": "pkg:pypi/msal-extensions@1.3.1"
+  },
+  {
+   "name": "multidict",
+   "version": "6.7.1",
+   "license": "Apache License 2.0",
+   "purl": "pkg:pypi/multidict@6.7.1"
+  },
+  {
+   "name": "multiprocess",
+   "version": "0.70.19",
+   "license": "BSD-3-Clause",
+   "purl": "pkg:pypi/multiprocess@0.70.19"
+  },
+  {
+   "name": "numpy",
+   "version": "2.4.6",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/numpy@2.4.6"
+  },
+  {
+   "name": "openai",
+   "version": "3.6.0",
+   "license": "Apache Software License",
+   "purl": "pkg:pypi/openai@3.6.0"
+  },
+  {
+   "name": "openpyxl",
+   "version": "3.1.5",
+   "license": "MIT",
+   "purl": "pkg:pypi/openpyxl@3.1.5"
+  },
+  {
+   "name": "packaging",
+   "version": "26.3",
+   "license": "BSD (license file)",
+   "purl": "pkg:pypi/packaging@26.3"
+  },
+  {
+   "name": "pandas",
+   "version": "3.0.5",
+   "license": "BSD License",
+   "purl": "pkg:pypi/pandas@3.0.5"
+  },
+  {
+   "name": "pillow",
+   "version": "12.3.0",
+   "license": "MIT-CMU (pypi metadata)",
+   "purl": "pkg:pypi/pillow@12.3.0"
+  },
+  {
+   "name": "pip",
+   "version": "24.0",
+   "license": "MIT",
+   "purl": "pkg:pypi/pip@24.0"
+  },
+  {
+   "name": "propcache",
+   "version": "0.5.2",
+   "license": "Apache-2.0",
+   "purl": "pkg:pypi/propcache@0.5.2"
+  },
+  {
+   "name": "pyarrow",
+   "version": "25.0.1",
+   "license": "Apache-2.0 (license file)",
+   "purl": "pkg:pypi/pyarrow@25.0.1"
+  },
+  {
+   "name": "pycparser",
+   "version": "3.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/pycparser@3.0"
+  },
+  {
+   "name": "pydantic",
+   "version": "2.13.5",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/pydantic@2.13.5"
+  },
+  {
+   "name": "pydantic_core",
+   "version": "2.46.5",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/pydantic_core@2.46.5"
+  },
+  {
+   "name": "Pygments",
+   "version": "2.21.0",
+   "license": "BSD-2-Clause (pypi metadata)",
+   "purl": "pkg:pypi/pygments@2.21.0"
+  },
+  {
+   "name": "PyJWT",
+   "version": "2.13.0",
+   "license": "MIT (pypi metadata)",
+   "purl": "pkg:pypi/pyjwt@2.13.0"
+  },
+  {
+   "name": "pyodbc",
+   "version": "5.3.0",
+   "license": "MIT",
+   "purl": "pkg:pypi/pyodbc@5.3.0"
+  },
+  {
+   "name": "pypdf",
+   "version": "6.16.2",
+   "license": "BSD-3-Clause (pypi metadata)",
+   "purl": "pkg:pypi/pypdf@6.16.2"
+  },
+  {
+   "name": "pyrit",
+   "version": "1.0.1",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/pyrit@1.0.1"
+  },
+  {
+   "name": "python-dateutil",
+   "version": "2.9.0.post0",
+   "license": "Dual License",
+   "purl": "pkg:pypi/python-dateutil@2.9.0.post0"
+  },
+  {
+   "name": "python-docx",
+   "version": "1.2.0",
+   "license": "MIT",
+   "purl": "pkg:pypi/python-docx@1.2.0"
+  },
+  {
+   "name": "python-dotenv",
+   "version": "1.2.3",
+   "license": "BSD-3-Clause",
+   "purl": "pkg:pypi/python-dotenv@1.2.3"
+  },
+  {
+   "name": "PyYAML",
+   "version": "6.0.3",
+   "license": "MIT",
+   "purl": "pkg:pypi/pyyaml@6.0.3"
+  },
+  {
+   "name": "regex",
+   "version": "2026.8.31",
+   "license": "Apache-2.0 (license file)",
+   "purl": "pkg:pypi/regex@2026.8.31"
+  },
+  {
+   "name": "reportlab",
+   "version": "5.0.1",
+   "license": "BSD license (see license.txt for details), Copyright (c) 2000-2025, ReportLab Inc.",
+   "purl": "pkg:pypi/reportlab@5.0.1"
+  },
+  {
+   "name": "requests",
+   "version": "2.34.2",
+   "license": "Apache-2.0",
+   "purl": "pkg:pypi/requests@2.34.2"
+  },
+  {
+   "name": "rich",
+   "version": "15.0.0",
+   "license": "MIT",
+   "purl": "pkg:pypi/rich@15.0.0"
+  },
+  {
+   "name": "safetensors",
+   "version": "0.8.0",
+   "license": "Apache Software License",
+   "purl": "pkg:pypi/safetensors@0.8.0"
+  },
+  {
+   "name": "scipy",
+   "version": "1.17.1",
+   "license": "BSD License",
+   "purl": "pkg:pypi/scipy@1.17.1"
+  },
+  {
+   "name": "segno",
+   "version": "1.6.6",
+   "license": "BSD License",
+   "purl": "pkg:pypi/segno@1.6.6"
+  },
+  {
+   "name": "setuptools",
+   "version": "65.5.0",
+   "license": "MIT License",
+   "purl": "pkg:pypi/setuptools@65.5.0"
+  },
+  {
+   "name": "shellingham",
+   "version": "1.5.4",
+   "license": "ISC License",
+   "purl": "pkg:pypi/shellingham@1.5.4"
+  },
+  {
+   "name": "six",
+   "version": "1.17.0",
+   "license": "MIT",
+   "purl": "pkg:pypi/six@1.17.0"
+  },
+  {
+   "name": "sniffio",
+   "version": "1.3.1",
+   "license": "MIT OR Apache-2.0",
+   "purl": "pkg:pypi/sniffio@1.3.1"
+  },
+  {
+   "name": "SQLAlchemy",
+   "version": "2.0.52",
+   "license": "MIT",
+   "purl": "pkg:pypi/sqlalchemy@2.0.52"
+  },
+  {
+   "name": "starlette",
+   "version": "1.6.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/starlette@1.6.0"
+  },
+  {
+   "name": "tenacity",
+   "version": "9.1.4",
+   "license": "Apache 2.0",
+   "purl": "pkg:pypi/tenacity@9.1.4"
+  },
+  {
+   "name": "termcolor",
+   "version": "3.3.0",
+   "license": "MIT (pypi metadata)",
+   "purl": "pkg:pypi/termcolor@3.3.0"
+  },
+  {
+   "name": "tinytag",
+   "version": "2.3.1",
+   "license": "MIT License",
+   "purl": "pkg:pypi/tinytag@2.3.1"
+  },
+  {
+   "name": "tokenizers",
+   "version": "0.23.1",
+   "license": "Apache Software License",
+   "purl": "pkg:pypi/tokenizers@0.23.1"
+  },
+  {
+   "name": "tqdm",
+   "version": "4.70.0",
+   "license": "MPL-2.0 AND MIT",
+   "purl": "pkg:pypi/tqdm@4.70.0"
+  },
+  {
+   "name": "transformers",
+   "version": "5.16.1",
+   "license": "Apache 2.0 License",
+   "purl": "pkg:pypi/transformers@5.16.1"
+  },
+  {
+   "name": "treelib",
+   "version": "1.8.0",
+   "license": "Apache-2.0",
+   "purl": "pkg:pypi/treelib@1.8.0"
+  },
+  {
+   "name": "truststore",
+   "version": "0.10.4",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/truststore@0.10.4"
+  },
+  {
+   "name": "typer",
+   "version": "0.27.2",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/typer@0.27.2"
+  },
+  {
+   "name": "typing-inspection",
+   "version": "0.4.4",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/typing-inspection@0.4.4"
+  },
+  {
+   "name": "typing_extensions",
+   "version": "4.16.0",
+   "license": "PSF-2.0 (pypi metadata)",
+   "purl": "pkg:pypi/typing_extensions@4.16.0"
+  },
+  {
+   "name": "tzdata",
+   "version": "2026.3",
+   "license": "Apache-2.0",
+   "purl": "pkg:pypi/tzdata@2026.3"
+  },
+  {
+   "name": "urllib3",
+   "version": "2.7.0",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/urllib3@2.7.0"
+  },
+  {
+   "name": "uvicorn",
+   "version": "0.52.4",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/uvicorn@0.52.4"
+  },
+  {
+   "name": "watchfiles",
+   "version": "1.2.0",
+   "license": "MIT",
+   "purl": "pkg:pypi/watchfiles@1.2.0"
+  },
+  {
+   "name": "websockets",
+   "version": "17.1",
+   "license": "MIT (license file)",
+   "purl": "pkg:pypi/websockets@17.1"
+  },
+  {
+   "name": "xxhash",
+   "version": "4.0.1",
+   "license": "BSD-2-Clause",
+   "purl": "pkg:pypi/xxhash@4.0.1"
+  },
+  {
+   "name": "yarl",
+   "version": "1.24.5",
+   "license": "Apache-2.0",
+   "purl": "pkg:pypi/yarl@1.24.5"
+  }
+ ]
+}

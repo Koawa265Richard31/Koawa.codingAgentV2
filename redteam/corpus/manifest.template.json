@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "note": "RT/J corpus manifest entry template. Fields required by docs/agent-redteam-jailbreak-plan.md v1.1 §6 (corpus freeze row). Every field is mandatory before a corpus item may enter redteam/corpus/data/; missing evidence = item stays out.",
+  "entries": [
+    {
+      "corpus_id": "example-garak-promptinject",
+      "source_url": "https://github.com/NVIDIA/garak/tree/<immutable-commit>/garak/probes/<path>",
+      "immutable_revision": "<40-char commit hash, never a branch name>",
+      "source_path": "garak/probes/<...>/<file>",
+      "sha256": "<sha256 of the exact fetched artifact>",
+      "spdx": "Apache-2.0",
+      "license_evidence": "https://raw.githubusercontent.com/NVIDIA/garak/<immutable-commit>/LICENSE (fetched 2026-08-31, Apache-2.0 full text)",
+      "modifications": [],
+      "review": { "reviewer": "maintainer", "date": "YYYY-MM-DD", "result": "approved" },
+      "model_output_origin": "synthetic",
+      "seed_source_id": "<id referenced by J1 case schema>",
+      "usage": "attack-intent/encoding seed only; no model-layer claim"
+    }
+  ]
+}

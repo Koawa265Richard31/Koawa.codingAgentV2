@@ -1,0 +1,20 @@
+{
+  "check": "rt-j isolation spike",
+  "plan_ref": "docs/agent-redteam-jailbreak-plan.md v1.1 §4/§8.1",
+  "ran_at": "2026-08-31T14:15:21",
+  "forbidden_import_findings": [],
+  "pyproject": {
+    "present": true,
+    "pyrit_declared": []
+  },
+  "venvs": {
+    "system_python": "C:\\Users\\qaz14\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+    "system_can_import_pyrit": false,
+    "system_detail": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'pyrit'",
+    "redteam_venv_present": true,
+    "venv_can_import_pyrit": true,
+    "venv_detail": "D:\\A_Dev_Projects\\KoawaAgent\\v2\\redteam\\.venv\\Lib\\site-packages\\pyrit\\__init__.py"
+  },
+  "failures": [],
+  "passed": true
+}

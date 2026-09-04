@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "slice": "RT/J",
+  "generated_at": "2026-09-02",
+  "review": { "reviewer": "maintainer", "date": "2026-09-02", "result": "approved" },
+  "usage": "attack-intent/encoding seeds for J1 replay and J2 fingerprints only; no model-layer claim (plan v1.1 §1.2)",
+  "entries": [
+    {
+      "corpus_id": "garak-promptinject-prompt-data",
+      "source_url": "https://github.com/NVIDIA/garak",
+      "immutable_revision": "2212c73e4886c9c9fe78768e82a543a47284addf",
+      "source_path": "garak/resources/promptinject/prompt_data.py",
+      "local_path": "redteam/corpus/data/garak-prompt-data.py",
+      "sha256": "81b4285dec37ccb4af7c529017687eca7f0bfd1bef546611171d6f93bb494408",
+      "size_bytes": 27066,
+      "spdx": "Apache-2.0",
+      "license_evidence": "redteam/corpus/data/garak-LICENSE (sha256 f12c175308d657ab393ca79f063063501273d43c14200d3ba7b214ca8e50523e, fetched at the same revision)",
+      "modifications": [],
+      "model_output_origin": "synthetic",
+      "seed_source_id": "seed:garak-promptinject"
+    },
+    {
+      "corpus_id": "advbench-harmful-behaviors",
+      "source_url": "https://github.com/llm-attacks/llm-attacks",
+      "immutable_revision": "098262edf85f807224e70ecd87b9d83716bf6b73",
+      "source_path": "data/advbench/harmful_behaviors.csv",
+      "local_path": "redteam/corpus/data/advbench-harmful-behaviors.csv",
+      "sha256": "6cd1a5c63c07610d7eb67307772ee5606017ee950b5770ab288a2c487489d3e1",
+      "size_bytes": 82125,
+      "spdx": "MIT",
+      "license_evidence": "redteam/corpus/data/llm-attacks-LICENSE (sha256 1e4bb8e2313ef9ff36033526503aa8837c80ba1d4c055c2e7d9977760028eec7, fetched at the same revision; maintainer license check closed 2026-09-02)",
+      "modifications": [],
+      "model_output_origin": "synthetic",
+      "seed_source_id": "seed:advbench-behaviors"
+    }
+  ],
+  "excluded": [
+    {
+      "candidate": "unlicensed DAN collections",
+      "reason": "no license evidence; excluded per plan §9 Q5 decision"
+    }
+  ]
+}
