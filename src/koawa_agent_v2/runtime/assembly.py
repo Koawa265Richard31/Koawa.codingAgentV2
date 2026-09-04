@@ -493,6 +493,7 @@ def assemble_execution_plane(
     api_key: str | None = None,
     reasoning_sink: Callable[[str], None] | None = None,
     launcher_builder=None,
+    post_build_registrars: Callable | tuple = (),
 ) -> AssembledRuntime:
     """Build the lazy execution plane: verified registry + MCP + client."""
     if not isinstance(control, ControlPlaneRuntime):
@@ -515,6 +516,7 @@ def assemble_execution_plane(
             command_runner=runner,
             git_facade=control.git,
             plan_board=plan_board,
+            post_build_registrars=tuple(post_build_registrars),
         )
         mcp_sessions, mcp_bindings = _connect_execution_mcp_servers(
             control, granted_plan, launcher_builder=launcher_builder,

@@ -119,6 +119,12 @@ class AppRuntime:
             api_key=self._api_key,
             reasoning_sink=self._reasoning_sink,
             launcher_builder=self._launcher_builder,
+            # RT-1: optional trusted control-exercise tool registrars
+            # (e.g. the frozen loopback egress probe), set by the operator
+            # bridge before the first execution-plane build.
+            post_build_registrars=tuple(
+                getattr(self, "_post_build_registrars", ()) or ()
+            ),
         )
         self._execution_plane = execution
         return execution

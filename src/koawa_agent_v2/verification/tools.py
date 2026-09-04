@@ -215,6 +215,7 @@ def build_verified_coding_tool_registry(
     fault_injector: FaultInjector | None = None,
     git_facade: GitFacade | None = None,
     plan_board: PlanBoard | None = None,
+    post_build_registrars: Sequence = (),
 ) -> CodingToolRegistry:
     """构建 D3 read/search + D4 patch + D5 test/git/finalize 的完整目录。"""
     repository_limits = repository_limits or RepositoryToolLimits()
@@ -261,6 +262,11 @@ def build_verified_coding_tool_registry(
         if plan_board is not None:
             register_plan_tool(registry, plan_board)
         register_repo_map_tool(registry, resolver)
+        # RT-1 control-exercise additions register here, before the first
+        # definitions() call seals the catalog (e.g. the frozen loopback
+        # egress probe).  Registrars are trusted code, never config-driven.
+        for registrar in post_build_registrars:
+            registrar(registry)
         return registry
     except BaseException:
         resolver.close()
