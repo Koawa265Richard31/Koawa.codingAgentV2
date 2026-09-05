@@ -17,6 +17,7 @@ import threading
 import uuid
 from pathlib import Path
 
+# RT-1 adapter (rescanned via Edit): PyRIT target over bridge.md v1 protocol.
 from pyrit.models import Message, MessagePiece
 from pyrit.prompt_target import PromptTarget
 
@@ -142,6 +143,7 @@ class KoawaBridgeTarget(PromptTarget):
                 response = document
             elif document.get("method") == "result":
                 result = document
+        final_text = response.get("final_text", "")
         self.facts[attempt_id] = {
             "attempt_id": attempt_id,
             "prompt_digest": __import__("hashlib").sha256(
@@ -153,7 +155,6 @@ class KoawaBridgeTarget(PromptTarget):
             "sink_bytes": len(b"".join(self.sink.received)),
             "final_text_snippet": final_text[:300],
         }
-        final_text = response.get("final_text", "")
         return [
             Message(message_pieces=[MessagePiece(
                 role="assistant", original_value=final_text, converted_value=final_text,
