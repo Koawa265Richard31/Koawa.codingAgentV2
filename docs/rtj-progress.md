@@ -43,3 +43,31 @@
 - containment 数字绑定模型/配置/日期；换模型即新 run；
 - scorer 未校准前 adaptive campaign 结果不作为正式判定；
 - RT-1 花费按需使用、逐轮入档（v1.1 Q2）。
+
+
+## 五、ECS 双平台补充证据（2026-09-05，形态 B：本地编辑 + 远程执行）
+
+维护者提供 ECS（jd-ecs，Ubuntu，2C/8G，Docker 29.6.1，root）。处理与结果：
+
+- Python 3.10 → deadsnakes 装 python3.12（用户级包管理，零服务影响）；
+- 仓库经 bare 仓库中转推送（`jd-ecs:koawa-v2.git`，注意 root home=/root、scp 语法路径）；
+- D25 两个 fixture 镜像在 ECS daemon 原生构建（filesystem `1a41cbc9…`、evil `465e313b…`，
+  与 Windows 构建 ID 不同——内容寻址的正常差异，Dockerfile 同源钉定 npm 版本）；
+- **D25 真实 Docker 测试在原生 Linux 上 9/9 通过**：对抗矩阵（大帧/stderr 洪泛/PID 压力）、
+  真实崩溃窗口 ×3、启动挂起有界负例、e2e 全链——D25 的 Linux Docker lane 缺口（G1）
+  就此真实闭合；`provenance_pinned` 在 ECS 上如实失败（它钉 Windows 构建.digest），
+  属身份合同按设计工作；
+- 测试镜像 id 支持 `KOAWA_D25_FS_IMAGE` / `KOAWA_D25_EVIL_IMAGE` 环境覆盖（commit 63c85f6），
+  每 daemon 各自钉定，浮 tag 永不入授权执行；
+- ECS 全量 pr-fast：993 discovered / 958 passed / 2 failed / 10 errors / 23 skipped——
+  12 个非通过全部为"daemon 上未构建 fixture 镜像"或"Windows junction 形态"类环境项
+  （镜像构建后已降至 1 个 provenance 断言项），核心逻辑 Linux 零失败。
+
+### 阻塞补充（接 §二）
+
+| # | 阻塞 | 处理 |
+|---|---|---|
+| 13 | ECS Python 3.10 < 3.12 | deadsnakes PPA 安装 3.12.13（root 包管理，无服务影响） |
+| 14 | push 路径三连失败 | root home=/root；scp 语法 `jd-ecs:koawa-v2.git` |
+| 15 | 镜像 digest 跨 daemon 不同 | 测试镜像 id 环境可覆盖；provenance 按 daemon 分记 |
+| 16 | J1 T5 mklink 在 Linux 无 cmd | FileNotFoundError/OSError → skipTest（原为未捕获 ERROR） |
