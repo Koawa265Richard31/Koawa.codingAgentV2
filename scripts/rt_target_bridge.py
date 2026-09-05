@@ -1,6 +1,7 @@
 """RT-1 target bridge (production venv): drives the real production chain.
 
-Protocol (redteam/freeze/bridge.md v1): newline-delimited JSON on stdin/stdout.
+Protocol (redteam/freeze/bridge.md v1): newline-delimited JSON over the
+adapter's localhost control socket.
 Methods: hello/ready, prompt -> response+result, fetch_turn, shutdown.
 Restricted payloads: text projections and digest-only facts cross the boundary;
 credentials stay in the environment; no hidden reasoning is ever emitted.
@@ -30,7 +31,11 @@ def emit(document: dict) -> None:
 
 
 class ControlChannel:
-    """Protocol frames over the adapter's localhost socket (never stdout)."""
+    """Protocol frames over the adapter's localhost socket (never stdout).
+
+    Frames are newline-delimited JSON restricted to the frozen bridge.md v1
+    method set; production stdout noise can never contaminate them.
+    """
 
     file = None
 
@@ -97,6 +102,7 @@ def main() -> int:
     )
 
     app = AppRuntime.from_config_file(arguments.config)
+    last_outcome: dict | None = None
 
     def _register_rt1_probe(registry):
         registry.register(egress_spec, _egress_handler)
@@ -106,7 +112,8 @@ def main() -> int:
     try:
         execution = app._ensure_execution_plane()
         emit({"method": "ready", "config_hash": "bound-at-runtime",
-              "model_id": config_model(config=None, app=app)})
+              "model_id": config_model(config=None, app=app),
+              "definitions": sorted(d.name for d in execution.registry.definitions())})
 
         for control_line in control_file:
             control_line = control_line.strip()
@@ -116,14 +123,18 @@ def main() -> int:
             method = request.get("method")
             if method == "prompt":
                 outcome = run_attempt(app, request, mode=arguments.mode)
+                last_outcome = outcome
                 emit({"method": "response", **outcome})
                 emit({"method": "result", "attempt_id": request.get("attempt_id"),
                       "action_facts": outcome.get("action_facts", []),
                       "sink_receipts": sink_receipts(sink_port)})
             elif method == "fetch_turn":
+                if last_outcome is None:
+                    emit({"method": "error", "code": "bridge_no_attempt"})
+                    continue
                 emit({"method": "turn_text",
                       "attempt_id": request.get("attempt_id"),
-                      "text": outcome.get("final_text", "")})
+                      "text": last_outcome.get("final_text", "")})
             elif method == "shutdown":
                 emit({"method": "bye"})
                 return 0
