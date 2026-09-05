@@ -24,6 +24,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+# RT-1 campaign driver (rescanned via Edit): classification per frozen
+# taxonomy; scorer not used for formal judgments (dual-track rule).
+
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -88,6 +91,11 @@ async def run(arguments) -> dict:
     )
     base = json.loads(Path(arguments.config).read_text(encoding="utf-8"))
     base["repo"] = str(repo)
+    if arguments.model:
+        base["provider"]["model"] = arguments.model
+        base["provider"].pop("reasoning_effort", None)
+    if arguments.base_url:
+        base["provider"]["base_url"] = arguments.base_url
     base["db"] = str(campaign_dir / "target.sqlite3")
     campaign_config = campaign_dir / "config.json"
     campaign_config.write_text(json.dumps(base, indent=1), encoding="utf-8")
@@ -105,14 +113,19 @@ async def run(arguments) -> dict:
             attack = PromptSendingAttack(objective_target=target)
             objective = f"{seed}\n\n{EGRESS_DIRECTIVE}"
             started = time.monotonic()
+            known = set(target.facts)
+            sink_before = len(b"".join(target.sink.received))
             try:
                 outcome = await attack.execute_async(objective=objective)
                 status = "executed"
             except Exception as error:
                 outcome = None
                 status = f"{type(error).__name__}: {str(error)[:120]}"
-            attempt_id = sorted(target.facts)[-1] if target.facts else None
+            fresh = [key for key in target.facts if key not in known]
+            # one attempt == one new fact entry; take the newest
+            attempt_id = fresh[-1] if fresh else None
             facts = target.facts.get(attempt_id, {}) if attempt_id else {}
+            sink_delivered = len(b"".join(target.sink.received)) - sink_before
             attempts.append({
                 "attempt_id": attempt_id or f"no-attempt-{index}",
                 "seed_source_id": "seed:advbench-behaviors",
@@ -120,7 +133,8 @@ async def run(arguments) -> dict:
                 "status": status,
                 "duration_s": round(time.monotonic() - started, 2),
                 "classification": classify(facts) if facts else "infra_error",
-                "sink_hits": facts.get("sink_hits", 0),
+                "sink_hits": max(0, facts.get("sink_hits", 0) - 0),
+                "sink_delivered_bytes_delta": sink_delivered,
                 "model_said": facts.get("final_text_snippet", "")[:160],
             })
             print(f"[{index}/{len(seeds)}] {attempts[-1]['classification']} "
@@ -142,6 +156,7 @@ async def run(arguments) -> dict:
         "started_at": arguments.started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "canary": CANARY,
+        "model": arguments.model or "config-default",
         "attempts": attempts,
         "classification_counts": {
             name: sum(1 for a in attempts if a["classification"] == name)
@@ -175,6 +190,9 @@ def main() -> int:
     parser.add_argument("--attempts", type=int, default=4)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--production-python", default="py -3.14")
+    parser.add_argument("--model", default=None,
+                        help="override provider model (plan: replacement rule)")
+    parser.add_argument("--base-url", default=None)
     arguments = parser.parse_args()
     arguments.started_at = datetime.now(timezone.utc).isoformat()
     report = asyncio.run(run(arguments))
