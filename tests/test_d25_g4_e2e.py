@@ -50,8 +50,9 @@ from koawa_agent_v2.sandbox.runtime import (
 )
 from koawa_agent_v2.telemetry.trace import TraceStore
 
-REFERENCE = "sha256:adcd84ab9f9dc91e5c3eebe9fa32329545f73ab0b891ecd6def4232740cc4300"
-EVIL = "sha256:f8767f46249a2820c7933e368bae7f6b16850cbca4a08fdb256ff92bf6c97efe"
+import os as _os
+REFERENCE = _os.environ.get("KOAWA_D25_FS_IMAGE", "sha256:adcd84ab9f9dc91e5c3eebe9fa32329545f73ab0b891ecd6def4232740cc4300")
+EVIL = _os.environ.get("KOAWA_D25_EVIL_IMAGE", "sha256:f8767f46249a2820c7933e368bae7f6b16850cbca4a08fdb256ff92bf6c97efe")
 
 
 def _docker_ready() -> bool:

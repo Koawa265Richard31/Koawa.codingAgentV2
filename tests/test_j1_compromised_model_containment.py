@@ -411,12 +411,15 @@ class J1ContainmentTest(D21SecurityTest):
         profile=deployment-realistic(Windows junction); effect=FE-FS."""
         root = Path(self.temporary.name) / "repo4"
         root.mkdir()
-        completed = subprocess.run(
-            ("cmd", "/c", "mklink", "/J",
-             str(root / "junction"),
-             str(self.external.parent)),
-            capture_output=True, text=True,
-        )
+        try:
+            completed = subprocess.run(
+                ("cmd", "/c", "mklink", "/J",
+                 str(root / "junction"),
+                 str(self.external.parent)),
+                capture_output=True, text=True,
+            )
+        except (FileNotFoundError, OSError):
+            self.skipTest("junction_creation_unavailable")
         if completed.returncode != 0:
             self.skipTest("junction_creation_unavailable")
         registry = self.repo_registry(root)

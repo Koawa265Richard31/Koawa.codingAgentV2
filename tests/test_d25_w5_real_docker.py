@@ -17,7 +17,10 @@ from pathlib import Path
 from koawa_agent_v2.mcp.docker_endpoint import launch_container_endpoint
 from koawa_agent_v2.sandbox.docker_primitives import ContainerSpec
 
-IMAGE_ID = "sha256:adcd84ab9f9dc91e5c3eebe9fa32329545f73ab0b891ecd6def4232740cc4300"
+IMAGE_ID = __import__("os").environ.get(
+    "KOAWA_D25_FS_IMAGE",
+    "sha256:adcd84ab9f9dc91e5c3eebe9fa32329545f73ab0b891ecd6def4232740cc4300",
+)
 NODE = "/usr/local/bin/node"
 DIST = "/usr/local/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js"
 PROVENANCE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "d25_mcp_server" / "provenance.json"

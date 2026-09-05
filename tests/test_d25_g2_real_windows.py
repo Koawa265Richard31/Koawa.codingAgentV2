@@ -42,7 +42,10 @@ from koawa_agent_v2.sandbox.runtime import (
     SandboxAllocationStore,
 )
 
-EVIL = "sha256:f8767f46249a2820c7933e368bae7f6b16850cbca4a08fdb256ff92bf6c97efe"
+EVIL = __import__("os").environ.get(
+    "KOAWA_D25_EVIL_IMAGE",
+    "sha256:f8767f46249a2820c7933e368bae7f6b16850cbca4a08fdb256ff92bf6c97efe",
+)
 LABELS = (("koawa.managed", "d25-g2"),)
 
 

@@ -15,7 +15,10 @@ import unittest
 from koawa_agent_v2.mcp.docker_endpoint import launch_container_endpoint
 from koawa_agent_v2.sandbox.docker_primitives import ContainerSpec
 
-EVIL = "sha256:f8767f46249a2820c7933e368bae7f6b16850cbca4a08fdb256ff92bf6c97efe"
+EVIL = __import__("os").environ.get(
+    "KOAWA_D25_EVIL_IMAGE",
+    "sha256:f8767f46249a2820c7933e368bae7f6b16850cbca4a08fdb256ff92bf6c97efe",
+)
 NODE = "/usr/local/bin/node"
 
 
