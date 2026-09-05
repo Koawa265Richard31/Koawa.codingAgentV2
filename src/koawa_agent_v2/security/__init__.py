@@ -1,5 +1,6 @@
 """RT/J J2 security package (see state.py module contract)."""
 
+from .gate import SecurityGate
 from .state import (
     ESCALATION_CONSUMED,
     ESCALATION_DENIED,
@@ -25,6 +26,7 @@ __all__ = [
     "POLICY_ESCALATED_EVENT",
     "SECURITY_SIGNAL_EVENT",
     "SecurityEscalation",
+    "SecurityGate",
     "SecurityStateStore",
     "derive_canary_token",
     "scan_exact_token",

@@ -21,6 +21,7 @@ from ..approval_service import (
     ApprovalRecord,
     ApprovalService,
     ApprovalStatus,
+    ApprovalWaiting,
 )
 from ..control.event_store import StreamId
 from ..policy import Decision, PolicyEngine, PolicyVerdict, ResolvedAction
@@ -87,6 +88,7 @@ class LedgerExecutor:
         trace_sink: TraceSink | None = None,
         trace_store: object | None = None,
         correlation_id: object | None = None,
+        security_gate=None,
     ) -> None:
         if not hasattr(delegate, "definitions") or not hasattr(delegate, "execute"):
             raise TypeError("delegate must implement ToolExecutor")
@@ -95,6 +97,7 @@ class LedgerExecutor:
         definitions = tuple(delegate.definitions())
         if not all(isinstance(item, ToolDefinition) for item in definitions):
             raise TypeError("delegate definitions contain an invalid item")
+        self._security_gate = security_gate
         copied_profiles = dict(profiles)
         if set(copied_profiles) != {item.name for item in definitions}:
             raise ValueError("profiles must exactly cover tool definitions")
@@ -337,6 +340,7 @@ class LedgerExecutor:
             resolver = self._action_resolvers[call.name]
             first = self._resolve(resolver, call, context, profile, None)
             first_verdict = self._policy_engine.evaluate(first)
+            self._j2_check(record, first, context)
             try:
                 first_grant = self._require_grant(
                     record, first, first_verdict, context=context
@@ -356,6 +360,7 @@ class LedgerExecutor:
             # phase so a changed cwd/symlink/DNS answer cannot inherit a grant.
             final = self._resolve(resolver, call, context, profile, first)
             final_verdict = self._policy_engine.evaluate(final)
+            self._j2_check(record, final, context)
             try:
                 final_grant = self._require_grant(
                     record, final, final_verdict, context=context
@@ -437,6 +442,11 @@ class LedgerExecutor:
     ) -> ToolExecutionResult:
         """Consume one executor-issued ticket and invoke at most one handler."""
         if not isinstance(authorization, AuthorizedToolCall):
+            import sys as _s
+            print('DBG-445 type:', type(authorization).__name__,
+                  'len:', len(authorization) if hasattr(authorization, "__len__") else "-",
+                  'elem0:', type(authorization[0]).__name__ if hasattr(authorization, "__len__") and len(authorization) else "-",
+                  file=_s.stderr); _s.stderr.flush()
             raise TypeError("authorization must be AuthorizedToolCall")
         if (
             authorization._executor is not self
@@ -722,6 +732,41 @@ class LedgerExecutor:
         ):
             raise ToolLedgerConflict("resolved_action_identity_conflict")
         return action
+
+    def _j2_check(self, record, action, context) -> None:
+        """J2: escalate ALLOW-verdict actions on an exact session-canary hit.
+
+        Detector/key faults fail open to the base verdict (advisory);
+        a persisted escalation is never weakened: PENDING re-pauses, DENIED
+        denies, GRANTED lets the action proceed under the approval audit.
+        """
+        gate = self._security_gate
+        if gate is None or self._approval_service is None:
+            return
+        try:
+            hit = gate.hit(action.canonical_arguments_json, context.turn_id)
+        except Exception:
+            return  # detector fault: fail open to base verdict
+        if not hit:
+            return
+        # Joint ownership: the approval stream owns terminal decisions.
+        approval_record = self._approval_service.load(record.execution_id)
+        if approval_record is not None:
+            if approval_record.status is ApprovalStatus.GRANTED:
+                return  # approved: proceed under the approval audit
+            if approval_record.status is ApprovalStatus.CONSUMED:
+                return
+            if approval_record.status is ApprovalStatus.DENIED:
+                raise ApprovalDenied("security_escalation_denied")
+            if approval_record.status is ApprovalStatus.PENDING:
+                raise ApprovalWaiting("security_escalation_pending")
+        gate.escalate(
+            record=record, action=action, context=context,
+            approval_service=self._approval_service,
+            turn_id=context.turn_id,
+        )
+        from ..approval_service import ApprovalWaiting
+        raise ApprovalWaiting("security_escalation_pending")
 
     def _require_grant(
         self,

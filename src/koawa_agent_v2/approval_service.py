@@ -678,8 +678,149 @@ class ApprovalService:
             request_fingerprint=fingerprint,
         )
 
+    def require_escalated_grant(
+        self,
+        record,
+        action: ResolvedAction,
+        *,
+        context: ToolExecutionContext,
+        signal_payload: Mapping[str, Any],
+        escalated_payload: Mapping[str, Any],
+        prompt: str,
+        security_head: int | None = None,
+    ) -> dict:
+        """RT/J J2: five-event atomic escalation command (plan §3 J2).
+
+        security-state ×2 (signal + escalated) + approval.requested + turn
+        waiting + run interrupted, exact heads on all four streams, one
+        append_batch.  Raises ApprovalWaiting after a successful commit; the
+        caller must not execute the action in that case.  Sticky: a prior
+        escalation for the same (execution, action digest, policy version)
+        reuses its request id and never re-fires from scratch.
+        """
+        _text(prompt, "prompt", 2048)
+        if context.turn_id is None or context.turn_version is None:
+            raise ApprovalError("durable_turn_identity_required")
+        turn = self._load_turn(context.turn_id)
+        if (
+            turn.version != context.turn_version
+            or turn.status is not TurnStatus.RUNNING
+            or turn.current_run_id != context.run_id
+        ):
+            raise ApprovalError("approval_turn_fence_rejected")
+
+        from .security.state import (
+            POLICY_ESCALATED_EVENT,
+            SECURITY_SIGNAL_EVENT,
+            SecurityStateStore,
+            security_stream,
+        )
+
+        sec_store = SecurityStateStore(self.event_store)
+        sec_stream = security_stream(record.execution_id)
+        request_id = uuid5(
+            NAMESPACE_URL,
+            f"koawa-j2:request:{record.execution_id}:{action.action_digest}:"
+            f"{action.policy_version}",
+        )
+        interrupt_id = uuid5(request_id, "interrupt")
+        command_id = uuid5(request_id, "j2-command")
+        now = self._observed_at(None)
+        expires_at = now + self._approval_ttl
+
+        signal_event = _event(
+            command_id, "security-signal", SECURITY_SIGNAL_EVENT,
+            dict(signal_payload), turn.thread_id, record.turn_id, now,
+            run_id=context.run_id,
+        )
+        escalated_event = _event(
+            command_id, "policy-escalated", POLICY_ESCALATED_EVENT,
+            dict(escalated_payload), turn.thread_id, record.turn_id, now,
+            run_id=context.run_id,
+        )
+        approval_events = [_event(
+            command_id, "approval-requested", "approval.requested.v1",
+            {
+                "schema_version": 1,
+                "request_id": str(request_id),
+                "subject_id": str(record.execution_id),
+                "thread_id": str(turn.thread_id),
+                "turn_id": str(record.turn_id),
+                "execution_id": str(record.execution_id),
+                "model_turn_id": str(record.model_turn_id),
+                "call_id": record.call_id,
+                "interrupt_id": str(interrupt_id),
+                "action_digest": action.action_digest,
+                "principal_id": action.principal.principal_id,
+                "policy_version": action.policy_version,
+                "capability_scope": list(action.principal.scopes),
+                "reason_code": "security_canary_exact",
+                "expires_at": expires_at.isoformat(),
+                "single_use": True,
+            },
+            turn.thread_id, record.turn_id, now, run_id=context.run_id,
+        )]
+        turn_event = _event(
+            command_id, "turn-waiting-for-approval", "turn.waiting-for-approval.v1",
+            {
+                "interrupt_id": str(interrupt_id),
+                "prompt": prompt,
+                "approval_request_id": str(request_id),
+                "reason_code": "security_canary_exact",
+            },
+            turn.thread_id, turn.turn_id, now, run_id=context.run_id,
+        )
+        run_events = self._read_all(StreamId("run", context.run_id))
+        if not run_events or run_events[0].event_type != "run.started.v1":
+            raise ApprovalError("legacy_active_run_restart_required")
+        run_head = run_events[-1]
+        run_event = _event(
+            command_id, "run-interrupted", "run.interrupted.v1",
+            {"run_id": str(context.run_id), "thread_id": str(turn.thread_id),
+             "turn_id": str(turn.turn_id),
+             "detail": "security_canary_exact"},
+            turn.thread_id, turn.turn_id, now, run_id=context.run_id,
+        )
+
+        sec_head = sec_store.head(record.execution_id) if security_head is None else security_head
+        fingerprint = _json({
+            "action": "j2_escalate",
+            "execution_id": str(record.execution_id),
+            "security_head": sec_head,
+            "approval_version": -1,
+            "turn_version": turn.version,
+            "run_version": run_head.stream_version,
+            "request_id": str(request_id),
+            "action_digest": action.action_digest,
+            "policy_version": action.policy_version,
+        })
+        self.event_store.append_batch(
+            (
+                StreamWrite(sec_stream, sec_head, (signal_event, escalated_event)),
+                StreamWrite(
+                    _approval_stream(record.execution_id), -1,
+                    tuple(approval_events),
+                ),
+                StreamWrite(
+                    StreamId("turn", turn.turn_id), turn.version, (turn_event,),
+                ),
+                StreamWrite(
+                    StreamId("run", context.run_id), run_head.stream_version,
+                    (run_event,),
+                ),
+            ),
+            idempotency_key=command_id,
+            request_fingerprint=fingerprint,
+        )
+        return {
+            "request_id": str(request_id),
+            "interrupt_id": str(interrupt_id),
+            "security_head": sec_head + 2,
+        }
+
     def _validate(
         self,
+
         record: ToolExecutionRecord,
         action: ResolvedAction,
         verdict: PolicyVerdict,
