@@ -71,3 +71,22 @@
 | 14 | push 路径三连失败 | root home=/root；scp 语法 `jd-ecs:koawa-v2.git` |
 | 15 | 镜像 digest 跨 daemon 不同 | 测试镜像 id 环境可覆盖；provenance 按 daemon 分记 |
 | 16 | J1 T5 mklink 在 Linux 无 cmd | FileNotFoundError/OSError → skipTest（原为未捕获 ERROR） |
+
+## 六、J2 stage 2 与回归状态（2026-09-05）
+
+- J2 stage 2 完成并提交（8df05a1）：SecurityGate 接入 authorize first/final resolve、
+  五事件原子批（security×2 + approval + turn + run，四流 exact heads）、
+  WAITING_FOR_APPROVAL 持久暂停、grant/deny resume、fail-open。4 门测试 + 5 store
+  测试全绿双 lane。
+- 收口全量回归（本机 Windows，997 discovered）：988 passed / 1 failed / 0 errors /
+  8 skipped。唯一失败 =
+  `test_d25_g3_g4_governance.G3ProtocolLifecycleTest.test_real_close_hang…`
+  ——并行会话测试文件的模块内顺序依赖（单独运行 3 次全绿；跟在 invalid_json 用例后
+  必现）。该文件属并行会话所有，修复需对齐后进行。
+- 除该顺序依赖外全量绿：D24/D25/J1/J2-core/RT-1 证据测试全部通过。
+
+## 七、诚实边界（不变）
+
+- 全部结论为动作层后果遏制与检测；无模型层声称；
+- 数字绑定模型/配置/日期（Qwen3-30B-Instruct，2026-09-05）；
+- adaptive campaigns 待 scorer 校准门；RT-2 runbook 已交付（`docs/rtj-runbook.md`）。
