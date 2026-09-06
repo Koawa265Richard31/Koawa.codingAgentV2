@@ -109,4 +109,7 @@
   `SecurityGate` 无生产构造点、`LedgerExecutor.security_gate` 无生产注入（默认 None）、
   config 无 key 字段——J2 门当前为**测试/lane 激活**（本轨道的"接入 authorize"指执行器
   咨询逻辑与参数通道，非生产装配注入）。J2 生产化需先确权 key 来源与注入点；
-  结论待维护者裁决后回填本账本。
+  **同日闭合（维护者"一次性实现"指令）**：`RuntimeConfig.canary_key_env`（环境变量
+  **名**，key 本体只在环境、绝不入档入码）+ `resolve_canary_key`（缺失/过短即
+  fail-closed：canary_key_missing / canary_key_invalid）+ `_bind_ledger_policy` 按
+  配置注入 SecurityGate。默认配置 gate=None（行为不变），配置 `canary_key_env` 即激活。

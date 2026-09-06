@@ -148,10 +148,13 @@ def _normalize_third_party_value(value: Any, *, allow_array: bool) -> dict[str, 
 def _normalize_third_party_schema(schema: Any) -> dict[str, Any]:
     """Bring an untrusted third-party inputSchema to the D3 boundary shape.
 
-    Only constraint-free meta keywords are removed and only *stricter*
-    defaults are introduced (absent ``additionalProperties`` becomes
-    ``False``; absent bounds become safe caps).  Anything genuinely outside
-    the modeled subset still fails closed in ``_validate_input_schema``.
+    Only constraint-free meta keywords are removed; *stricter* defaults are
+    introduced for absent keys (absent bounds become safe caps).  One
+    exception is deliberate (D25: 强制 ``additionalProperties:false``，只严不松):
+    ``additionalProperties`` is FORCED to ``False`` even when the third-party
+    server explicitly declares ``True`` — the runtime never honors a request
+    to widen its own argument surface.  Anything genuinely outside the
+    modeled subset still fails closed in ``_validate_input_schema``.
     """
     if not isinstance(schema, Mapping):
         raise McpBindingError("unsupported_mcp_schema")

@@ -120,6 +120,12 @@ class CatalogBindingTest(unittest.TestCase):
         self.assertEqual(("server__echo",), tuple(spec.name for spec in (binding.spec,)))
 
     def test_invalid_tools_are_rejected(self) -> None:
+        # B-2 (2026-09-06, direction b): the bare-string and additionalProperties
+        # cases migrated out of this tuple — D25 v1.3 normalization (88350e8)
+        # introduced conservative default bounds (bare string became legal; see
+        # rtj blocker #3's boundary migration) and FORCES
+        # additionalProperties:False (now pinned in
+        # test_additional_properties_true_is_coerced_not_honored below).
         cases = (
             (_tool("BadName"), "invalid_mcp_tool_name"),
             (_tool("ok", {"type": "object"}), "unsupported_mcp_schema"),
@@ -128,21 +134,9 @@ class CatalogBindingTest(unittest.TestCase):
                     "ok",
                     {
                         "type": "object",
-                        "properties": {"x": {"type": "string"}},
+                        "properties": {"x": {"type": "string", "pattern": "abc"}},
                         "required": [],
                         "additionalProperties": False,
-                    },
-                ),
-                "unsupported_mcp_schema",
-            ),
-            (
-                _tool(
-                    "ok",
-                    {
-                        "type": "object",
-                        "properties": {"x": {"type": "string", "minLength": 0, "maxLength": 1}},
-                        "required": [],
-                        "additionalProperties": True,
                     },
                 ),
                 "unsupported_mcp_schema",
@@ -154,6 +148,24 @@ class CatalogBindingTest(unittest.TestCase):
                 with self.assertRaises(McpBindingError) as raised:
                     bind_catalog("server", 1, [tool])
                 self.assertEqual(code, raised.exception.code)
+
+    def test_additional_properties_true_is_coerced_not_honored(self) -> None:
+        """B-2 (2026-09-06, direction b): D25 normalization FORCES
+        additionalProperties to False — an explicit True from a third-party
+        server binds successfully but is never honored (D25 doc: 强制
+        additionalProperties:false，只严不松).  Pinned so the coercion cannot
+        silently flip to rejection or to honoring the declaration."""
+        tool = _tool(
+            "ok",
+            {
+                "type": "object",
+                "properties": {"x": {"type": "string", "minLength": 0, "maxLength": 1}},
+                "required": [],
+                "additionalProperties": True,
+            },
+        )
+        catalog = bind_catalog("server", 1, [tool])
+        self.assertIn("server__ok", catalog.bindings)
 
     def test_duplicate_and_namespace_conflicts(self) -> None:
         with self.assertRaises(McpBindingError) as raised:

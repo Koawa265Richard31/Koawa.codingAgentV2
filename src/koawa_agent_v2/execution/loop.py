@@ -109,6 +109,9 @@ class ToolExecutionContext:
     turn_id: UUID | None = None
     turn_version: int | None = None
     execution_id: UUID | None = None
+    # PSEC semantics-C: ancestor turn ids whose canary seeds this execution's
+    # J2 scan must also test (delegation chain).  Empty = own-turn scan only.
+    ancestor_turn_ids: tuple[UUID, ...] = ()
     recovered_call: bool = False
     progress_guard: Callable[[], None] | None = field(
         default=None,
@@ -227,6 +230,7 @@ class AgentLoop:
         correlation_id: object | None = None,
         memory: object | None = None,
         compaction_sink: object | None = None,
+        ancestor_turn_ids: tuple[UUID, ...] = (),
     ) -> None:
         if not hasattr(client, "stream"):
             raise TypeError("client must implement ModelClient")
@@ -245,6 +249,12 @@ class AgentLoop:
         self._tool_executor = tool_executor
         self._completion_gate = completion_gate
         self._claim_gate = claim_gate
+        # PSEC semantics-C (T7-b): ancestor canary seed tokens are derived
+        # per-call from these turn ids (HMAC, never stored on the context or
+        # in events).  Empty by default — single-agent runs scan own turn only.
+        if not all(isinstance(item, UUID) for item in ancestor_turn_ids):
+            raise TypeError("ancestor_turn_ids must be a tuple of UUIDs")
+        self._ancestor_turn_ids = tuple(ancestor_turn_ids)
         self._successful_writes: frozenset[str] = frozenset()
         definitions = (
             tuple(tool_executor.definitions())
@@ -520,6 +530,7 @@ class AgentLoop:
                 run_id=run_id, model_turn_id=echo.call_ref.model_turn_id,
                 model_round=initial_model_rounds, call_ref=echo.call_ref,
                 turn_id=turn_id, turn_version=turn_version,
+                ancestor_turn_ids=self._ancestor_turn_ids,
                 recovered_call=True,
                 progress_guard=lambda: _check_tool_progress(token, ownership_guard),
             )
@@ -683,6 +694,7 @@ class AgentLoop:
                     call_ref=call_ref,
                     turn_id=turn_id,
                     turn_version=turn_version,
+                    ancestor_turn_ids=self._ancestor_turn_ids,
                     progress_guard=lambda: _check_tool_progress(
                         token, ownership_guard
                     ),

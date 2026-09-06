@@ -744,10 +744,14 @@ class LedgerExecutor:
         if gate is None or self._approval_service is None:
             return
         try:
-            hit = gate.hit(action.canonical_arguments_json, context.turn_id)
+            matched = gate.hit_multi(
+                action.canonical_arguments_json,
+                context.turn_id,
+                getattr(context, "ancestor_turn_ids", ()) or (),
+            )
         except Exception:
             return  # detector fault: fail open to base verdict
-        if not hit:
+        if matched is None:
             return
         # Joint ownership: the approval stream owns terminal decisions.
         approval_record = self._approval_service.load(record.execution_id)
@@ -764,6 +768,7 @@ class LedgerExecutor:
             record=record, action=action, context=context,
             approval_service=self._approval_service,
             turn_id=context.turn_id,
+            matched=matched,
         )
         from ..approval_service import ApprovalWaiting
         raise ApprovalWaiting("security_escalation_pending")

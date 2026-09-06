@@ -2,6 +2,8 @@
 
 PSEC 轨道。日期：2026-09-06。基线：a9d8896（威胁模型含 T7，hash 3d131d82）。**评审稿，未实现**；实现需另行版本化切片审批，且须先解决 §5 前置问题。本文取代 `s5-delegation-security.md` §3 中"语义 C（digest 种子集上浮）"的粗粒度构想，并含一处对原构想的**修正**（§2.3）。
 
+> **实现记录（2026-09-06，维护者"一次性实现"指令）**：设计已按本文实现，威胁模型 T7 失效条件行/复现要点/测试锚点/§3 图行已同步翻转，边界测试 `test_t7_delegation_boundaries.py` 已按翻转计划重写。已落地：①`SecurityGate.hit_multi`（own + 祖先种子精确扫描）与 `escalate(matched=...)`（ancestor 命中的 payload 增 `signal_kind=ancestor_seed_exact`/`seed_source`/`ancestor_turn_id`，own-turn 负载与 J2 原形 byte 一致）；②`ToolExecutionContext.ancestor_turn_ids` + `AgentLoop(ancestor_turn_ids=...)` 构造参数（两个上下文构造点全部穿透）；③`LedgerExecutor._j2_check` 改用 hit_multi；④**J2 生产激活**：`RuntimeConfig.canary_key_env`（环境变量名，遵守凭据纪律——key 本体只从环境读取、绝不入档/入码）+ `resolve_canary_key`（缺变量 fail-closed：`canary_key_missing`/`canary_key_invalid`）+ `_bind_ledger_policy` 注入。**剩余唯一接线点**：agents 侧委派图 → 子 loop 的 `ancestor_turn_ids` 传参（子 agent 工具执行路径未在本轮核实，机制与上下文字段已就绪，接线是纯调用方工作）。§5 前置问题状态：#0 生产激活已实现（opt-in via canary_key_env）；#2 key 生命周期 = 运算符负责 env 值跨重启稳定（确定性导出要求同值）；#1 takeover×sticky 与 #4 性能界保持未审计/有界声明。测试：`tests/test_j2_semantics_c.py`（10 用例）+ 翻转后的 `tests/test_t7_delegation_boundaries.py`。
+
 ## 0. 结论与目标收敛
 
 语义 C 的目标：覆盖 T7-b（父上下文种下的 canary 种子对子 turn 不可见）。设计核实后有一个重要的**诚实缩小**：
@@ -33,7 +35,7 @@ PSEC 轨道。日期：2026-09-06。基线：a9d8896（威胁模型含 T7，hash
 
 ## 3. 与既有声明的衔接
 
-- **T7 行翻转计划**：实现时 T7 失效条件第一条（"父上下文种下的种子对子 turn 结构性不可见"）改为"ancestor seed 扫描集已实现，变形/编码仍不检测"；`test_t7_delegation_boundaries.py::test_parent_turn_canary_does_not_match_child_turn_scan` 同步翻转为断言**新行为**（命中 + `ancestor_agent_id` 正确）——测试与威胁模型行一起翻转，绝不静默。
+- **T7 行翻转计划**（已执行，2026-09-06）：T7 失效条件第一条已改为"祖先 seed 扫描集已实现，变形/编码仍不检测"；`test_t7_delegation_boundaries.py` 的 `test_parent_turn_canary_does_not_match_child_turn_scan` 已翻转拆分为 `test_t7b_own_turn_scan_ignores_parent_seed`（own-turn 边界保持）+ `test_t7b_ancestor_seed_scan_hits_parent_canary`（新行为命中）——测试与威胁模型行同步翻转，未静默。
 - **RT/J 评测范围不变**：本设计是 runtime 传播语义，不把树级传播变成 RT/J 评测项（RT/J v1.2 已声明）。
 - **S4 的关系**：本设计的扫描集机制（可信内存持有模式、精确匹配、升级事件复用）与 S4 scoped taint 门同构——若两者都立项，建议共用"多模式扫描集"基础设施，避免两套扫描器。
 

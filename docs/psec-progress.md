@@ -21,7 +21,8 @@
 | # | 切片 | 阻塞 | 根因 | 处理 | 状态 |
 |---|---|---|---|---|---|
 | B-1 | S5 | ~~T7 增补提案待审批~~ **已解决（2026-09-06）**：维护者批准应用；RT/J v1.2 解除"不新增 T7"冻结；T7 三锚点应用（威胁模型 021fecb9→3d131d82）+ 边界钉定测试交付。遗留子项：J2 树级传播语义 C 仍待设计评审（非阻塞） | RT/J §1.3 冻结"不新增 T7" | 提案文件 t7-amendment-proposal.md（含 sha256/锚点/after 文本/diff allowlist 自检）+ rtj-progress §八 治理事件 | 🟩 已解决 |
-| B-2 | T7 应用回归 | D10 `test_invalid_tools_are_rejected` 两个 subTest 确定性失败（裸 string schema、`additionalProperties: True`——期望 `unsupported_mcp_schema` 未抛出） | 期望漂移 vs D25 schema 规范化（88350e8，2026-09-04）：①规范化引入保守默认边界使裸 string 合法（同 rtj 阻塞 #3 的边界迁移，T3 毒样当时已迁、D10 期望漏迁，测试停自 80a901b 08-21）；②`additionalProperties` 被无条件翻转为 False，**与规范化函数自身 docstring"仅 absent → False"矛盾** | **裁决材料齐备**：`b2-d10-normalization-ruling.md` ——D25 文档 :463 书面意图即"强制（只严不松）"，代码符合 D25 意图 → **建议方向 (b)**（修 docstring+测试期望+文档化翻转；方向 (a) 有重破官方绑定链路风险）。非 T7/PSEC 引入：src 自 88350e8 零改动、standalone 双解释器（3.13/3.14）复现 | 🟥 待 owner 签署（备忘录已给建议） |
+| B-2 | T7 应用回归 | ~~D10 两个 subTest 确定性失败~~ **已解决（2026-09-06，维护者"一次性实现"指令，方向 b 落地）**：docstring 改为如实描述无条件翻转（含显式 True）；裸 string 期望迁移为 `pattern` 形态（同 rtj 阻塞 #3 技术）；`additionalProperties: True` 改为翻转钉定测试 `test_additional_properties_true_is_coerced_not_honored`（绑定成功且永不生效）。原根因记录保留：D25 文档 :463"强制（只严不松）"与代码一致，失准的是 docstring 与 D10 旧期望 | 期望漂移 vs D25 schema 规范化（88350e8） | docs/psec/b2-d10-normalization-ruling.md + 代码/测试修复 | 🟩 已解决 |
+| B-3 | 语义 C 接线 | 委派图 → 子 loop 的 `ancestor_turn_ids` 传参未接（子 agent 工具执行路径未核实） | agents/ 不直接驱动 execution.loop；子 agent 工具执行的装配方式需要 D12+ 归属会话核实 | 机制/上下文字段/执行器扫描已全部就绪并测试（`AgentLoop(ancestor_turn_ids=...)` 一参数即接）；接线是纯调用方工作 | 🟨 待 D12+ 归属会话 |
 
 ## 三、全量回归归档（代码切片后追加）
 
@@ -29,6 +30,7 @@
 |---|---|---|---|---|
 | — | 2026-09-06 | 未触发：S0–S5 全部无代码变更（规划 §3.3 第 4 条仅约束代码切片） | — | 既有测试仅被引用未重跑（S2 诚实边界已声明） |
 | T7 应用 | 2026-09-06 | 1004 / 1002 / 2 failed / 0 errors / 32 skipped（818.5s，py -3.13） | `.dsh_tmp/psec-lanes/t7-application-2026-09-06.{json,txt}` | 2 失败均为既有 B-2（D10 期望漂移，非本轨引入）；新增 T7 边界测试 3/3 绿 |
+| 一次性实现 | 2026-09-06 | 1016 / 1016 / 0 failed / 0 errors / 32 skipped（1100.8s，py -3.13） | `.dsh_tmp/psec-lanes/semantics-c-one-shot-2026-09-06.{json,txt}` | **全绿**：B-2 修复后 D10 全过；语义 C + J2 激活零回归 |
 
 ## 四、后续增量（2026-09-06，维护者"可以"指令后）
 
@@ -37,8 +39,9 @@
 | RT/J v1.1 快照重建 | `docs/stability/rtj-plan-v1.1-snapshot.md` | 闭合审计盲点：v1.1 从未入库（v1.2 首次跟踪该文件），快照 = a9d8896 内容反向应用两处已知编辑，除头部三行与 §1.3 一行外与 v1.2 byte-identical |
 | B-2 裁决备忘录 | `docs/psec/b2-d10-normalization-ruling.md` | **新证据改变建议方向**：D25 文档 :463 书面意图即"强制 additionalProperties:false（只严不松）"——代码符合 D25 意图，失准的是函数 docstring 与 D10 旧期望；方向 (a)（改代码拒绝显式 True）有重破 88350e8 官方绑定链路风险 → **建议方向 (b)**（修 docstring+测试+文档化），待 owner 签署 |
 | 语义 C 设计评审稿 | `docs/psec/s5-semantics-c-design.md` | ①诚实缩小：单跳 spawn/send 已被父侧 J2 门覆盖，真实增量=多跳中继+非 action 通道；②自我纠正：纯 digest 扫描密码学上不可行 → 可信内存确定性导出扫描集（digest-only 契约保持）；③覆盖矩阵+四项实现前置 |
-| **生产激活发现** | （记入 rtj-progress §八） | 全 src 证实：`SecurityGate` 无生产构造点、`LedgerExecutor.security_gate` 无生产注入（默认 None）、config 无 key 字段——**J2 门当前仅测试/lane 激活**。非本轨缺陷；语义 C/J2 生产化的第一前置 = 激活路径确权，待维护者裁决 |
+| **生产激活发现** | （记入 rtj-progress §八） | 全 src 证实：`SecurityGate` 无生产构造点、`LedgerExecutor.security_gate` 无生产注入（默认 None）、config 无 key 字段——**J2 门当前仅测试/lane 激活**。非本轨缺陷；语义 C/J2 生产化的第一前置 = 激活路径确权，待维护者裁决 → **已于同日"一次性实现"闭合**：`canary_key_env` 配置（env 变量名，key 本体只在环境）+ `resolve_canary_key` fail-closed + `_bind_ledger_policy` 注入；默认配置 gate=None（行为不变），配置即激活 |
+| 一次性实现（2026-09-06，维护者 `/goal 一次性实现` 指令） | ①B-2 方向 (b) 落地：tool_binding docstring 如实化 + D10 裸 string 期望迁移为 `pattern` 形态 + `additionalProperties: True` 翻转钉定测试；②语义 C 全链：`SecurityGate.hit_multi` + `escalate(matched)`（own-turn 负载与 J2 原形 byte 一致）+ `ToolExecutionContext.ancestor_turn_ids` + `AgentLoop(ancestor_turn_ids=...)` + `_j2_check` 多模式扫描；③J2 生产激活：config/resolve/assembly 注入；④T7 威胁模型行/§3 图/测试按翻转计划同步（hash 3d131d82→见提交） | 新测试 `tests/test_j2_semantics_c.py`（10 用例：config fail-closed、hit_multi 优先级、执行器祖先升级含 payload 断言）+ `test_t7_delegation_boundaries.py` 翻转重写；受影响四套件 34/34 绿；**遗留**：B-3（agents 侧 `ancestor_turn_ids` 传参接线——机制就绪，唯此一点）；takeover×sticky 仍未审计 |
 
 ## 五、诚实边界（不得越线声称）
 
-以规划书 §6 为准：不声称实现 MCP OAuth、策略引擎、通用 taint 框架、子 Agent 信号传播；S0 映射≠认证；结论绑定基线与材料版本。
+以规划书 §6 为准：不声称实现 MCP OAuth、策略引擎、通用 taint 框架；S0 映射≠认证；结论绑定基线与材料版本。2026-09-06 一次性实现后更新：子 Agent 祖先种子扫描已实现（gate/executor/loop 层），**但 agents 侧委派图接线未接（B-3）**——不得声称端到端多 Agent 传播已在真实子 agent 运行中生效；takeover×sticky 交集仍未审计；变形/编码种子仍不检测（declared）。

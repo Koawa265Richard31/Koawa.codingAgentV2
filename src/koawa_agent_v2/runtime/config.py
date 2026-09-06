@@ -730,6 +730,12 @@ class RuntimeConfig:
     # pairs; the interactive default is tight so small models cannot burn the
     # whole turn on repeated failed attempts.
     budget_action_limits: tuple[tuple[str, int], ...] = (("root", 20),)
+    # RT/J J2 / PSEC semantics-C: optional canary gate activation.  The value
+    # is the NAME of an environment variable holding the HMAC canary key —
+    # never the key itself.  None (default) = gate inactive (executor skips
+    # J2 checks).  A configured-but-missing variable is a hard error at
+    # resolve time (fail closed): a typo must not silently disable security.
+    canary_key_env: str | None = None
     # I4 exact-key runtime ingress policy; None = section 6.2 defaults.  When
     # an object is supplied it must contain all eleven documented keys — no
     # partial implicit merging of policies.
@@ -748,6 +754,11 @@ class RuntimeConfig:
         # dirty path and the D5 finalization gate would reject every run.
         if self.db.is_relative_to(self.repo):
             raise RuntimeConfigError("db_inside_repo")
+        if self.canary_key_env is not None:
+            if not isinstance(self.canary_key_env, str) or not _ENV_NAME.fullmatch(
+                self.canary_key_env
+            ):
+                raise RuntimeConfigError("invalid_canary_key_env")
         for value in (self.provider, self.sandbox, self.policy):
             expected = (
                 ProviderConfig
@@ -1018,6 +1029,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     history_max_chars = document.get("history_max_chars", 32_000)
     compact_min_turns = document.get("compact_min_turns", 4)
     fallback_summary_model = document.get("fallback_summary_model")
+    canary_key_env = document.get("canary_key_env")
     raw_budget = document.get("budget_action_limits", {"root": 20})
     if not isinstance(raw_budget, dict):
         raise RuntimeConfigError("invalid_budget_action_limits")
@@ -1048,6 +1060,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         memory=memory,
         budget_action_limits=budget_action_limits,
         fallback_summary_model=fallback_summary_model,
+        canary_key_env=canary_key_env,
         durable_limits=durable_limits,
         config_schema_version=schema_version,
     )
@@ -1181,6 +1194,26 @@ def _validate_provider_options(
                 or value.get("type") not in ("text", "json_object")
             ):
                 raise RuntimeConfigError("invalid_provider_options")
+
+
+def resolve_canary_key(config: "RuntimeConfig") -> bytes | None:
+    """RT/J J2 / PSEC semantics-C: HMAC canary key from the configured env var.
+
+    ``canary_key_env=None`` (default) means the gate is inactive and None is
+    returned.  A configured env var that is missing or trivially short is a
+    hard error (fail closed): a typo must not silently disable security.  The
+    key value is read from the environment only and never persisted — config
+    stores the variable name, mirroring ``api_key_env``.
+    """
+    env_name = config.canary_key_env
+    if env_name is None:
+        return None
+    value = os.environ.get(env_name)
+    if value is None:
+        raise RuntimeConfigError("canary_key_missing")
+    if len(value.encode("utf-8", "strict")) < 16:
+        raise RuntimeConfigError("canary_key_invalid")
+    return value.encode("utf-8", "strict")
 
 
 def resolve_api_key(provider: ProviderConfig) -> str:

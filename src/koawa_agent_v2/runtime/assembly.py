@@ -54,6 +54,8 @@ from ..mcp.launcher import (
 from ..mcp.tool_binding import McpBinding, McpCatalog, build_mcp_registry
 from ..mcp.transport import TransportError
 from ..model.openai_client import OpenAICompatibleChatClient
+from ..security import SecurityGate
+from .config import resolve_canary_key
 from ..model.protocol import InstructionMessage, InstructionRole, ModelContextItem
 from ..model.stream import StreamLimits
 from ..policy import (
@@ -1125,6 +1127,16 @@ def _bind_ledger_policy(
             profiles[name] = _mcp_recovery_profile(mcp_by_tool[name][0])
         else:
             profiles[name] = READ_ONLY_PROFILE
+    # RT/J J2 / PSEC semantics-C: activate the canary gate only when the
+    # config declares a canary key env var (resolve fails closed on a
+    # configured-but-missing variable).  None keeps the executor's J2 checks
+    # skipped — the pre-activation behavior, unchanged for existing configs.
+    canary_key = resolve_canary_key(config)
+    security_gate = (
+        SecurityGate(ledger.event_store, canary_key)
+        if canary_key is not None
+        else None
+    )
     return LedgerExecutor(
         registry,
         ledger,
@@ -1134,6 +1146,7 @@ def _bind_ledger_policy(
         action_resolvers={name: resolve_tool for name in names},
         trace_sink=trace_sink,
         correlation_id=correlation_id,
+        security_gate=security_gate,
     )
 
 

@@ -109,9 +109,9 @@
 | attacker_control | 父上下文中的不可信内容（同 T1/T2/T3 入口）；mailbox 消息体内容（父侧写） |
 | OWASP | ASI07（Insecure Inter-Agent Communication）/ ASI03（Identity & Privilege Abuse）——Agentic 条目，无单一 LLM Top-10 对应 |
 | 项目对策 | ① 子动作经同一共享 executor：policy → 审批五事件原子批 → J2 canary 门（security_escalation_pending）→ budget → Turn fence（LedgerExecutor 注入 security_gate）；② 子 scopes 只收窄：spawn 事件契约字段，运行期只减不增；③ mailbox 幂等键 + run fence：旧 run 提交以 stale_agent_run_fenced 拒绝，orphan takeover 原子换 run |
-| 失效条件 | canary 令牌绑定单 turn（derive_canary_token(key, turn_id)），父上下文种下的种子对子 turn 结构性不可见；mailbox 消息体无信任等级字段，子可能把含不可信内容的父消息当可信指令；orphan takeover 新 attempt 与 execution-scoped sticky escalation 的交集未定义；scopes 收窄正确性依赖装配层契约，运行时无独立自证。本条目不引入任何新 detector，升级语义以 J2 既有纪律为准（信号与 policy effect 分离、精确命中才升级、digest-only） |
-| 复现要点 | 父 turn canary 种子出现在子动作参数中时，gate.hit 以子 turn 判定不命中；mailbox MessageRecord.to_document() schema 不含任何信任字段 |
-| 测试锚点 | test_t7b_parent_canary_does_not_propagate / test_t7c_mailbox_schema_has_no_trust_marking（tests/test_t7_delegation_boundaries.py） |
+| 失效条件 | ~~canary 令牌绑定单 turn（derive_canary_token(key, turn_id)），父上下文种下的种子对子 turn 结构性不可见~~——2026-09-06 语义 C 实现：子动作的 J2 门按委派链确定性导出祖先 token 一并精确扫描（hit_multi），多跳中继与非 action 通道的种子命中会升级 ASK（signal_kind=ancestor_seed_exact）；变形/编码仍不检测；mailbox 消息体无信任等级字段，子可能把含不可信内容的父消息当可信指令；orphan takeover 新 attempt 与 execution-scoped sticky escalation 的交集未定义；scopes 收窄正确性依赖装配层契约，运行时无独立自证。本条目不引入任何新 detector 类型，升级语义以 J2 既有纪律为准（信号与 policy effect 分离、精确命中才升级、digest-only） |
+| 复现要点 | 父 turn canary 种子出现在子动作参数中时，gate.hit（仅自身 turn）不命中而 hit_multi（含祖先种子）命中并升级 ASK；mailbox MessageRecord.to_document() schema 不含任何信任字段 |
+| 测试锚点 | test_t7b_own_turn_scan_ignores_parent_seed、test_t7b_ancestor_seed_scan_hits_parent_canary、test_t7c_mailbox_schema_has_no_trust_marking（tests/test_t7_delegation_boundaries.py）；执行器/配置接线见 tests/test_j2_semantics_c.py |
 
 ## 3. 拦截点一览（面试讲述用）
 
@@ -125,7 +125,7 @@
    ├─ D9 预算闸门（claim 时）  → resource_budget_exceeded（任务 fail-closed）
    ├─ D7 ledger 审计           → tool.execution-prepared/claimed/failed.v1（可重放、可讲述）
    ├─ D11 子委派边界（T7）     → 子 scopes 只收窄、子动作走同一策略/审批/canary/预算全链；
-   │                              canary 种子不跨 turn 传播（declared，T7 失效条件）
+   │                              祖先种子随委派链扫描（语义 C 已实现）；变形/编码仍不检测
    └─ 持久化脱敏              → 凭据形态落库前 redact_text / redact_json_value
 ```
 
