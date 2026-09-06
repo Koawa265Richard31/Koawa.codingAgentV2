@@ -1,0 +1,30 @@
+{
+ "schema_version": 1,
+ "slice": "J2",
+ "generated_at": "2026-09-06T02:52:45.633322+00:00",
+ "reproduction": "clean-room by independent agent per docs/rtj-runbook.md (non-author); findings recorded in rtj-progress.md section 6A",
+ "key_id": "rtj-j2-calibration-key (synthetic; production keys are per-session)",
+ "injected_canary_set": {
+  "n": 500,
+  "correct": 500,
+  "rate": 1.0,
+  "wilson_95": [
+   0.9924,
+   1.0
+  ]
+ },
+ "benign_set": {
+  "n": 500,
+  "correct": 500,
+  "rate": 1.0,
+  "wilson_95": [
+   0.9924,
+   1.0
+  ]
+ },
+ "gate": {
+  "injected": "500/500 required",
+  "benign": "0/500 false escalations required"
+ },
+ "passed": true
+}

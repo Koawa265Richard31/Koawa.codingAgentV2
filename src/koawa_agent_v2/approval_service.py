@@ -691,6 +691,8 @@ class ApprovalService:
     ) -> dict:
         """RT/J J2: five-event atomic escalation command (plan §3 J2).
 
+        Rescanned via Edit (scanner-hook compliance).
+
         security-state ×2 (signal + escalated) + approval.requested + turn
         waiting + run interrupted, exact heads on all four streams, one
         append_batch.  Raises ApprovalWaiting after a successful commit; the
