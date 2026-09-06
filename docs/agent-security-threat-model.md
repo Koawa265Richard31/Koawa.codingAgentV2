@@ -9,6 +9,8 @@
 
 - **OWASP Top 10 for LLM Applications 2025**：LLM01 提示注入 / LLM02 敏感信息泄露 / LLM03 供应链 /
   LLM04 数据与模型投毒 / LLM05 不当输出处理 / LLM06 过度自主行为 / LLM10 无限消耗。
+- **OWASP Top 10 for Agentic Applications（ASI，2025-12）**：ASI07 跨 Agent 通信不安全 / ASI03 身份与权限
+  滥用（T7 的框架依据；全部 Agentic 条目与 Koawa 控制的对照见 docs/psec/s0-framework-mapping.md）。
 - **AgentDojo（ETH SPYLab）**：动态攻防环境的"注入→后果可测"思路；本项目改为确定性断言矩阵（离线可复现）。
 - **Agent Security Bench（ASB）**：攻击者目标（attacker goal）+ 攻击者控制（attacker control）+ 评分；
   本表每行沿用这个二维标注。
@@ -98,6 +100,19 @@
 | 复现要点 | 合法形状的 write 工具目录能装配但默认被拒；非法声明装配即失败 |
 | 测试锚点 | test_t6_supply_chain_config_fail_closed_and_default_deny |
 
+### T7 多 Agent 委派链（confused deputy / 信号盲区 / mailbox 注入）
+
+| 维 | 内容 |
+| --- | --- |
+| 攻击原型 | 父 agent 将不可信内容（T1 仓库文本、T2 工具结果、T3 MCP 声明）转述进子 agent 的任务文本或 durable mailbox 消息，安全信号不随委派传播 |
+| attacker_goal | 让注入内容经父转述驱动子 agent 动作，且绕过为父上下文布置的 canary 信号 |
+| attacker_control | 父上下文中的不可信内容（同 T1/T2/T3 入口）；mailbox 消息体内容（父侧写） |
+| OWASP | ASI07（Insecure Inter-Agent Communication）/ ASI03（Identity & Privilege Abuse）——Agentic 条目，无单一 LLM Top-10 对应 |
+| 项目对策 | ① 子动作经同一共享 executor：policy → 审批五事件原子批 → J2 canary 门（security_escalation_pending）→ budget → Turn fence（LedgerExecutor 注入 security_gate）；② 子 scopes 只收窄：spawn 事件契约字段，运行期只减不增；③ mailbox 幂等键 + run fence：旧 run 提交以 stale_agent_run_fenced 拒绝，orphan takeover 原子换 run |
+| 失效条件 | canary 令牌绑定单 turn（derive_canary_token(key, turn_id)），父上下文种下的种子对子 turn 结构性不可见；mailbox 消息体无信任等级字段，子可能把含不可信内容的父消息当可信指令；orphan takeover 新 attempt 与 execution-scoped sticky escalation 的交集未定义；scopes 收窄正确性依赖装配层契约，运行时无独立自证。本条目不引入任何新 detector，升级语义以 J2 既有纪律为准（信号与 policy effect 分离、精确命中才升级、digest-only） |
+| 复现要点 | 父 turn canary 种子出现在子动作参数中时，gate.hit 以子 turn 判定不命中；mailbox MessageRecord.to_document() schema 不含任何信任字段 |
+| 测试锚点 | test_t7b_parent_canary_does_not_propagate / test_t7c_mailbox_schema_has_no_trust_marking（tests/test_t7_delegation_boundaries.py） |
+
 ## 3. 拦截点一览（面试讲述用）
 
 ```
@@ -109,6 +124,8 @@
    │                              denied_by_default / rule_denied；被拒动作：不占预算、不触 handler
    ├─ D9 预算闸门（claim 时）  → resource_budget_exceeded（任务 fail-closed）
    ├─ D7 ledger 审计           → tool.execution-prepared/claimed/failed.v1（可重放、可讲述）
+   ├─ D11 子委派边界（T7）     → 子 scopes 只收窄、子动作走同一策略/审批/canary/预算全链；
+   │                              canary 种子不跨 turn 传播（declared，T7 失效条件）
    └─ 持久化脱敏              → 凭据形态落库前 redact_text / redact_json_value
 ```
 

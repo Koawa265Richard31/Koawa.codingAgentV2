@@ -1,7 +1,7 @@
 # KoawaAgent V2 平台安全工程轨道规划书（PSEC 轨道）
 
-版本：v1.0（评审定稿）。日期：2026-09-06。
-状态：维护者指令（2026-09-06 会话）：规划先行，实现由多个 Agent 接管推进；维护者只读规划与各切片策略文档，待实现完成后按切片阅读。v0.1 已经外部评审 Agent 审查（判定 APPROVE-WITH-FIXES，7 条修订全部采纳），按 §3.0 升版 v1.0 生效。
+版本：v1.1（T7 应用修订）。日期：2026-09-06。
+状态：维护者指令（2026-09-06 会话）：规划先行，实现由多个 Agent 接管推进；维护者只读规划与各切片策略文档，待实现完成后按切片阅读。v0.1 已经外部评审 Agent 审查（判定 APPROVE-WITH-FIXES，7 条修订全部采纳），按 §3.0 升版 v1.0 生效；v1.1：维护者批准 T7 应用，§3.2 冻结面相应修订。
 基线：`PSEC_BASE_COMMIT = e213580`（与 origin/main 同步，2026-09-06 核对；接管会话开工时必须 `git log -1` 复核基线未被移动）。
 进度账本：`docs/psec-progress.md`（**唯一状态事实源**，本规划书不含进度）。
 
@@ -66,7 +66,7 @@ v0.1 → v1.0 必须经外部评审 Agent 审查（复用 RT/J 的评审流程�
 
 ### 3.2 冻结面（零改动，验收时 `git diff` 必须为空）
 
-- `docs/agent-security-threat-model.md` **全文件**（T2/T4 曾按精确行级增补协议修改；本轨道修改它只能走 S5 的提案文件路径）；
+- `docs/agent-security-threat-model.md` **全文件**（T2/T4 曾按精确行级增补协议修改；本轨道修改它只能走 S5 的提案文件路径。**v1.1 例外**：维护者 2026-09-06 批准 T7 应用——三锚点：§1 框架依据补 ASI 行、§2 纯插入 T7 节、§3 拦截点图加行，其余 byte-identical（before `021fecb9…` / after `3d131d82…`）；除此之外仍为冻结面）；
 - J1/J2/RT-1 行为面：`security/gate.py` 的 canary→ASK 升级语义、ApprovalService 五事件原子批、security-state 事件 schema、J1 冻结用例；
 - `docs/agent-redteam-jailbreak-plan.md`、`docs/rtj-*`、已归档证据目录；
 - 未跟踪的 `scratch_*.txt` / `app_part*.txt` / `.dsh_tmp` 既有内容（并行会话产物，归属纪律不变：不动、不提交、不清理）。
@@ -199,3 +199,4 @@ v1.0 定稿
 |---|---|---|
 | v0.1 | 2026-09-06 | 初稿：四真空区 → S0–S5 + backlog；治理协议复用 RT/J 机制（基线冻结、开工门、认领、诚实边界）；待外部评审 |
 | v1.0 | 2026-09-06 | 外部评审 APPROVE-WITH-FIXES，7 条修订全部采纳：S2 测试先行改 expectedFailure 缺陷固化（P0）；S1 裁决表引用改 §9、条件代码限新模块、host_trusted 语义修复只产提案；S5 提案文件格式（sha256/锚点/after 文本/diff allowlist 自检）+ 双提案登记 blocker 走版本化审批；认领 commit 协议（`PSEC/CLAIM:S<n>:`）+ 5 天 stale 接管；完成门加独立复核；S0/S3/S4 补精确入口；版本门生效方式明确。评审 Agent 直接修订升版，维护者知情生效 |
+| v1.1 | 2026-09-06 | 维护者批准 T7 应用并要求旧文档/旧测试/旧治理同步：威胁模型三锚点应用（§1 框架 ASI 行——超出原提案单锚点，理由：T7 的 OWASP 行引用 ASI 需 §1 依据；§2 T7 节按 T1–T6 表格模板重排——原提案段落体与模板矛盾，已修正；§3 拦截点图加行）；RT/J 规划升 v1.2 解除"不新增 T7"；新增边界钉定测试 tests/test_t7_delegation_boundaries.py（3 用例，钉 declared 失效条件而非新对策）；S0/S5/提案/账本同步 |

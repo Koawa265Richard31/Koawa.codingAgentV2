@@ -47,7 +47,7 @@ Koawa 在 OWASP Agentic Security Initiative 的十条里，**ASI02/05/08/10 已�
 | ASI04 Agentic Supply Chain | 同 LLM03（MCP server 钉定是本条核心控制） | D25 §1.3 | covered（工程级） |
 | ASI05 Unexpected Code Execution | 第三方 stdio server 容器执行（无网/只读挂载/资源限制/非 root）；workspace patch 走策略+apply_patch 协议 | D25 v1.3；D4 | covered（动作层） |
 | ASI06 Memory & Context Poisoning | 会话记忆层已有（D23）但无投毒防御 | D23 文档 | gap(已声明)——**backlog B4** |
-| ASI07 Insecure Inter-Agent Communication | D11 mailbox：message_id/幂等键/fence（可靠性层 covered）；安全语义（信任等级/信号传播）无 | D11 §1-§3 | gap(已声明)——**S5** |
+| ASI07 Insecure Inter-Agent Communication | D11 mailbox：message_id/幂等键/fence（可靠性层 covered）；安全语义（信任等级/信号传播）无 | D11 §1-§3；**威胁模型 T7 条目已登记（2026-09-06）** | gap(已声明)——T7 已入威胁模型，语义 C 设计待评审 |
 | ASI08 Cascading Failures | 失败隔离（单 worker 失败不阻塞兄弟）；崩溃窗口/响应丢失幂等/重启粘性故障注入；outcome_unknown 语义 | D11 §1；D7；e213580 | covered（可靠性+安全面） |
 | ASI09 Human-Agent Trust Exploitation | 审批流语义（sticky 联合所有权、DENY 拒绝、PENDING 重挂起）；审批 UI 展示 declared 排除 | e213580；审计 §2 | partial——语义层 covered，展示层 N-A(声明) |
 | ASI10 Rogue Agents | run fence 拒绝陈旧提交；orphan 发现与接管；旧 run 终态提交被拒 | D11 §1-§3（stale_agent_run_fenced） | covered（动作层） |
@@ -78,7 +78,7 @@ Koawa 在 OWASP Agentic Security Initiative 的十条里，**ASI02/05/08/10 已�
 | 工具面重连/恢复重验未系统验证 | ASI02、ASI04 | S2 |
 | 决策在进程内（架构演进题） | —（非框架条目） | S3 |
 | 不可信标记无执行点消费者 | LLM05、ASI01/02 | S4 |
-| 委派链/跨 Agent 安全语义空白 | ASI03/07/10 交叉 | S5 |
+| 委派链/跨 Agent 安全语义空白 | ASI03/07/10 交叉 | S5；T7 条目已登记（RT/J v1.2），语义 C 待设计评审 |
 | 长期 memory 投毒 | LLM04、ASI06 | B4 |
 | 生产级 egress/DLP | LLM02 | B2 |
 | 检测工程（事件流上的检测规则） | —（超出 Top 10，属运营面） | B3 |

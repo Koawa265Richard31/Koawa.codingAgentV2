@@ -2,6 +2,8 @@
 
 PSEC 轨道。规划：`docs/agent-security-platform-track-plan.md` v1.0。日期：2026-09-06。基线：`PSEC_BASE_COMMIT = e213580`。**纯设计与提案，无代码变更**；T7 增补为独立提案文件（`t7-amendment-proposal.md`），威胁模型原文件零改动。
 
+> **应用更新（2026-09-06，维护者批准）**：T7 已按提案应用（三锚点，格式按 T1–T6 表格模板重排；before `021fecb9…` / after `3d131d82…`），RT/J 规划 v1.2 解除"不新增 T7"冻结，边界钉定测试 `tests/test_t7_delegation_boundaries.py` 已交付。本文正文保留为设计依据；§4 触发条件 1 部分成立（T7 落档），语义 C 仍待设计评审后方可实现。
+
 ## 0. 结论
 
 D11 控制面已给子 agent 提供动作级安全基座：子动作经**同一个共享 executor**（policy → 审批 → J2 门 → budget → fence），scopes 在事件契约里收窄。真正的空白有四个，全部已定位到机制级：

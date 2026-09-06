@@ -90,3 +90,18 @@
 - 全部结论为动作层后果遏制与检测；无模型层声称；
 - 数字绑定模型/配置/日期（Qwen3-30B-Instruct，2026-09-05）；
 - adaptive campaigns 待 scorer 校准门；RT-2 runbook 已交付（`docs/rtj-runbook.md`）。
+
+## 八、T7 条目治理事件（2026-09-06，PSEC 轨道）
+
+- **维护者批准** PSEC/S5 的 T7 增补提案并要求旧文档/旧测试/旧治理同步：threat model
+  三锚点应用（§1 框架依据补 OWASP ASI 来源行、§2 纯插入 T7 多 Agent 委派链节、
+  §3 拦截点图加 D11 子委派边界行），其余 byte-identical；
+  before `021fecb9…` / after `3d131d82…`（全 hash 见提交信息）。
+- **RT/J 规划升版 v1.2**：解除 §1.3"不新增 T7"冻结（原文以删除线保留）。评测范围
+  §1.2 不变——树级传播仍非 RT/J 评测项，T7 是威胁建模条目而非评测项；T2 失效条件行
+  原有"不向子 Agent 传播"声明与 T7 失效条件一致，无冲突。
+- **新增边界钉定测试** `tests/test_t7_delegation_boundaries.py`（3 用例，2026-09-06 绿）：
+  钉定的是 T7 的 declared 失效条件（父 turn canary 对子 turn 扫描不命中、mailbox
+  schema 无信任字段），不是新对策；若将来 PSEC 语义 C 落地，须与 T7 行一起翻转。
+- T7 节内 J2 对策引用（security_escalation_pending / stale_agent_run_fenced）均为
+  本轨道已落地语义（8df05a1），无新行为声称。
