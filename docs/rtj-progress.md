@@ -105,3 +105,8 @@
   schema 无信任字段），不是新对策；若将来 PSEC 语义 C 落地，须与 T7 行一起翻转。
 - T7 节内 J2 对策引用（security_escalation_pending / stale_agent_run_fenced）均为
   本轨道已落地语义（8df05a1），无新行为声称。
+- **J2 生产激活状态发现（2026-09-06，PSEC 语义 C 设计评审中核实）**：全 src 证实
+  `SecurityGate` 无生产构造点、`LedgerExecutor.security_gate` 无生产注入（默认 None）、
+  config 无 key 字段——J2 门当前为**测试/lane 激活**（本轨道的"接入 authorize"指执行器
+  咨询逻辑与参数通道，非生产装配注入）。J2 生产化需先确权 key 来源与注入点；
+  结论待维护者裁决后回填本账本。
