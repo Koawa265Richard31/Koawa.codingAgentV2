@@ -41,6 +41,7 @@
 | 语义 C 设计评审稿 | `docs/psec/s5-semantics-c-design.md` | ①诚实缩小：单跳 spawn/send 已被父侧 J2 门覆盖，真实增量=多跳中继+非 action 通道；②自我纠正：纯 digest 扫描密码学上不可行 → 可信内存确定性导出扫描集（digest-only 契约保持）；③覆盖矩阵+四项实现前置 |
 | **生产激活发现** | （记入 rtj-progress §八） | 全 src 证实：`SecurityGate` 无生产构造点、`LedgerExecutor.security_gate` 无生产注入（默认 None）、config 无 key 字段——**J2 门当前仅测试/lane 激活**。非本轨缺陷；语义 C/J2 生产化的第一前置 = 激活路径确权，待维护者裁决 → **已于同日"一次性实现"闭合**：`canary_key_env` 配置（env 变量名，key 本体只在环境）+ `resolve_canary_key` fail-closed + `_bind_ledger_policy` 注入；默认配置 gate=None（行为不变），配置即激活 |
 | 一次性实现（2026-09-06，维护者 `/goal 一次性实现` 指令） | ①B-2 方向 (b) 落地：tool_binding docstring 如实化 + D10 裸 string 期望迁移为 `pattern` 形态 + `additionalProperties: True` 翻转钉定测试；②语义 C 全链：`SecurityGate.hit_multi` + `escalate(matched)`（own-turn 负载与 J2 原形 byte 一致）+ `ToolExecutionContext.ancestor_turn_ids` + `AgentLoop(ancestor_turn_ids=...)` + `_j2_check` 多模式扫描；③J2 生产激活：config/resolve/assembly 注入；④T7 威胁模型行/§3 图/测试按翻转计划同步（hash 3d131d82→见提交） | 新测试 `tests/test_j2_semantics_c.py`（10 用例：config fail-closed、hit_multi 优先级、执行器祖先升级含 payload 断言）+ `test_t7_delegation_boundaries.py` 翻转重写；受影响四套件 34/34 绿；**遗留**：B-3（agents 侧 `ancestor_turn_ids` 传参接线——机制就绪，唯此一点）；takeover×sticky 仍未审计 |
+| Mimosa 深扫（钩子三次要求后启动） | 已封印：scan-2026-09-06T13-14-40.476Z-67f26f22b859，seal sha256:68779f40…；13 findings（10 high / 1 low 等：SQL 注入×9、代码注入、path-traversal、SSRF、命令注入 low） | **coverage=partial、runStatus=inconclusive**（30 秒静态快扫，未跑完覆盖）；扫描树=one-shot 提交（6367a16）之前。SQL×9 高概率为事件存储参数化查询的静态误报，但需逐条 file:line 分诊后才能定性——登记为后续分诊工作项，不在本轮自称"已审安全" |
 
 ## 五、诚实边界（不得越线声称）
 
