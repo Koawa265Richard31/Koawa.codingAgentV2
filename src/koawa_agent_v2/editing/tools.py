@@ -42,8 +42,9 @@ def apply_patch_tool_spec(limits: PatchLimits | None = None) -> ToolSpec[ApplyPa
     return ToolSpec(
         "apply_patch",
         (
-            "Atomically add, update, or delete UTF-8 workspace files using a "
-            "schema_version=1 structured patch JSON document."
+            "Atomically add, update, or delete UTF-8 workspace files with one "
+            "transactional patch document (format on the patch_json parameter; "
+            "failures return an error code plus a detail hint)."
         ),
         ApplyPatchArguments,
         {
@@ -52,8 +53,23 @@ def apply_patch_tool_spec(limits: PatchLimits | None = None) -> ToolSpec[ApplyPa
                 "patch_json": {
                     "type": "string",
                     "description": (
-                        "Strict JSON object with schema_version and changes. UPDATE/DELETE "
-                        "must use the SHA-256 returned by read_file."
+                        'Strict JSON: {"schema_version": 1, "changes": [change]}. '
+                        "Each change is exactly one of:\n"
+                        'ADD, all 5 fields: {"operation": "add", "path": '
+                        '"dir/file.py", "content": "line1\\nline2\\n", '
+                        '"newline": "lf", "utf8_bom": false} (content uses \\n; '
+                        'a trailing \\n means final newline).\n'
+                        'UPDATE, all 4 fields: {"operation": "update", "path": '
+                        '"dir/file.py", "base_sha256": "<64-hex sha256 returned '
+                        'by read_file>", "hunks": [{"old_start": 3, "old_lines": '
+                        '["exact existing line"], "new_lines": ["replacement '
+                        'line"]}]} - old_lines must repeat the file\'s existing '
+                        "lines character-for-character starting at 1-based line "
+                        "old_start; never include \\n inside the strings.\n"
+                        'DELETE, all 3 fields: {"operation": "delete", "path": '
+                        '"dir/file.py", "base_sha256": "<64-hex from '
+                        'read_file>"}.\n'
+                        'No extra fields. "newline" is "lf" or "crlf".'
                     ),
                     "minLength": 1,
                     "maxLength": limits.max_patch_json_chars,

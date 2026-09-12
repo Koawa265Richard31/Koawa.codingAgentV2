@@ -515,16 +515,22 @@ class AtomicPatchWorkspace:
     def _discard_uncommitted(staged: list[_Staged]) -> bool:
         ok = True
         for item in staged:
-            for candidate in (item.temporary, item.backup):
-                if candidate is None:
-                    continue
+            if item.temporary is not None:
                 try:
-                    candidate.unlink(missing_ok=True)
+                    item.temporary.unlink(missing_ok=True)
                 except OSError:
                     ok = False
-            item.temporary = None
-            if not item.original_moved:
+                item.temporary = None
+            if item.backup is not None and not item.original_moved:
+                # 原件从未移入或已成功还原：backup 只是陈旧残留。
+                try:
+                    item.backup.unlink(missing_ok=True)
+                except OSError:
+                    ok = False
                 item.backup = None
+            # original_moved=True（还原失败的已提交项）时，backup 是原始内容
+            # 唯一幸存副本，必须留在盘上供手工恢复；outcome 已是 unknown，
+            # 静默删除会把"未知"变成不可逆的数据销毁（审计 F6）。
         return ok
 
 

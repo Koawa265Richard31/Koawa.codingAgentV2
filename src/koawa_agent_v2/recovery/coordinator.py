@@ -234,6 +234,12 @@ class RecoveryCoordinator:
             "turn.recovery-lease-heartbeated.v1",
         ):
             return False
+        # Token-less heads are the D1 worker's own run lease (durable starts
+        # establish one per run); they are not a recovery overlay and must
+        # never fence a stale takeover.  This mirrors the runtime-side
+        # _live_recovery_claim, which also ignores token-less heads.
+        if head.payload.get("claim_token") is None:
+            return False
         expiry = head.payload.get("lease_expires_at")
         if not isinstance(expiry, str):
             return False

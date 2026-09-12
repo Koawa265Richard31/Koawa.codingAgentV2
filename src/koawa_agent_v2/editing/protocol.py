@@ -343,49 +343,58 @@ def encode_add(change: AddFileChange, limits: PatchLimits) -> bytes:
     return data
 
 
+def _field_set_error(raw: dict, expected: set[str], code: str) -> PatchError:
+    """字段集不匹配的机器可读 detail；调用方（含模型）靠它自学文档形状。"""
+    missing = sorted(expected - set(raw))
+    if missing:
+        return PatchError(code, detail="missing_field:" + missing[0])
+    extra = sorted(set(raw) - expected)
+    return PatchError(code, detail="unexpected_field:" + extra[0])
+
+
 def _parse_change(raw: Any, limits: PatchLimits) -> FileChange:
     if not isinstance(raw, dict) or not isinstance(raw.get("operation"), str):
-        raise PatchError("invalid_patch_change")
+        raise PatchError(
+            "invalid_patch_change", detail="change_must_be_object_with_operation"
+        )
     try:
         operation = PatchOperation(raw["operation"])
     except ValueError:
         raise PatchError("invalid_patch_operation") from None
     path = raw.get("path")
     if not isinstance(path, str) or not path or len(path) > limits.max_path_chars:
-        raise PatchError("invalid_patch_change")
+        raise PatchError("invalid_patch_change", detail="invalid_or_missing_path")
     _utf8(path, "invalid_patch_change")
 
     if operation is PatchOperation.ADD:
         expected_fields = {"operation", "path", "content", "newline", "utf8_bom"}
-        actual_fields = set(raw)
-        if actual_fields != expected_fields:
-            missing = sorted(expected_fields - actual_fields)
-            extra = sorted(actual_fields - expected_fields)
-            detail = None
-            if missing:
-                detail = "missing_field:" + missing[0]
-            elif extra:
-                detail = "unexpected_field:" + extra[0]
-            raise PatchError("invalid_patch_change", detail=detail)
+        if set(raw) != expected_fields:
+            raise _field_set_error(raw, expected_fields, "invalid_patch_change")
         content = raw["content"]
         if not isinstance(content, str) or "\x00" in content:
-            raise PatchError("invalid_patch_change")
+            raise PatchError("invalid_patch_change", detail="invalid_content")
         _utf8(content, "invalid_patch_change")
         try:
             newline = NewlineStyle(raw["newline"])
         except (TypeError, ValueError):
             raise PatchError("invalid_patch_newline") from None
         if not isinstance(raw["utf8_bom"], bool):
-            raise PatchError("invalid_patch_change")
+            raise PatchError("invalid_patch_change", detail="invalid_utf8_bom")
         return AddFileChange(operation, path, content, newline, raw["utf8_bom"])
 
     if operation is PatchOperation.DELETE:
         if set(raw) != {"operation", "path", "base_sha256"}:
-            raise PatchError("invalid_patch_change")
+            raise _field_set_error(
+                raw, {"operation", "path", "base_sha256"}, "invalid_patch_change"
+            )
         return DeleteFileChange(operation, path, _sha(raw["base_sha256"]))
 
     if set(raw) != {"operation", "path", "base_sha256", "hunks"}:
-        raise PatchError("invalid_patch_change")
+        raise _field_set_error(
+            raw,
+            {"operation", "path", "base_sha256", "hunks"},
+            "invalid_patch_change",
+        )
     hunks = raw["hunks"]
     if (
         not isinstance(hunks, list)
@@ -402,15 +411,21 @@ def _parse_change(raw: Any, limits: PatchLimits) -> FileChange:
 
 
 def _parse_hunk(raw: Any, limits: PatchLimits) -> PatchHunk:
-    if not isinstance(raw, dict) or set(raw) != {"old_start", "old_lines", "new_lines"}:
-        raise PatchError("invalid_patch_hunk")
+    if not isinstance(raw, dict):
+        raise PatchError("invalid_patch_hunk", detail="hunk_must_be_object")
+    if set(raw) != {"old_start", "old_lines", "new_lines"}:
+        raise _field_set_error(
+            raw, {"old_start", "old_lines", "new_lines"}, "invalid_patch_hunk"
+        )
     start = raw["old_start"]
     if not isinstance(start, int) or isinstance(start, bool) or start < 1:
-        raise PatchError("invalid_patch_hunk")
+        raise PatchError(
+            "invalid_patch_hunk", detail="old_start_must_be_positive_int"
+        )
     old_lines = _lines(raw["old_lines"], limits)
     new_lines = _lines(raw["new_lines"], limits)
     if not old_lines and not new_lines:
-        raise PatchError("invalid_patch_hunk")
+        raise PatchError("invalid_patch_hunk", detail="hunk_must_change_lines")
     return PatchHunk(start, old_lines, new_lines)
 
 
@@ -426,7 +441,9 @@ def _lines(raw: Any, limits: PatchLimits) -> tuple[str, ...]:
             or "\r" in line
             or "\x00" in line
         ):
-            raise PatchError("invalid_patch_hunk")
+            raise PatchError(
+                "invalid_patch_hunk", detail="hunk_lines_must_be_short_strings"
+            )
         _utf8(line, "invalid_patch_hunk")
         result.append(line)
     return tuple(result)

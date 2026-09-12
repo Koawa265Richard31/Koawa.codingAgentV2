@@ -182,8 +182,15 @@ class GitFacade:
             progress_guard=progress_guard,
         )
         entries = _parse_status(raw, self._limits.max_paths)
+        # Audit F1: the digest must bind file CONTENT, not just (status, path)
+        # pairs — otherwise in-place edits of already-dirty files leave the
+        # digest unchanged and stale test evidence would still authorize
+        # completion.  Fingerprints are bounded (max_untracked_file_bytes).
         canonical = json.dumps(
-            [(item.status, item.path) for item in entries],
+            [
+                (item.status, item.path, self._fingerprint(item.path))
+                for item in entries
+            ],
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")

@@ -552,10 +552,24 @@ class ThreadRuntime:
             # idempotent heartbeat therefore cannot rebuild a Turn from the
             # lease receipt's result stream (that stream does not exist).
             return self._get_turn_at_version(resolved_turn_id, expected_version)
-        self._require_lease_fence(resolved_turn_id, resolved_run_id, resolved_token)
         turn = self._get_turn_at_version(resolved_turn_id, expected_version)
         if turn.status is not TurnStatus.RUNNING:
             raise InvalidTransition(f"cannot heartbeat a lease in {turn.status.value}")
+        # Audit F11: the heartbeating run must be the turn's CURRENT run; a
+        # fenced/abandoned predecessor can therefore never renew anything.
+        if turn.current_run_id is None or turn.current_run_id != resolved_run_id:
+            raise InvalidTransition("heartbeat run is not the current run")
+        if resolved_token is not None:
+            # Token-carrying recovery overlays keep the exact (run, token)
+            # match; a live overlay must never be replaced or renewed by a
+            # different claim.
+            self._require_lease_fence(resolved_turn_id, resolved_run_id, resolved_token)
+        # Token-less D1 worker heartbeats RE-ESTABLISH the lease head for the
+        # current run when the head still names an earlier abandoned run
+        # (killed durable worker).  Appending is safe precisely because the
+        # current-run check above passed; requiring a match against the stale
+        # head instead made every post-kill resume fail on its first
+        # heartbeat with "recovery lease token mismatch".
         expires_at = self._store.database_time() + timedelta(seconds=lease_seconds)
         event = self._event(
             event_type=TURN_RECOVERY_LEASE_HEARTBEATED,
