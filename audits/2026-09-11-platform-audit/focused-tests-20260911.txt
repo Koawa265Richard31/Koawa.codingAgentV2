@@ -1,0 +1,37 @@
+test_dirty_baseline_file_is_protected_from_agent_patch (tests.test_d5_vertical_slice.D5VerticalSliceTest.test_dirty_baseline_file_is_protected_from_agent_patch) ... ok
+test_failed_test_and_test_budget_cannot_be_finalized (tests.test_d5_vertical_slice.D5VerticalSliceTest.test_failed_test_and_test_budget_cannot_be_finalized) ... ok
+test_final_text_without_verification_is_rejected (tests.test_d5_vertical_slice.D5VerticalSliceTest.test_final_text_without_verification_is_rejected) ... ok
+test_git_facade_disables_repository_configured_executors (tests.test_d5_vertical_slice.D5VerticalSliceTest.test_git_facade_disables_repository_configured_executors) ... ok
+test_real_failure_repair_pass_diff_and_finalization_gate (tests.test_d5_vertical_slice.D5VerticalSliceTest.test_real_failure_repair_pass_diff_and_finalization_gate) ... ok
+test_runner_is_profile_only_bounded_and_trust_gated (tests.test_d5_vertical_slice.D5VerticalSliceTest.test_runner_is_profile_only_bounded_and_trust_gated) ... ok
+test_runner_timeout_is_typed (tests.test_d5_vertical_slice.D5VerticalSliceTest.test_runner_timeout_is_typed) ... ok
+test_durable_result_reuse_does_not_create_fresh_verification_evidence (tests.test_d5_required_profiles.D5RequiredProfilesTest.test_durable_result_reuse_does_not_create_fresh_verification_evidence) ... ok
+test_latest_pass_replaces_same_profile_failure (tests.test_d5_required_profiles.D5RequiredProfilesTest.test_latest_pass_replaces_same_profile_failure) ... ok
+test_latest_timeout_blocks_even_after_historical_pass (tests.test_d5_required_profiles.D5RequiredProfilesTest.test_latest_timeout_blocks_even_after_historical_pass) ... ok
+test_missing_required_profile_is_rejected (tests.test_d5_required_profiles.D5RequiredProfilesTest.test_missing_required_profile_is_rejected) ... ok
+test_multi_profile_registry_cannot_omit_required_contract (tests.test_d5_required_profiles.D5RequiredProfilesTest.test_multi_profile_registry_cannot_omit_required_contract) ... ok
+test_optional_failure_is_disclosed_but_does_not_block (tests.test_d5_required_profiles.D5RequiredProfilesTest.test_optional_failure_is_disclosed_but_does_not_block) ... ok
+test_patch_invalidates_all_required_profile_evidence (tests.test_d5_required_profiles.D5RequiredProfilesTest.test_patch_invalidates_all_required_profile_evidence) ... ok
+test_required_failure_cannot_be_replaced_by_other_profile_pass (tests.test_d5_required_profiles.D5RequiredProfilesTest.test_required_failure_cannot_be_replaced_by_other_profile_pass) ... ok
+test_100_rounds_compact_at_least_three_times_and_restart_parity (tests.test_d23_long_task_golden.GoldenCompactionTest.test_100_rounds_compact_at_least_three_times_and_restart_parity) ... ok
+test_ancestor_seed_escalates_with_ancestor_signal (tests.test_j2_semantics_c.ExecutorAncestorEscalationTest.test_ancestor_seed_escalates_with_ancestor_signal) ... ok
+test_benign_payload_with_ancestors_does_not_escalate (tests.test_j2_semantics_c.ExecutorAncestorEscalationTest.test_benign_payload_with_ancestors_does_not_escalate) ... ok
+test_ancestor_seed_hits_when_own_token_absent (tests.test_j2_semantics_c.HitMultiPrecedenceTest.test_ancestor_seed_hits_when_own_token_absent) ... ok
+test_no_match_returns_none (tests.test_j2_semantics_c.HitMultiPrecedenceTest.test_no_match_returns_none) ... ok
+test_own_turn_token_wins_over_ancestors (tests.test_j2_semantics_c.HitMultiPrecedenceTest.test_own_turn_token_wins_over_ancestors) ... ok
+test_plain_hit_stays_own_turn_only (tests.test_j2_semantics_c.HitMultiPrecedenceTest.test_plain_hit_stays_own_turn_only)
+Backward compatibility: hit() must not gain ancestor awareness. ... ok
+test_absent_config_keeps_gate_inactive (tests.test_j2_semantics_c.ResolveCanaryKeyTest.test_absent_config_keeps_gate_inactive) ... ok
+test_missing_env_var_fails_closed (tests.test_j2_semantics_c.ResolveCanaryKeyTest.test_missing_env_var_fails_closed) ... ok
+test_present_env_var_returns_key_bytes (tests.test_j2_semantics_c.ResolveCanaryKeyTest.test_present_env_var_returns_key_bytes) ... ok
+test_trivial_key_is_rejected (tests.test_j2_semantics_c.ResolveCanaryKeyTest.test_trivial_key_is_rejected) ... ok
+test_child_turn_scan_uses_its_own_exact_token (tests.test_t7_delegation_boundaries.T7BCanaryDoesNotPropagateAcrossTurns.test_child_turn_scan_uses_its_own_exact_token) ... ok
+test_t7b_ancestor_seed_scan_hits_parent_canary (tests.test_t7_delegation_boundaries.T7BCanaryDoesNotPropagateAcrossTurns.test_t7b_ancestor_seed_scan_hits_parent_canary)
+Semantics-C (implemented 2026-09-06): the child's scan set includes ... ok
+test_t7b_own_turn_scan_ignores_parent_seed (tests.test_t7_delegation_boundaries.T7BCanaryDoesNotPropagateAcrossTurns.test_t7b_own_turn_scan_ignores_parent_seed) ... ok
+test_message_document_carries_no_trust_field (tests.test_t7_delegation_boundaries.T7CMailboxSchemaHasNoTrustMarking.test_message_document_carries_no_trust_field) ... ok
+
+----------------------------------------------------------------------
+Ran 30 tests in 53.840s
+
+OK

@@ -1,0 +1,11 @@
+{
+  "config_input_fields": [
+    "canary_key_env"
+  ],
+  "loader_result": "config_unknown_field",
+  "note": "unknown-field rejection precedes required-field validation; tests JSON field ingress, not full config startup",
+  "eval_total": 20,
+  "eval_success": 20,
+  "agent_loop_calls": 0,
+  "eval_report_label": "scripted_deterministic_provider"
+}

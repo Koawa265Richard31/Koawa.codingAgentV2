@@ -1,0 +1,156 @@
+{
+  "scenario": "B1",
+  "python": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+  "results": {
+    "apply_patch": {
+      "is_error": false,
+      "content": {
+        "changed_files": 1,
+        "changes": [
+          {
+            "additions": 1,
+            "after_sha256": "cafb05d947fb92e41aad13ac40936a7dee4a3068ae2033f54bc777d8fed2d2e8",
+            "before_sha256": "f05a65413338d4d74cc2e7115db156601cfcb7838936e091cb74c7ecf0609277",
+            "deletions": 1,
+            "operation": "update",
+            "path": "app.py"
+          }
+        ],
+        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-value = 1\n+value = 2\n",
+        "diff_truncated": false,
+        "ok": true,
+        "patch_sha256": "002bce1b97d740c2bd86ff0e799259ddf40afadc2d4b30c59438f8a523d426c6"
+      }
+    },
+    "run_test_profile": {
+      "is_error": false,
+      "content": {
+        "allocation_id": null,
+        "argv": [
+          "python.exe",
+          "-B",
+          "-c",
+          "import app; assert app.value == 2"
+        ],
+        "backend": "host",
+        "container_id": null,
+        "duration_ms": 109,
+        "exit_code": 0,
+        "immutable_image_id": null,
+        "outcome": "passed",
+        "profile_digest": null,
+        "profile_id": "unit",
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": false,
+        "stdout": "",
+        "stdout_bytes": 0,
+        "stdout_truncated": false,
+        "timeout_seconds": 60.0
+      }
+    },
+    "git_status": {
+      "is_error": false,
+      "content": {
+        "agent_changed_paths": [
+          "app.py"
+        ],
+        "baseline_dirty_paths": [],
+        "clean": false,
+        "status": [
+          {
+            "path": "app.py",
+            "status": " M"
+          }
+        ],
+        "status_sha256": "83dc7c8fe1ec718371b74c3dd29cdcb8f6eb2210997577bfcb5ebaf3a7a7a50e"
+      }
+    },
+    "git_diff": {
+      "is_error": false,
+      "content": {
+        "changed_paths": [
+          "app.py"
+        ],
+        "diff": "diff --git a/app.py b/app.py\nindex 68763e4..8076314 100644\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-value = 1\r\n+value = 2\r\n",
+        "diff_sha256": "2171fe295d59e9b015276724c7578aa5a21c9d2e2b34433b1278e337dced8401",
+        "diff_truncated": false,
+        "status_sha256": "83dc7c8fe1ec718371b74c3dd29cdcb8f6eb2210997577bfcb5ebaf3a7a7a50e"
+      }
+    },
+    "finalize_task": {
+      "is_error": false,
+      "content": {
+        "agent_changed_paths": [
+          "app.py"
+        ],
+        "baseline_dirty_paths": [],
+        "diff_sha256": "2171fe295d59e9b015276724c7578aa5a21c9d2e2b34433b1278e337dced8401",
+        "generation": 1,
+        "ok": true,
+        "optional_tests": [],
+        "patch_sha256": [
+          "002bce1b97d740c2bd86ff0e799259ddf40afadc2d4b30c59438f8a523d426c6"
+        ],
+        "required_test_profiles": [
+          "unit"
+        ],
+        "required_tests": [
+          {
+            "historical_failure_count": 0,
+            "latest": {
+              "allocation_id": null,
+              "argv": [
+                "python.exe",
+                "-B",
+                "-c",
+                "import app; assert app.value == 2"
+              ],
+              "backend": "host",
+              "container_id": null,
+              "duration_ms": 109,
+              "exit_code": 0,
+              "generation": 1,
+              "immutable_image_id": null,
+              "outcome": "passed",
+              "profile_digest": null,
+              "profile_id": "unit",
+              "stderr_truncated": false,
+              "stdout_truncated": false,
+              "timeout_seconds": 60.0
+            },
+            "profile_id": "unit",
+            "run_count": 1
+          }
+        ],
+        "test": {
+          "allocation_id": null,
+          "argv": [
+            "python.exe",
+            "-B",
+            "-c",
+            "import app; assert app.value == 2"
+          ],
+          "backend": "host",
+          "container_id": null,
+          "duration_ms": 109,
+          "exit_code": 0,
+          "generation": 1,
+          "immutable_image_id": null,
+          "outcome": "passed",
+          "profile_digest": null,
+          "profile_id": "unit",
+          "stderr_truncated": false,
+          "stdout_truncated": false,
+          "timeout_seconds": 60.0
+        },
+        "test_runs": 1,
+        "warning": "host_runner_dev_only_until_d8_container_sandbox"
+      }
+    }
+  },
+  "status_digest_equal": true,
+  "completion_accepted_after_drift": true,
+  "completion_error": null,
+  "independent_acceptance_exit": 1
+}

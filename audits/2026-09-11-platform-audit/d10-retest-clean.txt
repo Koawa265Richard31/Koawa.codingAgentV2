@@ -1,0 +1,24 @@
+test_allow_mcp_call_roundtrip_and_ledger_binding (tests.test_d10_integration.D10McpIntegrationTest.test_allow_mcp_call_roundtrip_and_ledger_binding) ... ok
+test_ask_grant_resume_executes_once_through_fixture (tests.test_d10_integration.D10McpIntegrationTest.test_ask_grant_resume_executes_once_through_fixture) ... ok
+test_mcp_handler_has_no_direct_bypass (tests.test_d10_integration.D10McpIntegrationTest.test_mcp_handler_has_no_direct_bypass) ... ok
+test_refresh_creates_new_binding_and_new_approval (tests.test_d10_integration.D10McpIntegrationTest.test_refresh_creates_new_binding_and_new_approval) ... ok
+test_timeout_marks_outcome_unknown (tests.test_d10_integration.D10McpIntegrationTest.test_timeout_marks_outcome_unknown) ... ok
+test_trace_wired_into_tool_ledger_and_mcp (tests.test_d10_integration.D10McpIntegrationTest.test_trace_wired_into_tool_ledger_and_mcp) ... ok
+test_unknown_response_id_becomes_uncertain_outcome (tests.test_d10_integration.D10McpIntegrationTest.test_unknown_response_id_becomes_uncertain_outcome) ... ok
+test_cursor_too_large_fails_closed (tests.test_d10_integration.SessionDeadlineLimitsTest.test_cursor_too_large_fails_closed) ... ok
+test_initialize_deadline_is_independent_of_tool_call (tests.test_d10_integration.SessionDeadlineLimitsTest.test_initialize_deadline_is_independent_of_tool_call)
+A short initialize deadline fails fast although the tool-call ... ok
+test_list_cursor_repeated_fails_closed (tests.test_d10_integration.SessionDeadlineLimitsTest.test_list_cursor_repeated_fails_closed) ... ok
+test_list_pages_exceeded_fails_closed (tests.test_d10_integration.SessionDeadlineLimitsTest.test_list_pages_exceeded_fails_closed) ... ok
+test_notification_storm_is_throttled (tests.test_d10_integration.SessionDeadlineLimitsTest.test_notification_storm_is_throttled)
+After max_notifications_per_window the loop drops further notices; ... ok
+test_pending_limit_sends_zero_bytes (tests.test_d10_integration.SessionDeadlineLimitsTest.test_pending_limit_sends_zero_bytes)
+Fill one pending slot; the second request must fail before sending. ... ok
+test_refresh_worker_runs_and_releases_single_flight_lock (tests.test_d10_integration.SessionDeadlineLimitsTest.test_refresh_worker_runs_and_releases_single_flight_lock)
+An in-flight worker absorbs concurrent attempts; the worker must ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 18.840s
+
+OK
+exit=0

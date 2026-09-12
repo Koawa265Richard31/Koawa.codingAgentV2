@@ -1,0 +1,34 @@
+{
+ "profiles": [
+  "p1",
+  "p2",
+  "p3",
+  "p4",
+  "p5"
+ ],
+ "wiring": "required_test_profiles passed, verification_limits omitted (production shape)",
+ "runs": [
+  {
+   "profile": "p1",
+   "error": null
+  },
+  {
+   "profile": "p2",
+   "error": null
+  },
+  {
+   "profile": "p3",
+   "error": null
+  },
+  {
+   "profile": "p4",
+   "error": null
+  },
+  {
+   "profile": "p5",
+   "error": "test_run_budget_exceeded"
+  }
+ ],
+ "finalize_error": "required_test_profile_not_run",
+ "assert_complete": "verification_required"
+}

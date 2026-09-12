@@ -1,0 +1,138 @@
+test_business_tool_error_is_visible_to_the_next_model_round (test_agent_loop.AgentLoopTest.test_business_tool_error_is_visible_to_the_next_model_round)
+��ͨ����ʧ����ģ�Ϳɼ��������Ӧ������Ϊ Loop ������ʩʧ�ܡ� ... ok
+test_cancel_before_model_call_makes_no_provider_or_tool_call (test_agent_loop.AgentLoopTest.test_cancel_before_model_call_makes_no_provider_or_tool_call)
+Ԥ��ȡ�������ڵ�һ�� Provider ����ǰ��Ч�� ... ok
+test_cancel_during_model_stream_discards_partial_output (test_agent_loop.AgentLoopTest.test_cancel_during_model_stream_discards_partial_output)
+��ʽ������ȡ��ʱ������ı����ܳ�Ϊ�ɹ�����򴥷����ߡ� ... ok
+test_completed_tool_item_is_not_executed_before_stream_terminal_validation (test_agent_loop.AgentLoopTest.test_completed_tool_item_is_not_executed_before_stream_terminal_validation)
+��ʹ ToolCall �� done��β�� typed failure �Ա����ù���ִ�д�������Ϊ�㡣 ... ok
+test_executor_exception_becomes_a_stable_loop_failure (test_agent_loop.AgentLoopTest.test_executor_exception_becomes_a_stable_loop_failure)
+Executor ������ʩ�쳣����й©ԭ�ģ�ֻ�ܿ�߽紫���ȶ����ࡣ ... ok
+test_last_allowed_round_may_return_final (test_agent_loop.AgentLoopTest.test_last_allowed_round_may_return_final)
+���һ���Կɷ��� final���������޲�����ǰһ����ֹ�� ... ok
+test_provider_exception_and_empty_stream_fail_closed (test_agent_loop.AgentLoopTest.test_provider_exception_and_empty_stream_fail_closed)
+Provider ���쳣�Ϳ� EOF ���������ͻ�ʧ�ܣ�����α��� final�� ... ok
+test_tool_call_on_last_allowed_round_is_not_executed (test_agent_loop.AgentLoopTest.test_tool_call_on_last_allowed_round_is_not_executed)
+�������󹤾�ʱ�����һ����û�з���Ԥ��������ٲ������߸����á� ... ok
+test_tool_result_rejects_text_that_cannot_be_encoded_as_utf8 (test_agent_loop.AgentLoopTest.test_tool_result_rejects_text_that_cannot_be_encoded_as_utf8) ... ok
+test_two_tool_calls_feed_results_to_next_round_then_finish (test_agent_loop.AgentLoopTest.test_two_tool_calls_feed_results_to_next_round_then_finish)
+ͬһ�غϵ��������ö�ִ�У����������˳�������һ�ֺ���� final�� ... ok
+test_unknown_tool_blocks_the_entire_batch_before_first_execution (test_agent_loop.AgentLoopTest.test_unknown_tool_blocks_the_entire_batch_before_first_execution)
+����δ֪���߱���ȫ�����أ�������ִ������ǰ��ĺϷ������á� ... ok
+test_additional_properties_true_is_coerced_not_honored (test_d10_connection_binding.CatalogBindingTest.test_additional_properties_true_is_coerced_not_honored)
+B-2 (2026-09-06, direction b): D25 normalization FORCES ... ok
+test_duplicate_and_namespace_conflicts (test_d10_connection_binding.CatalogBindingTest.test_duplicate_and_namespace_conflicts) ... ok
+test_invalid_tools_are_rejected (test_d10_connection_binding.CatalogBindingTest.test_invalid_tools_are_rejected) ... ok
+test_valid_catalog_builds_typed_specs (test_d10_connection_binding.CatalogBindingTest.test_valid_catalog_builds_typed_specs) ... ok
+test_binding_enters_action_digest (test_d10_connection_binding.McpPolicyBindingTest.test_binding_enters_action_digest) ... ok
+test_mcp_action_requires_binding (test_d10_connection_binding.McpPolicyBindingTest.test_mcp_action_requires_binding) ... ok
+test_non_mcp_action_rejects_binding_fields (test_d10_connection_binding.McpPolicyBindingTest.test_non_mcp_action_rejects_binding_fields) ... ok
+test_auto_refresh_on_list_changed (test_d10_connection_binding.McpSessionTest.test_auto_refresh_on_list_changed) ... ok
+test_call_timeout_is_uncertain (test_d10_connection_binding.McpSessionTest.test_call_timeout_is_uncertain) ... ok
+test_connect_and_call_roundtrip (test_d10_connection_binding.McpSessionTest.test_connect_and_call_roundtrip) ... ok
+test_eof_fails_pending_call (test_d10_connection_binding.McpSessionTest.test_eof_fails_pending_call) ... ok
+test_outcome_uncertain_raises (test_d10_connection_binding.McpSessionTest.test_outcome_uncertain_raises) ... ok
+test_stale_binding_after_refresh (test_d10_connection_binding.McpSessionTest.test_stale_binding_after_refresh) ... ok
+test_tool_handler_wraps_untrusted_output (test_d10_connection_binding.McpSessionTest.test_tool_handler_wraps_untrusted_output) ... ok
+test_unknown_response_id_is_counted (test_d10_connection_binding.McpSessionTest.test_unknown_response_id_is_counted) ... ok
+test_version_mismatch_fails_closed (test_d10_connection_binding.McpSessionTest.test_version_mismatch_fails_closed) ... ok
+test_echo_call_and_concurrent_ids (test_d10_fixture_smoke.FixtureSmokeTest.test_echo_call_and_concurrent_ids) ... ok
+test_initialize_and_tools_list_pagination (test_d10_fixture_smoke.FixtureSmokeTest.test_initialize_and_tools_list_pagination) ... ok
+test_malformed_first_frame_is_observable (test_d10_fixture_smoke.FixtureSmokeTest.test_malformed_first_frame_is_observable) ... ok
+test_throw_on_tool_returns_error (test_d10_fixture_smoke.FixtureSmokeTest.test_throw_on_tool_returns_error) ... ok
+test_version_override (test_d10_fixture_smoke.FixtureSmokeTest.test_version_override) ... ok
+test_allow_mcp_call_roundtrip_and_ledger_binding (test_d10_integration.D10McpIntegrationTest.test_allow_mcp_call_roundtrip_and_ledger_binding) ... ok
+test_ask_grant_resume_executes_once_through_fixture (test_d10_integration.D10McpIntegrationTest.test_ask_grant_resume_executes_once_through_fixture) ... ok
+test_mcp_handler_has_no_direct_bypass (test_d10_integration.D10McpIntegrationTest.test_mcp_handler_has_no_direct_bypass) ... ok
+test_refresh_creates_new_binding_and_new_approval (test_d10_integration.D10McpIntegrationTest.test_refresh_creates_new_binding_and_new_approval) ... ok
+test_timeout_marks_outcome_unknown (test_d10_integration.D10McpIntegrationTest.test_timeout_marks_outcome_unknown) ... ok
+test_trace_wired_into_tool_ledger_and_mcp (test_d10_integration.D10McpIntegrationTest.test_trace_wired_into_tool_ledger_and_mcp) ... ok
+test_unknown_response_id_becomes_uncertain_outcome (test_d10_integration.D10McpIntegrationTest.test_unknown_response_id_becomes_uncertain_outcome) ... ok
+test_cursor_too_large_fails_closed (test_d10_integration.SessionDeadlineLimitsTest.test_cursor_too_large_fails_closed) ... ok
+test_initialize_deadline_is_independent_of_tool_call (test_d10_integration.SessionDeadlineLimitsTest.test_initialize_deadline_is_independent_of_tool_call)
+A short initialize deadline fails fast although the tool-call ... ok
+test_list_cursor_repeated_fails_closed (test_d10_integration.SessionDeadlineLimitsTest.test_list_cursor_repeated_fails_closed) ... ok
+test_list_pages_exceeded_fails_closed (test_d10_integration.SessionDeadlineLimitsTest.test_list_pages_exceeded_fails_closed) ... ok
+test_notification_storm_is_throttled (test_d10_integration.SessionDeadlineLimitsTest.test_notification_storm_is_throttled)
+After max_notifications_per_window the loop drops further notices; ... ok
+test_pending_limit_sends_zero_bytes (test_d10_integration.SessionDeadlineLimitsTest.test_pending_limit_sends_zero_bytes)
+Fill one pending slot; the second request must fail before sending. ... ok
+test_refresh_worker_runs_and_releases_single_flight_lock (test_d10_integration.SessionDeadlineLimitsTest.test_refresh_worker_runs_and_releases_single_flight_lock)
+An in-flight worker absorbs concurrent attempts; the worker must ... ok
+test_canonical_json_ordering (test_d10_transport_protocol.ProtocolTest.test_canonical_json_ordering) ... ok
+test_depth_and_size_limits (test_d10_transport_protocol.ProtocolTest.test_depth_and_size_limits) ... ok
+test_duplicate_key_nan_and_bad_jsonrpc_are_rejected (test_d10_transport_protocol.ProtocolTest.test_duplicate_key_nan_and_bad_jsonrpc_are_rejected) ... ok
+test_parse_notification (test_d10_transport_protocol.ProtocolTest.test_parse_notification) ... ok
+test_parse_request_and_roundtrip (test_d10_transport_protocol.ProtocolTest.test_parse_request_and_roundtrip) ... ok
+test_parse_response_and_error (test_d10_transport_protocol.ProtocolTest.test_parse_response_and_error) ... ok
+test_close_before_open_and_after_failed_open_and_twice (test_d10_transport_protocol.StdioTransportTest.test_close_before_open_and_after_failed_open_and_twice) ... ok
+test_close_is_idempotent_and_kills_process (test_d10_transport_protocol.StdioTransportTest.test_close_is_idempotent_and_kills_process) ... ok
+test_eof_before_message_raises_closed (test_d10_transport_protocol.StdioTransportTest.test_eof_before_message_raises_closed) ... ok
+test_explicit_env_is_passed_through_default_allowlist (test_d10_transport_protocol.StdioTransportTest.test_explicit_env_is_passed_through_default_allowlist) ... ok
+test_inbound_frame_too_large (test_d10_transport_protocol.StdioTransportTest.test_inbound_frame_too_large) ... ok
+test_inbound_queue_overflow_fails_closed (test_d10_transport_protocol.StdioTransportTest.test_inbound_queue_overflow_fails_closed) ... ok
+test_large_stderr_drained_and_truncated (test_d10_transport_protocol.StdioTransportTest.test_large_stderr_drained_and_truncated) ... ok
+test_malformed_frame (test_d10_transport_protocol.StdioTransportTest.test_malformed_frame) ... ok
+test_notification_burst_preserves_response_capacity_and_coalesces (test_d10_transport_protocol.StdioTransportTest.test_notification_burst_preserves_response_capacity_and_coalesces)
+Advisory notices cannot crowd correlated responses out of the queue. ... ok
+test_parent_canary_env_absent_from_child (test_d10_transport_protocol.StdioTransportTest.test_parent_canary_env_absent_from_child) ... ok
+test_process_start_deadline_fails_closed_and_kills_tree (test_d10_transport_protocol.StdioTransportTest.test_process_start_deadline_fails_closed_and_kills_tree) ... ok
+test_roundtrip (test_d10_transport_protocol.StdioTransportTest.test_roundtrip) ... ok
+test_secret_and_injection_env_are_rejected (test_d10_transport_protocol.StdioTransportTest.test_secret_and_injection_env_are_rejected) ... ok
+test_send_to_closed_transport_raises_closed (test_d10_transport_protocol.StdioTransportTest.test_send_to_closed_transport_raises_closed) ... ok
+test_send_validates_payload_before_writing (test_d10_transport_protocol.StdioTransportTest.test_send_validates_payload_before_writing) ... ok
+test_timeout_then_eof_then_closed (test_d10_transport_protocol.StdioTransportTest.test_timeout_then_eof_then_closed) ... ok
+test_100_rounds_budget_never_negative_over_or_double_terminal (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_100_rounds_budget_never_negative_over_or_double_terminal) ... ok
+test_concurrent_spawns_contend_for_last_parent_slot_one_child (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_concurrent_spawns_contend_for_last_parent_slot_one_child)
+P0-03: two spawns pass the parent slot check, one commits. ... ok
+test_concurrent_takeover_has_one_winner_and_one_consistent_view (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_concurrent_takeover_has_one_winner_and_one_consistent_view) ... ok
+test_double_orphan_race_only_one_orphan_event (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_double_orphan_race_only_one_orphan_event) ... ok
+test_four_stream_spawn_batch_shared_commit (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_four_stream_spawn_batch_shared_commit) ... ok
+test_late_result_from_abandoned_run_is_fenced (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_late_result_from_abandoned_run_is_fenced) ... ok
+test_legacy_baseline_fixed_high_water_and_single_commit (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_legacy_baseline_fixed_high_water_and_single_commit) ... ok
+test_no_keep_alive_threads_left_after_runs (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_no_keep_alive_threads_left_after_runs)
+keeper threads are joined and daemon=False threads are all stopped. ... ok
+test_parent_terminal_branch_skips_enqueue_releases_same_commit (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_parent_terminal_branch_skips_enqueue_releases_same_commit) ... ok
+test_parent_terminal_vs_spawn_two_commit_orders (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_parent_terminal_vs_spawn_two_commit_orders) ... ok
+test_reconcile_empty_zero_events_and_typed_release_idempotent (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_reconcile_empty_zero_events_and_typed_release_idempotent) ... ok
+test_reconcile_releases_only_provable_terminal_reservations (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_reconcile_releases_only_provable_terminal_reservations) ... ok
+test_root_spawn_wire_and_root_terminal_own_capacity_precondition (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_root_spawn_wire_and_root_terminal_own_capacity_precondition) ... ok
+test_slow_live_provider_is_not_orphaned_during_two_heartbeats (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_slow_live_provider_is_not_orphaned_during_two_heartbeats)
+P0-04: heartbeats keep a slow provider's run alive; no redelivery. ... ok
+test_takeover_marks_unresolved_in_sequence_order_single_commit (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_takeover_marks_unresolved_in_sequence_order_single_commit) ... ok
+test_terminal_aggregate_rejects_missing_extra_forged_and_parent_wire (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_terminal_aggregate_rejects_missing_extra_forged_and_parent_wire) ... ok
+test_terminal_response_loss_no_duplicate_release (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_terminal_response_loss_no_duplicate_release) ... ok
+test_terminal_wins_race_and_deliver_appends_zero_events (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_terminal_wins_race_and_deliver_appends_zero_events)
+Barrier race: deliver's stale precondition loses, no events. ... ok
+test_two_parents_contend_for_last_root_slot_one_child (test_d11_agent_concurrency.D11AgentConcurrencyTest.test_two_parents_contend_for_last_root_slot_one_child)
+Two different parents race for the last root total slot. ... ok
+test_ack_retry_returns_same_receipt_without_extra_events (test_d11_agent_control.D11AgentControlTest.test_ack_retry_returns_same_receipt_without_extra_events) ... ok
+test_cancel_request_and_late_result_preserve_real_digest (test_d11_agent_control.D11AgentControlTest.test_cancel_request_and_late_result_preserve_real_digest) ... ok
+test_cancelled_message_cannot_be_redelivered (test_d11_agent_control.D11AgentControlTest.test_cancelled_message_cannot_be_redelivered) ... ok
+test_cycle_spawn_is_rejected (test_d11_agent_control.D11AgentControlTest.test_cycle_spawn_is_rejected) ... ok
+test_deliver_uses_mailbox_head_version (test_d11_agent_control.D11AgentControlTest.test_deliver_uses_mailbox_head_version)
+P0-01: delivering an older message uses the current mailbox head. ... ok
+test_depth_concurrency_and_total_limits (test_d11_agent_control.D11AgentControlTest.test_depth_concurrency_and_total_limits) ... ok
+test_interrupt_enqueues_cancel (test_d11_agent_control.D11AgentControlTest.test_interrupt_enqueues_cancel) ... ok
+test_legacy_delivered_requires_resolution (test_d11_agent_control.D11AgentControlTest.test_legacy_delivered_requires_resolution) ... ok
+test_list_and_wait_agents (test_d11_agent_control.D11AgentControlTest.test_list_and_wait_agents) ... ok
+test_message_dedupe_and_terminal_target (test_d11_agent_control.D11AgentControlTest.test_message_dedupe_and_terminal_target) ... ok
+test_redelivery_increments_attempt_and_preserves_sequence (test_d11_agent_control.D11AgentControlTest.test_redelivery_increments_attempt_and_preserves_sequence)
+requeue keeps the sequence; the next delivery increments attempt. ... ok
+test_requeue_requires_matching_operator_authority (test_d11_agent_control.D11AgentControlTest.test_requeue_requires_matching_operator_authority) ... ok
+test_result_encoding_boundaries (test_d11_agent_control.D11AgentControlTest.test_result_encoding_boundaries) ... ok
+test_result_identity_conflict (test_d11_agent_control.D11AgentControlTest.test_result_identity_conflict) ... ok
+test_spawn_creates_durable_graph_and_budget (test_d11_agent_control.D11AgentControlTest.test_spawn_creates_durable_graph_and_budget) ... ok
+test_stale_message_delivery_attempt_is_rejected (test_d11_agent_control.D11AgentControlTest.test_stale_message_delivery_attempt_is_rejected) ... ok
+test_stale_run_is_fenced_and_orphan_takeover (test_d11_agent_control.D11AgentControlTest.test_stale_run_is_fenced_and_orphan_takeover) ... ok
+test_takeover_writes_agent_and_unresolved_in_one_commit (test_d11_agent_control.D11AgentControlTest.test_takeover_writes_agent_and_unresolved_in_one_commit) ... ok
+test_waiting_all_requeued_resumes_with_fresh_run (test_d11_agent_control.D11AgentControlTest.test_waiting_all_requeued_resumes_with_fresh_run) ... ok
+test_waiting_mixed_resolution_is_refused (test_d11_agent_control.D11AgentControlTest.test_waiting_mixed_resolution_is_refused) ... ok
+test_waiting_resume_flow_and_resolution_mixed (test_d11_agent_control.D11AgentControlTest.test_waiting_resume_flow_and_resolution_mixed) ... ok
+test_ack_committed_then_kill_terminates_without_recall (test_d11_agent_process_kill.D11ProcessKillTest.test_ack_committed_then_kill_terminates_without_recall) ... ok
+test_delivered_unacked_after_kill_turns_unresolved_not_completed (test_d11_agent_process_kill.D11ProcessKillTest.test_delivered_unacked_after_kill_turns_unresolved_not_completed)
+P0-01 oracle: no completed agent with an unacked delivery. ... ok
+test_enqueue_then_kill_recovers_with_single_execution (test_d11_agent_process_kill.D11ProcessKillTest.test_enqueue_then_kill_recovers_with_single_execution) ... ok
+test_provider_kill_turns_unresolved_without_auto_provider (test_d11_agent_process_kill.D11ProcessKillTest.test_provider_kill_turns_unresolved_without_auto_provider)
+P0-02: killed after provider entered, before result: never recall. ... ok
+test_result_recorded_then_kill_recovers_ack_only_provider_count_one (test_d11_agent_process_kill.D11ProcessKillTest.test_result_recorded_then_kill_recovers_ack_only_provider_count_one) ... ok

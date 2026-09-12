@@ -711,6 +711,7 @@ class RuntimeConfig:
     test_profiles: tuple[TestProfileConfig, ...]
     policy: PolicyConfig
     system_prompt: str
+    required_test_profiles: tuple[str, ...] | None = None
     mcp_servers: tuple[McpServerConfig, ...] = ()
     owner_id: str = "runtime-cli"
     lease_seconds: int = 30
@@ -781,6 +782,34 @@ class RuntimeConfig:
             self.test_profiles
         ):
             raise RuntimeConfigError("duplicate_test_profile")
+        registered_profile_ids = tuple(
+            value.profile_id for value in self.test_profiles
+        )
+        required_profiles = self.required_test_profiles
+        if required_profiles is None:
+            if len(registered_profile_ids) != 1:
+                raise RuntimeConfigError("required_test_profiles_required")
+            required_profiles = registered_profile_ids
+        elif not isinstance(required_profiles, tuple):
+            raise RuntimeConfigError("invalid_required_test_profiles")
+        if not required_profiles or len(required_profiles) > 64:
+            raise RuntimeConfigError("invalid_required_test_profiles")
+        if any(
+            not isinstance(profile_id, str)
+            or not _PROFILE_ID.fullmatch(profile_id)
+            for profile_id in required_profiles
+        ):
+            raise RuntimeConfigError("invalid_required_test_profiles")
+        if len(set(required_profiles)) != len(required_profiles):
+            raise RuntimeConfigError("duplicate_required_test_profile")
+        if any(
+            profile_id not in registered_profile_ids
+            for profile_id in required_profiles
+        ):
+            raise RuntimeConfigError("required_test_profile_not_found")
+        object.__setattr__(
+            self, "required_test_profiles", tuple(sorted(required_profiles))
+        )
         if not isinstance(self.mcp_servers, tuple) or any(
             not isinstance(value, McpServerConfig) for value in self.mcp_servers
         ):
@@ -897,7 +926,7 @@ Work inside the provided Git repository only.
 
 Protocol:
 1. Inspect with read_file, list_files, or search_text before editing.
-2. Edit with apply_patch. UPDATE and DELETE require the exact base_sha256 returned by read_file.
+2. Edit with apply_patch. Its patch_json is strict JSON: {"schema_version":1,"changes":[...]} where each change is exactly ADD {"operation":"add","path":...,"content":...,"newline":"lf","utf8_bom":false}, UPDATE {"operation":"update","path":...,"base_sha256":"<sha256 from read_file>","hunks":[{"old_start":<1-based line>,"old_lines":["<exact existing line, copied>"],"new_lines":["<replacement>"]}]}, or DELETE {"operation":"delete","path":...,"base_sha256":"<sha256 from read_file>"}. UPDATE/DELETE require the exact base_sha256 returned by read_file; old_lines must repeat existing lines character-for-character; never add extra fields.
 3. After editing, run one of the pre-registered test profiles with run_test_profile.
 4. Inspect git_status and git_diff.
 5. Call finalize_task only after tests pass and status/diff describe the current generation.
@@ -950,6 +979,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         "provider",
         "sandbox",
         "test_profiles",
+        "required_test_profiles",
         "policy",
         "mcp_servers",
         "system_prompt",
@@ -964,6 +994,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         "fallback_summary_model",
         "durable_limits",
         "memory",
+        "canary_key_env",
         "config_schema_version",
     }
     unknown = set(document) - allowed
@@ -1004,6 +1035,11 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     provider = _parse_provider(document.get("provider"), strict_options=strict_v3)
     sandbox = _parse_sandbox(document.get("sandbox"))
     test_profiles = _parse_test_profiles(document.get("test_profiles"))
+    required_test_profiles = (
+        _parse_required_test_profiles(document["required_test_profiles"])
+        if "required_test_profiles" in document
+        else None
+    )
     policy = _parse_policy(document.get("policy"))
     mcp_servers = _parse_mcp_servers(
         document.get("mcp_servers", []), base, strict=strict_v3,
@@ -1047,6 +1083,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         provider=provider,
         sandbox=sandbox,
         test_profiles=test_profiles,
+        required_test_profiles=required_test_profiles,
         policy=policy,
         system_prompt=system_prompt,
         mcp_servers=mcp_servers,
@@ -1336,6 +1373,20 @@ def _parse_test_profiles(value: Any) -> tuple[TestProfileConfig, ...]:
         except (TypeError, ValueError):
             raise RuntimeConfigError("invalid_test_profile") from None
     return tuple(profiles)
+
+
+def _parse_required_test_profiles(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or len(value) > 64:
+        raise RuntimeConfigError("invalid_required_test_profiles")
+    if any(
+        not isinstance(profile_id, str)
+        or not _PROFILE_ID.fullmatch(profile_id)
+        for profile_id in value
+    ):
+        raise RuntimeConfigError("invalid_required_test_profiles")
+    if len(set(value)) != len(value):
+        raise RuntimeConfigError("duplicate_required_test_profile")
+    return tuple(value)
 
 
 def _parse_mcp_servers(

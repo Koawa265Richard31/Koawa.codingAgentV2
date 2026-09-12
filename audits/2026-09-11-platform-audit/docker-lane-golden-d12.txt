@@ -1,0 +1,19 @@
+test_approval_replay_survives_event_store_reopen (tests.test_golden_composite_e2e.GoldenCompositeE2ETest.test_approval_replay_survives_event_store_reopen)
+The approval oracle must recover both requests after a restart. ... ok
+test_full_composite_kill_and_resume (tests.test_golden_composite_e2e.GoldenCompositeE2ETest.test_full_composite_kill_and_resume) ... ok
+test_matrix_focused_boundaries_are_executed (tests.test_golden_composite_e2e.GoldenCompositeE2ETest.test_matrix_focused_boundaries_are_executed)
+Run the exact non-composite boundary probes in the golden lane. ... ok
+test_required_matrix_is_complete_and_explicit (tests.test_golden_composite_e2e.GoldenCompositeE2ETest.test_required_matrix_is_complete_and_explicit)
+The mandatory lane must enumerate all 13 cases exactly once. ... ok
+test_delivery_requires_exact_head (tests.test_d12_workspace_integration.D12WorkspaceIntegrationTest.test_delivery_requires_exact_head) ... ok
+test_dirty_user_baseline_rejects_write_agents (tests.test_d12_workspace_integration.D12WorkspaceIntegrationTest.test_dirty_user_baseline_rejects_write_agents) ... ok
+test_docker_runner_executes_in_agent_worktree (tests.test_d12_workspace_integration.D12WorkspaceIntegrationTest.test_docker_runner_executes_in_agent_worktree) ... ok
+test_same_line_conflict_is_explicit (tests.test_d12_workspace_integration.D12WorkspaceIntegrationTest.test_same_line_conflict_is_explicit) ... ok
+test_stale_run_artifact_is_fenced (tests.test_d12_workspace_integration.D12WorkspaceIntegrationTest.test_stale_run_artifact_is_fenced) ... ok
+test_two_agents_different_files_integrate_and_deliver (tests.test_d12_workspace_integration.D12WorkspaceIntegrationTest.test_two_agents_different_files_integrate_and_deliver) ... ok
+test_worktree_allocate_and_safe_reap (tests.test_d12_workspace_integration.D12WorkspaceIntegrationTest.test_worktree_allocate_and_safe_reap) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 71.671s
+
+OK

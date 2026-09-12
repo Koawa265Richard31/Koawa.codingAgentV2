@@ -1,0 +1,77 @@
+[
+  {
+    "path": "src/koawa_agent_v2/verification/finalization.py",
+    "sha256": "E4FF561B210FAAB8DF7CEA38FA3F899FA69FEDD4DB6BBFF40CB066659B681984",
+    "last_write_utc": "2026-09-07T12:30:26.9492752Z"
+  },
+  {
+    "path": "src/koawa_agent_v2/verification/git.py",
+    "sha256": "A5F987481D1DD5B2C2AA65EE12774326BB6C040EC66CDA5B2E9AC1BC8B74B54A",
+    "last_write_utc": "2026-08-23T12:01:12.8308904Z"
+  },
+  {
+    "path": "src/koawa_agent_v2/verification/tools.py",
+    "sha256": "3014E636C00A41DA7766B51A243D09ADD4D060A8FCEADE54ABABCADEB15E8C45",
+    "last_write_utc": "2026-09-07T12:30:35.0724136Z"
+  },
+  {
+    "path": "src/koawa_agent_v2/runtime/config.py",
+    "sha256": "D5EFF37E2421BCE1213447AE05864AE45A0E8EEC98BB830E088A2A21B5C1FDA6",
+    "last_write_utc": "2026-09-07T12:28:15.8389715Z"
+  },
+  {
+    "path": "src/koawa_agent_v2/runtime/assembly.py",
+    "sha256": "3EE404F0AB59F80171F4956BD5074C4F12BF32B1DFA6D85E70ED4EB8FB48C016",
+    "last_write_utc": "2026-09-07T12:28:23.6916800Z"
+  },
+  {
+    "path": "src/koawa_agent_v2/runtime/unified.py",
+    "sha256": "CD9D449E65F09F4814A2975209333D2B28797385F50E2E9525A357B1F447177C",
+    "last_write_utc": "2026-08-26T19:37:24.8111753Z"
+  },
+  {
+    "path": "src/koawa_agent_v2/ledger/executor.py",
+    "sha256": "8C94AE88C2BCBCFE66A3BFA1D665B2F0449F7F775387327E0F0B9C49DDEC4570",
+    "last_write_utc": "2026-09-06T13:48:24.1914578Z"
+  },
+  {
+    "path": "evals/run_eval.py",
+    "sha256": "F004715CD260919D0D9F9705DBCAB737A7F037B02585A77D95AB95BC79FA5CFA",
+    "last_write_utc": "2026-09-01T08:59:26.2025417Z"
+  },
+  {
+    "path": "redteam/adapter/j2_calibration.py",
+    "sha256": "84C104D40EE4EAC1BA922CBC35D260529874B487A4A73949ECD64A4B6D91C41E",
+    "last_write_utc": "2026-09-06T02:56:22.1363407Z"
+  },
+  {
+    "path": "tests/test_d5_required_profiles.py",
+    "sha256": "CF8A41276F19ED30076BF9BE88AF1036059D46F032A0F5DA3C8D910AAAE91868",
+    "last_write_utc": "2026-09-07T12:36:44.4626934Z"
+  },
+  {
+    "path": "tests/test_d5_vertical_slice.py",
+    "sha256": "4E5D0D6F8A80B7C9F921EC51D0F6047FAA1A2E999154AAC1A8642CC7739BE415",
+    "last_write_utc": "2026-09-07T12:34:47.8106712Z"
+  },
+  {
+    "path": "audits/2026-09-07-platform-audit/content-drift.json",
+    "sha256": "8D654DE8E61E85868E444EFA33F83383263754C7669A36606E902FB1171D30E1",
+    "last_write_utc": "2026-09-07T12:58:18.8978764Z"
+  },
+  {
+    "path": "audits/2026-09-07-platform-audit/config-and-eval.json",
+    "sha256": "5DDBB9542FED99ECE3EB8E12BE044BB1E8545F75A00AD07A7FD27708F594667E",
+    "last_write_utc": "2026-09-07T12:59:48.9920462Z"
+  },
+  {
+    "path": "audits/2026-09-07-platform-audit/focused-tests.txt",
+    "sha256": "8FB897092E81355062C11DABD6EBF07A9D3F3D10F15EE07566182CD8AADCDEAA",
+    "last_write_utc": "2026-09-07T12:59:47.7618975Z"
+  },
+  {
+    "path": "audits/2026-09-07-platform-audit/core-tests.txt",
+    "sha256": "4079BC63AC7D14CD1F0C54C86AB43CCE20D2C523DA41FCB0DAA608B510D46D6C",
+    "last_write_utc": "2026-09-07T13:00:37.5964779Z"
+  }
+]

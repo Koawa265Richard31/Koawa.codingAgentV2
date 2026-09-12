@@ -80,6 +80,7 @@ from ..verification.runner import (
     TrustedCommandRunner,
 )
 from ..verification.git import GitFacade, GitFacadeError
+from ..verification.finalization import VerificationLimits
 from ..verification.tools import build_verified_coding_tool_registry
 from ..plan import PlanBoard
 from .composite_registry import CompositeToolRegistry
@@ -513,9 +514,20 @@ def assemble_execution_plane(
     try:
         runner = _build_command_runner(config, store)
         plan_board = PlanBoard()
+        # Audit F7: the JSON config admits up to 64 required profiles while
+        # VerificationLimits defaults to max_test_runs=4, so 5+ profiles were
+        # structurally unsatisfiable (the 5th reservation always failed).
+        # Derive the budget from the config: every required profile must fit
+        # at least one full pass plus repair cycles, inside the 1..32 bound.
+        required_count = len(config.required_test_profiles or ())
+        verification_limits = VerificationLimits(
+            max_test_runs=min(32, max(4, 4 * required_count))
+        )
         builtin_registry = build_verified_coding_tool_registry(
             config.repo,
             command_runner=runner,
+            required_test_profiles=config.required_test_profiles,
+            verification_limits=verification_limits,
             git_facade=control.git,
             plan_board=plan_board,
             post_build_registrars=tuple(post_build_registrars),

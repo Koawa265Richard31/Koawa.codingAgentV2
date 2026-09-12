@@ -536,7 +536,7 @@ class D5VerticalSliceTest(unittest.TestCase):
             json.loads(second.content)["error"]["code"],
         )
         self.assertEqual(
-            "tests_not_passing",
+            "required_test_profile_not_passing",
             json.loads(final.content)["error"]["code"],
         )
 

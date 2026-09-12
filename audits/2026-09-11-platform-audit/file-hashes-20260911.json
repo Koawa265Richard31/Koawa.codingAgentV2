@@ -1,0 +1,13 @@
+{
+ "head": "f3d2664ca3b848e0d73bf1170ba5a132be6c1e83",
+ "src/koawa_agent_v2/runtime/assembly.py": "3ee404f0ab59f801",
+ "src/koawa_agent_v2/runtime/config.py": "d5eff37e2421bce1",
+ "src/koawa_agent_v2/verification/finalization.py": "e4ff561b210faab8",
+ "src/koawa_agent_v2/verification/tools.py": "3014e636c00a41da",
+ "src/koawa_agent_v2/editing/transaction.py": "8570f5c4eed5af53",
+ "src/koawa_agent_v2/verification/git.py": "a5f987481d1dd5b2",
+ "tests/test_d5_vertical_slice.py": "4e5d0d6f8a80b7c9",
+ "tests/test_runtime_config.py": "f92b173f5d21bf3b",
+ "tests/test_d5_required_profiles.py": "cf8a41276f19ed30",
+ "README.md": "b18fe35e36e54018"
+}

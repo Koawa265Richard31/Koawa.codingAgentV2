@@ -1,0 +1,62 @@
+{
+  "config_schema_version": 3,
+  "repo": "../..",
+  "db": "../../../.koawa-v2-d25-mcp.sqlite3",
+  "provider": {
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key_env": "KOAWA_PROVIDER_KEY",
+    "model": "Qwen/Qwen3.5-35B-A3B",
+    "provider": "siliconflow",
+    "timeout_seconds": 120,
+    "max_stream_seconds": 600,
+    "max_output_tokens": 4096,
+    "reasoning_effort": "off"
+  },
+  "sandbox": {
+    "runner": "docker",
+    "image_id": "sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a",
+    "docker_executable": "docker"
+  },
+  "test_profiles": [
+    {
+      "profile_id": "python_unittest",
+      "argv": ["/usr/local/bin/python", "-m", "unittest", "discover", "-s", "tests"],
+      "timeout_seconds": 120,
+      "max_stdout_bytes": 262144,
+      "max_stderr_bytes": 262144
+    }
+  ],
+  "policy": {
+    "policy_version": "policy-v1",
+    "read_decision": "allow",
+    "patch_decision": "allow",
+    "test_decision": "allow",
+    "principal_scopes": ["workspace.read", "workspace.write", "sandbox.test", "mcp.use"]
+  },
+  "mcp_servers": [
+    {
+      "server_id": "filesystem_reference",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/data"
+      ],
+      "environment": [],
+      "execution_profile": "sandboxed",
+      "image_id": "sha256:adcd84ab9f9dc91e5c3eebe9fa32329545f73ab0b891ecd6def4232740cc4300",
+      "resource_limits": {
+        "cpus": 1.0,
+        "memory_bytes": 536870912,
+        "pids": 256,
+        "tmpfs_bytes": 67108864,
+        "process_count": 1
+      },
+      "read_only_mounts": [],
+      "code_artifacts": [],
+      "container_working_directory": "/data",
+      "decision": "allow",
+      "side_effect_class": "read_only",
+      "recovery_mode": "retry"
+    }
+  ]
+}

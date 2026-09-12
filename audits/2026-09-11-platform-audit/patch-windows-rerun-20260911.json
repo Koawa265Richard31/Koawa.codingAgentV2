@@ -1,0 +1,81 @@
+[
+  {
+    "point": "after_original_moved",
+    "process_exit": 77,
+    "before_recovery": {
+      ".koawa-patch-backup-k8a9gau6.tmp": "old\n",
+      ".koawa-patch-stage-eqyyg54n.tmp": "new\n",
+      ".koawa-patch-stage-x7x8fsjs.tmp": "new\n",
+      "b.txt": "old\n"
+    },
+    "ledger_before": "claimed",
+    "recovery_says_safe": true,
+    "result": {
+      "error": {
+        "code": "patch_target_missing"
+      }
+    },
+    "ledger_after": "failed",
+    "after_recovery": {
+      ".koawa-patch-backup-k8a9gau6.tmp": "old\n",
+      ".koawa-patch-stage-eqyyg54n.tmp": "new\n",
+      ".koawa-patch-stage-x7x8fsjs.tmp": "new\n",
+      "b.txt": "old\n"
+    }
+  },
+  {
+    "point": "after_new_installed",
+    "process_exit": 77,
+    "before_recovery": {
+      ".koawa-patch-backup-tq65lmsj.tmp": "old\n",
+      ".koawa-patch-stage-15ust2s3.tmp": "new\n",
+      "a.txt": "new\n",
+      "b.txt": "old\n"
+    },
+    "ledger_before": "claimed",
+    "recovery_says_safe": true,
+    "result": {
+      "error": {
+        "code": "stale_patch_base"
+      }
+    },
+    "ledger_after": "failed",
+    "after_recovery": {
+      ".koawa-patch-backup-tq65lmsj.tmp": "old\n",
+      ".koawa-patch-stage-15ust2s3.tmp": "new\n",
+      "a.txt": "new\n",
+      "b.txt": "old\n"
+    }
+  },
+  {
+    "point": "after_handler",
+    "process_exit": 77,
+    "before_recovery": {
+      "a.txt": "new\n",
+      "b.txt": "new\n"
+    },
+    "ledger_before": "claimed",
+    "recovery_says_safe": true,
+    "result": {
+      "error": {
+        "code": "stale_patch_base"
+      }
+    },
+    "ledger_after": "failed",
+    "after_recovery": {
+      "a.txt": "new\n",
+      "b.txt": "new\n"
+    }
+  },
+  {
+    "point": "commit_and_rollback_failure",
+    "result": {
+      "error": {
+        "code": "workspace_outcome_unknown"
+      }
+    },
+    "remaining_files": {
+      "b.txt": "old\n"
+    }
+  }
+]

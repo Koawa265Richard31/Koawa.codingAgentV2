@@ -161,7 +161,11 @@ class _VerificationTools:
         try:
             return ToolExecutionResult(self._verification.finalize(context.run_id))
         except VerificationError as error:
-            return tool_error_result(error.code)
+            return tool_error_result(
+                error.code,
+                field="profile_id" if error.profile_id is not None else None,
+                detail=error.profile_id,
+            )
 
     def _command_json(self, result: CommandResult) -> str:
         payload: dict[str, Any] = {
@@ -206,6 +210,7 @@ def build_verified_coding_tool_registry(
     *,
     command_profiles: Sequence[CommandProfile] | None = None,
     command_runner: CommandRunner | None = None,
+    required_test_profiles: Sequence[str] | None = None,
     repository_trust: RepositoryTrust = RepositoryTrust.UNTRUSTED,
     repository_limits: RepositoryToolLimits | None = None,
     patch_limits: PatchLimits | None = None,
@@ -232,7 +237,6 @@ def build_verified_coding_tool_registry(
         if git_facade is not None and not isinstance(git_facade, GitFacade):
             raise TypeError("git_facade must be GitFacade or None")
         git = git_facade or GitFacade(workspace_root, resolver, limits=git_limits)
-        verification = VerificationLedger(git, limits=verification_limits)
         if command_runner is not None:
             if command_profiles is not None:
                 raise ToolConfigurationError("ambiguous_command_runner_configuration")
@@ -247,6 +251,12 @@ def build_verified_coding_tool_registry(
                 command_profiles,
                 trust=repository_trust,
             )
+        verification = VerificationLedger(
+            git,
+            profile_ids=runner.profile_ids,
+            required_test_profiles=required_test_profiles,
+            limits=verification_limits,
+        )
         registry = CodingToolRegistry(resolver, verification, git)
         register_repository_tools(registry, resolver, limits=repository_limits)
         register_patch_tool(

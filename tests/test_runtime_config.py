@@ -179,6 +179,41 @@ class RuntimeConfigTest(unittest.TestCase):
             load_runtime_config(_write_config(self.root, document))
         self.assertEqual("duplicate_test_profile", raised.exception.code)
 
+    def test_single_profile_defaults_to_required(self) -> None:
+        config = load_runtime_config(_write_config(self.root, self._base_document()))
+        self.assertEqual(("python_unittest",), config.required_test_profiles)
+
+    def test_multiple_profiles_require_explicit_nonempty_required_set(self) -> None:
+        document = self._base_document()
+        second = document["test_profiles"][0].copy()
+        second["profile_id"] = "integration"
+        document["test_profiles"].append(second)
+        with self.assertRaises(RuntimeConfigError) as raised:
+            load_runtime_config(_write_config(self.root, document))
+        self.assertEqual("required_test_profiles_required", raised.exception.code)
+
+        for invalid in (None, "unit", [], ["unit", "unit"]):
+            with self.subTest(invalid=invalid):
+                document["required_test_profiles"] = invalid
+                with self.assertRaises(RuntimeConfigError) as caught:
+                    load_runtime_config(_write_config(self.root, document))
+                expected = (
+                    "duplicate_required_test_profile"
+                    if invalid == ["unit", "unit"]
+                    else "invalid_required_test_profiles"
+                )
+                self.assertEqual(expected, caught.exception.code)
+
+    def test_required_profile_must_reference_registered_profile(self) -> None:
+        document = self._base_document()
+        second = document["test_profiles"][0].copy()
+        second["profile_id"] = "integration"
+        document["test_profiles"].append(second)
+        document["required_test_profiles"] = ["unit", "missing"]
+        with self.assertRaises(RuntimeConfigError) as raised:
+            load_runtime_config(_write_config(self.root, document))
+        self.assertEqual("required_test_profile_not_found", raised.exception.code)
+
     def test_mcp_server_config_is_parsed_and_validated(self) -> None:
         document = self._base_document()
         document["mcp_servers"] = [

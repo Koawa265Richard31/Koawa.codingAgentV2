@@ -2,7 +2,75 @@
 
 KoawaAgent V2 is an independent, production-oriented local Coding Agent runtime. It lives in the same Git repository as the legacy Java project, but it does not import from or modify that implementation.
 
-The project is built as 15 executable slices. A slice is complete only when its production code, failure-path tests, runnable demonstration, and design notes agree.
+The project started as 15 executable slices and now includes D16–D25, stabilization,
+and RT/J + PSEC security work. A slice is complete only when its production code,
+failure-path tests, runnable demonstration, and design notes agree.
+
+## Agent handoff snapshot (2026-09-07)
+
+This snapshot covers local commits through `f3d2664`; the latest implementation
+commit is `6367a16`. Recheck Git before using this snapshot as current status:
+
+```powershell
+git status --porcelain
+git log origin/main..HEAD --oneline
+git log -1 --format='%h %s' origin/main
+```
+
+`origin/main` is a cached remote-tracking ref, not a live remote check. At this
+snapshot, five local commits (`ba6b85d` through `f3d2664`) follow cached
+`origin/main` at `e213580`. Existing untracked scratch/evidence files belong to
+other sessions until ownership is established; do not include them in commits
+by default. Follow [AGENTS.md](AGENTS.md) for workspace and ownership rules.
+
+Read these maintained records before choosing the next task:
+
+| Area | Entry point | Status and next work |
+|---|---|---|
+| Runtime slices | [Roadmap](docs/15-day-coding-agent-roadmap.md), [D25](docs/day-25-third-party-mcp-security-governance.md) | D1–D25 implementation history; platform and real-service evidence have explicit scope. |
+| RT/J security evaluation | [Progress](docs/rtj-progress.md), [threat model](docs/agent-security-threat-model.md) | `e213580` records engineering gate closure for the evaluated scenarios; this is not a general security certification. |
+| PSEC platform-security work | [Plan](docs/agent-security-platform-track-plan.md), [progress ledger](docs/psec-progress.md) | S0–S5 research/audit work plus later implementation; use the ledger's later updates and open blockers when older design text differs. |
+| Delegation follow-up | [Semantics-C design](docs/psec/s5-semantics-c-design.md) | B-3 remains open: delegation graph must supply `ancestor_turn_ids` to child loops; takeover × sticky escalation remains unaudited. |
+| Release qualification | [I9 progress](docs/stability/i9-progress.md) | Internal engineering loop closed; production release qualification was not executed. |
+
+Recent local changes:
+
+- `ba6b85d`: PSEC framework mapping, MCP identity/secret and tool-surface audits,
+  PDP/PEP and scoped-taint studies, delegation-security analysis.
+- `a9d8896` / `54c6680`: T7 threat-model entry, boundary tests, audit snapshot,
+  schema-normalization ruling and semantics-C design. Later implementation
+  supersedes their pending activation and B-2 descriptions.
+- `6367a16`: J2 has a production construction/injection path. Configure
+  `RuntimeConfig.canary_key_env` with an environment-variable **name** to enable
+  it; key material comes from the environment. Default configuration leaves the
+  gate disabled; configured missing/invalid keys fail closed. Ancestor-token
+  scanning is implemented in gate/context/loop/executor, but B-3 prevents claiming
+  end-to-end child-agent coverage. Encoded/transformed tokens remain outside this
+  exact-match mechanism. B-2 was resolved by aligning D10 tests and documentation
+  with the existing `additionalProperties: false` coercion.
+- `f3d2664`: records a sealed Mimosa scan of the pre-`6367a16` tree: 13 candidate
+  findings, `coverage=partial`, `runStatus=inconclusive`. Findings still require
+  per-location triage; neither confirmed vulnerabilities nor false positives
+  should be inferred from the scanner labels alone.
+
+Verification provenance: the PSEC ledger reports a Python 3.13 regression run
+for `6367a16` with 1,016 discovered tests, zero failures/errors and 32 skips
+(2026-09-06). Skips are not executed passes. Raw reports are referenced under
+`.dsh_tmp/psec-lanes/` and may not exist in a fresh clone. This README update did
+not rerun that suite. Use an explicit supported interpreter, e.g.
+`py -3.13 -B -m unittest discover -s tests -v` with `PYTHONPATH=src`; bare `python`
+has resolved to unsupported Python 3.11 in previous sessions.
+
+Recovery boundary for implementers: D6/D7 recovery is wired into runtime resume,
+and completed tool results can be reused. Built-in `apply_patch` is currently
+registered as `IDEMPOTENT_WRITE_PROFILE` / `RETRY` in
+[`runtime/assembly.py`](src/koawa_agent_v2/runtime/assembly.py). An orphaned claim
+may therefore be retried through the normal gates and file preconditions. D4's
+stage/backup/rollback is an in-process transaction, not a durable multi-file
+crash-recovery journal. Do not describe retry as automatic restoration or proof
+of the original operation's success. Worktree-specific reconciliation is a
+separate implementation in
+[`workspace/worktree.py`](src/koawa_agent_v2/workspace/worktree.py).
 
 ## Final execution path
 
@@ -46,11 +114,11 @@ It records the current status, dependency graph, per-day interfaces, failure mat
 acceptance gates, prohibited shortcuts, and the exact startup procedure for a new
 conversation. Read it before starting the next slice; this README is only the index.
 
-## Current state: D1–D24 complete
+## Runtime slice overview: D1–D25
 
 D1–D15 are detailed below. D16 (interactive sessions), D17–D20 (robustness
 and repair), D21 (agent-security authenticity package), D22 (hardening),
-D23 (long-task memory closure), and D24 (capability parity) are summarized in
+D23 (long-task memory closure), D24 (capability parity), and D25 (sandboxed MCP) are summarized in
 the sections after the provider instructions; design docs live under
 `docs/day-*.md` and `docs/stability/`.
 
