@@ -295,12 +295,32 @@ class AgentLoop:
         self._compaction_sink = compaction_sink
         self._compaction_epoch = 0
 
+    def bind_compaction_sink(self, sink) -> None:
+        """Audit F12: attach this RUN's durable recorder as the compaction sink.
+
+        The loop is assembled once per process while DurableExecutionRecorder
+        instances are created per run by TurnWorker.execute; the worker binds
+        the fresh recorder before loop.run and clears it on every exit path.
+        Turns are executed one at a time per assembled loop, so the slot never
+        holds two live recorders.
+        """
+        if sink is not None and not callable(getattr(sink, "compact", None)):
+            raise TypeError("compaction_sink must implement compact()")
+        self._compaction_sink = sink
+
+    def clear_compaction_sink(self) -> None:
+        self._compaction_sink = None
+
     def context_chars(self, context: Sequence[ModelContextItem]) -> int:
         """Canonical UTF-8 byte+char budget of the request projection (D23 §5.4)."""
         chars = 0
         for item in context:
-            if isinstance(item, (UserMessage, AssistantMessage)):
+            if isinstance(item, UserMessage):
                 chars += len(item.content)
+            elif isinstance(item, AssistantMessage):
+                # AssistantMessage wraps an AssistantTextItem (.text), while
+                # scripted-test doubles may expose .content directly.
+                chars += len(item.item.text)
             elif isinstance(item, ReasoningSummaryEcho):
                 chars += len(item.item.summary)
             elif isinstance(item, ToolCallEcho):
@@ -324,7 +344,7 @@ class AgentLoop:
             return
         if self._compaction_sink is None:
             return
-        if self.durable_tool_execution and self._pending_tool_calls:
+        if self.durable_tool_execution and self._pending_tool_calls():
             return  # open calls may never be compressed
         current = self.context_chars(context)
         reserve = memory.request_context_reserve_chars
@@ -396,7 +416,9 @@ class AgentLoop:
                 epoch=self._compaction_epoch,
                 source_first_version=first_version,
                 source_last_version=last_version,
-                source_event_ids_digest="",
+                # None lets the durable recorder compute the range digest
+                # from its own source context (an explicit "" is rejected).
+                source_event_ids_digest=None,
                 replacement=replacement,
                 resulting_context_digest="",
                 target_chars=target,

@@ -698,7 +698,14 @@ class DurableExecutionRecorder:
         ):
             raise ValueError("source_last_version must cover source_first_version")
         if not isinstance(replacement, Mapping):
-            raise TypeError("replacement must be a context document")
+            # Audit F12: the loop hands the replacement over as a
+            # ModelContextItem (UserMessage); normalize it into the canonical
+            # context document so the direct production binding
+            # loop -> recorder works without an adapter.
+            try:
+                replacement = context_document(replacement)
+            except Exception:
+                raise TypeError("replacement must be a context document") from None
         if not isinstance(target_chars, int) or isinstance(target_chars, bool) or target_chars < 1:
             raise ValueError("target_chars must be a positive integer")
         if summary_receipt_digest is not None and (

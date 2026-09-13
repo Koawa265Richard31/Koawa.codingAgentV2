@@ -107,6 +107,13 @@ READ_TOOL_NAMES = (
     "git_status",
     "git_diff",
     "finalize_task",
+    # Audit F15: both tools are registered into the production registry and
+    # classified READ_ONLY by the resolver/ledger profile, but were missing
+    # from the policy rule's tool list -> denied_by_default ("registered but
+    # dead").  update_plan mutates only the in-memory PlanBoard; repo_map is
+    # a pure read.
+    "update_plan",
+    "repo_map",
 )
 WRITE_TOOL_NAMES = ("apply_patch",)
 TEST_TOOL_NAMES = ("run_test_profile",)
@@ -171,6 +178,9 @@ class AssembledRuntime:
                 tool_executor=self.executor,
                 completion_gate=None,
                 claim_gate=claim_gate,
+                # Audit F12: chat turns share the same D23 memory budgets;
+                # the worker binds the per-run compaction sink.
+                memory=self.config.memory,
                 limits=AgentLoopLimits(
                     max_model_rounds=self.config.model_rounds,
                     max_tool_calls=self.config.max_tool_calls,
@@ -575,6 +585,10 @@ def assemble_execution_plane(
             client,
             tool_executor=executor,
             completion_gate=registry,
+            # Audit F12: wire the D23 in-run compaction budgets into the
+            # production loop; TurnWorker binds the per-run recorder as the
+            # durable compaction sink.
+            memory=config.memory,
             limits=AgentLoopLimits(
                 max_model_rounds=config.model_rounds,
                 max_tool_calls=config.max_tool_calls,

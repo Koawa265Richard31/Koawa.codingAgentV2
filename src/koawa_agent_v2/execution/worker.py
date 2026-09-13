@@ -358,6 +358,9 @@ class TurnWorker:
 
         def finish_durable() -> None:
             if keeper is not None: keeper.stop()
+            # Audit F12: release this run's compaction sink on every planned
+            # exit path; the raise paths below clear it explicitly.
+            if recorder is not None: self._loop.clear_compaction_sink()
             # The recoverable/lease projection is cleaned by the terminal typed
             # event projector; there is no raw-SQL cleanup in recovery.
 
@@ -378,6 +381,11 @@ class TurnWorker:
                     current.version,
                 )
 
+        # Audit F12: hand this run's durable recorder to the loop as the
+        # in-run compaction sink (the loop only compacts when memory budgets
+        # are configured AND a sink is bound).
+        if recorder is not None:
+            self._loop.bind_compaction_sink(recorder)
         try:
             if resume is not None and resume.phase.value == "ready_to_finalize" and resume.final_text:
                 loop_result = AgentLoopResult(resume.final_text, context, (), resume.model_round, resume.tool_count)
@@ -410,6 +418,8 @@ class TurnWorker:
         except AgentLoopRecoveryBlocked:
             if keeper is not None:
                 keeper.stop()
+            if recorder is not None:
+                self._loop.clear_compaction_sink()
             raise
         except AgentLoopCancelled:
             cancelled = self._runtime.cancel_turn(
@@ -447,6 +457,7 @@ class TurnWorker:
             finish_durable(); return TurnWorkerResult(failed, None)
         except BaseException:
             if keeper is not None: keeper.stop()
+            if recorder is not None: self._loop.clear_compaction_sink()
             try:
                 current = self._runtime.get_turn(running.turn_id)
                 # Terminal events already clean the projection through the
@@ -472,6 +483,7 @@ class TurnWorker:
             )
         except BaseException:
             if keeper is not None: keeper.stop()
+            if recorder is not None: self._loop.clear_compaction_sink()
             raise
         finish_durable()
         return TurnWorkerResult(completed, loop_result)

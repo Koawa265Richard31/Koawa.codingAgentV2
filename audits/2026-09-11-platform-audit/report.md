@@ -282,6 +282,66 @@ daemon 由用户授权拉起（中途掉落一次，按用户指令重新拉起�
 
 六个已确认交付/接线缺陷（F1/F2/F6/F7/F10/F11）全部修复，每项带修复前后对照验证与回归测试；修复引入的一处确定性回归（v1 F11）被全量回归捕获并已在 v2 解决——回归门有效。**T1 已在真实模型下达成跨 kill/resume 的全绿交付（§9.8 b8）**：写入链、恢复链、完成证据绑定、预算可满足性、J2 激活入口五项底座断层闭合。剩余为模型效率层面的预算调优与 T2 消融实验（J2 on 臂入口已通）。**最终全量回归（1036 项）：已落盘 `.dsh_tmp/full-regression-final.txt`——0 errors / 8 skipped / 唯一 1 failure 为已记录的 D25 close-hang flaky（O-F，时序竞态、产品语义无缺陷）；I8/S3 确定性与全部新回归测试通过。**
 
+---
+
+## 10. 审计缺漏登记（2026-09-12，维护者质询"审查还是有缺漏"后补）
+
+**承认漏检**：本报告 §5 矩阵第 4 行（checkpoint/压缩/记忆）标记"测试通过+装配核对"，但未把"机制存在 ≠ 生产接线"这一检查类（F2/F5 均由此抓出）铺到记忆/压缩面。下列发现由维护者要求的专项调查（`docs/context-strategy-investigation.md`，2026-09-12）产出，主审已直接读码复核关键断言。
+
+### F12：回合内压缩（in-run compaction）生产未接线（交付底座 P1）——实测代码确认
+
+`assemble_execution_plane` 与 chat 模式 `build_worker` 构造 AgentLoop 时均不传 `memory=`/`compaction_sink=`（`runtime/assembly.py:575-585、169-181`；参数定义 `execution/loop.py:232,295`）→ 生产 loop 内 `_maybe_compact` 直接 return，soft(48k)/hard(64k) 预算与 fail-closed `context_capacity_exhausted` 全部不生效。机制本身完备（闭合组选择、intended+compacted 原子持久化、重启逐字节等价，`test_d23_*` 43 项绿），仅测试手工接线。**影响：生产长 turn 没有任何上下文压力保护——超长任务会撞服务商上限而非压缩。b8 交付（短任务）未触发该面，"长任务能力"上界评估在接线前需下调。**
+
+### F13：TurnConclusion 无生产写入方（交付/记忆 P2）——实测代码确认
+
+生产 CLI 只构造 `TurnConclusionStore` 交给 SessionHistory **读**（`runtime/cli.py:609-663`、`runtime/session.py:439-449`）；`build/persist` 调用仅存在于测试 → 会话注入序列中的"窗外结论块"在真实运行中**恒为空**（`session.py:400-437` 读空）。机制+11 项测试齐全，写入方（turn 终态后构建并持久化）缺位。
+
+### F14：模型无主动记忆工具（能力缺口，非缺陷）——实测代码确认
+
+工具目录（read_file/list_files/search_text/apply_patch/run_test_profile/git_status/git_diff/finalize_task/update_plan/repo_map）不含 recall/memory/journal；`/recall`（IDF 词法召回）与 `/journal` 仅是 CLI 用户命令（`cli.py:754-815`）。模型的跨 turn 记忆获取完全被动依赖注入序列。
+
+### 附带确认
+
+- MemoryConfig 六字段声明零消费（`conclusions_enabled`、`conclusion_model_summary`、`recall_scan_max_turns`、`max_compaction_source_groups`、`compaction_summary_max_chars`、`journal_inject_latest`）。
+- D13 Compactor（`context/compaction.py`）为演示级，仅 `runtime/unified.py` 使用。
+- 压缩不可逆：被丢原文无回到模型上下文的路径（会话级与回合内同）。
+
+### 对既有判定的影响
+
+§9.7 的"五项底座断层闭合"结论不变（F1-F11 修复与验证独立成立）；但"长任务交付能力"的评估上界在 F12 接线前应下调——此前 b8/a6/a7 的任务规模均未触及上下文压力面，golden 100 轮压缩证据只覆盖测试接线。**同类扫描已对全库执行完毕（§10.1），"机制-接线"检查自此列为矩阵每行的必查项。**
+
+**修正一处本审计的错误解读**：§9.4 曾把真实模型运行中 `repo_map` 被 `denied_by_default` 记为"policy 默认拒绝按设计工作（正面事实）"。扫描证明这是**接线断点而非设计行为**（见 F15）——当时的正面解读是错的。
+
+### 10.1 全库"机制-接线"扫描结果（2026-09-12，关键断点主审已直接复核）
+
+扫描范围：生产链（cli._real_main → app → assembly → AgentLoop/TurnWorker/LedgerExecutor/registry）之外的 16 个候选机制面。结果分三档：
+
+**新确认断点（本次新抓出）**
+
+- **F15（P1）：update_plan 与 repo_map"注册即死"**——两工具已注册进生产 registry（`verification/tools.py:272-274`），但 assembly 的 PolicyEngine 规则集只有 READ/WRITE/TEST 三组工具名常量（`runtime/assembly.py:103-110,1057-1091`，主审复核：READ_TOOL_NAMES=(read_file,list_files,search_text,git_status,git_diff,finalize_task)，不含二者）→ 生产调用必 `denied_by_default`（policy.py:1090）。影响：D24 计划/进度保持链（update_plan→PlanBoard→journal→上下文投影）与 repo_map 定向能力在生产不可驱动；测试用裸 registry 绕过 policy 故全绿。**这解释了真实模型 a4-a6 首工具 repo_map 被拒的现象。**
+- **F16（P2，安全相关）：claim_gate 仅首轮 chat 接线**——app.py:229 唯一传 `claim_gate=True`；resume/approve 恢复路径 `build_worker((), task_mode=False)`（app.py:463-467）与 task 模式主 loop 均用默认 False（assembly.py:277-284）→ 恢复轮的"声称改文件而无写工具"防幻觉门缺失（主审复核：全库仅 app.py:229 一处）。
+
+**确认维持的既有断点**：F12（in-run 压缩）、F13（TurnConclusion 写端）、F5 类三包（agents/、context/、workspace/integration 仅 unified.py 演示引用；post_build_registrars 扩展点在 src 内无装配方使用）、journal_inject_latest 死字段。
+
+**观察项（非缺陷）**：trace 事件生产只写不读（`TraceStore.read` 零调用，排障价值仅剩 drop 计数）；redteam/ 为独立离线 harness（设计如此）；sandbox/policy/approval/security(J2)/turn_summary/D20/D19 各面生产正常（锚点见扫描记录）。
+
+**系统性教训**：断点的同型模式是"机制带完整测试、src 内有定义、但生产唯一装配点 assembly.py 不构造/不传参/不分类"。测试绿与"机制存在"都不能替代对装配点的逐项核对——本轮已把该检查固化为矩阵每行必查项。
+
+### 10.2 接线修复（维护者指令"修复"，2026-09-12）
+
+F12/F13/F15/F16 四项全部修复，回归测试 `tests/test_wiring_memory_plane.py` 4/4；过程中额外修复三个被未接线状态掩盖的预存缺陷：
+
+| 项 | 修复 | 附加发现/修复 |
+|---|---|---|
+| F15 | READ_TOOL_NAMES 补 update_plan/repo_map（assembly.py；二者 resolver 侧本就 READ_ONLY 分类） | — |
+| F16 | `_execute` chat/resume worker 传 `claim_gate=True`（app.py，与首轮 chat 一致） | — |
+| F12 | assembly 两处 AgentLoop 传 `memory=config.memory`；AgentLoop 新增 bind/clear_compaction_sink；TurnWorker 每 run 绑定 recorder、全退出路径清理 | **F17（新，预存真 bug）**：loop `_maybe_compact` 守卫引用 `_pending_tool_calls` 方法对象而非调用——绑定方法恒真，durable executor 下压缩**永远早退**；所有 D23 测试都用非 durable executor 恰好绕开。已修为调用。**契约缺陷 ×2**：loop 传 `source_event_ids_digest=""`（recorder 要求 None 才自算）、recorder 不接受 UserMessage 替换物（需 context_document 归一化）——均修。**context_chars 假设错误**：AssistantMessage 实为 `.item.text` 非 `.content`（生产启用后才暴露）。 |
+| F13 | `app._execute` 终态后 build+persist TurnConclusion（gated on `memory.conclusions_enabled`，best-effort 不影响 turn 终态） | 死字段 `conclusions_enabled` 就此变为活的配置开关 |
+
+验证：受影响面 17 个套件 156/156 绿（D23 全部、D16/D19 交互、D24、D6、装配）；全量回归 1040 项 / 0 errors / 唯一失败为已知 D25 flaky（skips=32 为 Docker daemon 掉线，与本轮无关）。**真实模型 a8**：生产链首次真实触发 in-run 压缩（10 个 `run.context-compact*` 事件）与 TurnConclusion 生产写入（1 个）；终态 `context_capacity_exhausted` 系验证配置把 soft 压至 2500 过紧所致的诚实 fail-closed——机制全部按设计工作，生产默认预算（48k/64k）不受影响。repo_map/update_plan 在 a8 中未被模型主动调用（非被拒），policy 放行由单元测试证明。
+
+**对判定的更新**：§10.1 的两条新断点与 F12/F13 闭合；"机制-接线"债务清单剩余项为设计性空位（agents/context/workspace 三包属 F5 范畴的 D12+ 欠账，journal_inject_latest 死字段待 D19 owner 决定）。
+
 ### 9.8 三阶段交付结果：T1 首次真实模型全绿交付（跨 kill/resume）
 
 - **a6**（F10 修复后首跑）：模型独立完成预置 bug 修复（salt 顺序，需跨模块推理）+ 创建 token 模块与测试，patch 成功率 0/26 → 11/17；因 SiliconFlow 流超时（`openai.stream_deadline_exceeded`）终止于测试迭代中段，独立验收 9 测试中 2 项未完善。分类：未交付（外部时延）。

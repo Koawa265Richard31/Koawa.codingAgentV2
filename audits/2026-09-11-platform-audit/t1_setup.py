@@ -59,9 +59,17 @@ CFG = {
     "mcp_servers": [],
     "model_rounds": 40,
     "max_tool_calls": 120,
+    "memory": {
+        "request_context_soft_chars": 2500,
+        "request_context_hard_chars": 8000,
+        "request_context_reserve_chars": 400,
+        "compaction_target_chars": 1800,
+    },
 }
 
 TASK = """You are working in a small Python repo with modules models/ and services/ and tests under tests/.
+
+Working style: begin by calling repo_map to orient yourself, and keep the authoritative plan current with update_plan as you make progress (mark steps done as you complete them).
 
 Two jobs:
 

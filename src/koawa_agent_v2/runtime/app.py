@@ -461,15 +461,39 @@ class AppRuntime:
     ) -> TurnWorkerResult:
         execution = self._ensure_execution_plane()
         worker = (
-            execution.build_worker((), task_mode=False)
+            # Audit F16: chat/resume turns must keep the D22 anti-hallucination
+            # claim gate the first chat turn already has (chat passes
+            # claim_gate=True); the resume path used the default False.
+            execution.build_worker((), task_mode=False, claim_gate=True)
             if turn_id in self._chat_turn_ids
             else execution.worker
         )
-        return worker.execute(
+        result = worker.execute(
             turn_id,
             version,
             event_sink=event_sink,
         )
+        self._record_turn_conclusion(result.turn)
+        return result
+
+    def _record_turn_conclusion(self, turn) -> None:
+        """Audit F13: persist a TurnConclusion for every terminal Turn.
+
+        Best-effort and gated on memory.conclusions_enabled: a conclusion is
+        an enhancement for later sessions (the SessionHistory conclusion
+        block), never a turn-terminal side effect.  Non-terminal Turns
+        (waiting/approval) are rejected by build() and simply skipped.
+        """
+        if not self.config.memory.conclusions_enabled:
+            return
+        try:
+            from .turn_conclusion import TurnConclusionStore
+
+            store = TurnConclusionStore(self.assembled.store, self.assembled.runtime)
+            conclusion = store.build(turn.turn_id)
+            store.persist(conclusion)
+        except Exception:
+            return
 
     def _truth_outcome(self, result: TurnWorkerResult) -> CommandOutcome:
         truth = RuntimeTruthVerifier(
