@@ -206,6 +206,8 @@ class SessionHistory:
         self._project_note = project_note
         self._turns: list[SessionTurn] = []
         self._compacted: list[CompactionResult] = []
+        self._preloaded_summaries: list[str] = []
+        self._preloaded_used: int = 0
         self._compacted_up_to = 0
         # D23 §7 journal reminder state (turns since last successful journal).
         self._last_journal_turn_count = 0
@@ -242,6 +244,23 @@ class SessionHistory:
     @property
     def turns(self) -> tuple[SessionTurn, ...]:
         return tuple(self._turns)
+
+    def preload_summaries(self, summaries: Sequence[str]) -> None:
+        """D13-D23-005: seed persisted cross-turn summaries (oldest first).
+
+        maybe_compact consumes them positionally instead of re-calling the
+        summary model after a restart.  Extra preloads beyond regenerated
+        blocks are ignored.
+        """
+        for text in summaries:
+            if isinstance(text, str) and text.strip():
+                self._preloaded_summaries.append(text)
+
+    def export_summaries(self) -> tuple[str, ...]:
+        """Persisted-summary export for the session marker (D13-D23-005)."""
+        return tuple(
+            block.summary for block in self._compacted if block.summary is not None
+        )
 
     def append(self, turn: SessionTurn) -> None:
         """Append one turn whose user text is canonicalized at the entry point.
@@ -292,14 +311,22 @@ class SessionHistory:
             return tuple(self._compacted)
         summary: str | None = None
         if self._summarize is not None:
-            transcript = "\n".join(
-                f"user: {turn.user_input}\nagent: {turn.final_text or ''}"
-                for turn in new_dropped
-            )
-            try:
-                summary = self._summarize(transcript)
-            except Exception:
-                summary = None  # failure path: authoritative projection still usable
+            # D13-D23-005: replay a persisted summary for the same block
+            # position before paying for a new model call.
+            if self._preloaded_summaries and self._preloaded_used < len(
+                self._preloaded_summaries
+            ):
+                summary = self._preloaded_summaries[self._preloaded_used]
+                self._preloaded_used += 1
+            else:
+                transcript = "\n".join(
+                    f"user: {turn.user_input}\nagent: {turn.final_text or ''}"
+                    for turn in new_dropped
+                )
+                try:
+                    summary = self._summarize(transcript)
+                except Exception:
+                    summary = None  # failure path: authoritative projection still usable
         authoritative = _authoritative_projection(new_dropped)
         result = CompactionResult(
             authoritative=authoritative,
@@ -341,10 +368,37 @@ class SessionHistory:
         reminder = self._journal_reminder()
         if reminder is not None:
             items.append(reminder)
+        rendered = []
+        total = 0
         for index, block in enumerate(self._compacted):
             content = block.authoritative
             if block.summary is not None:
                 content += f"\n{_UNTRUSTED_MARKER}\n{block.summary}"
+            rendered.append((index, content))
+            total += len(content)
+        # D13-D23-004: the compacted-block total stays bounded - the oldest
+        # blocks fold into one deterministic digest line when over budget.
+        cap = max(1000, self._limits.max_chars // 4)
+        merged_count = 0
+        merged_chars = 0
+        while total > cap and len(rendered) > 1:
+            index, content = rendered.pop(0)
+            merged_count += 1
+            merged_chars += len(content)
+            total -= len(content)
+        if merged_count:
+            items.append(
+                UserMessage(
+                    input_id="session:compact:merged",
+                    content=(
+                        "[session:compact-merged]"
+                        f"older_compaction_blocks={merged_count}"
+                        f" chars={merged_chars}"
+                        "[/session:compact-merged]"
+                    ),
+                )
+            )
+        for index, content in rendered:
             items.append(
                 UserMessage(
                     input_id=f"session:compact:{index}",
@@ -613,6 +667,15 @@ def _conclusion_text(conclusion) -> str:
         lines.append("uncertainty=" + ",".join(conclusion.uncertainty_codes))
     if conclusion.open_obligations:
         lines.append("obligations=" + ",".join(conclusion.open_obligations))
+    # D13-D23-002: surface persisted test-evidence references (bounded) so an
+    # out-of-window conclusion remains verifiable instead of bare history.
+    evidence_refs = getattr(conclusion, "test_evidence_refs", None) or ()
+    if evidence_refs:
+        lines.append(f"test_evidence_refs={len(evidence_refs)}")
+        for ref in evidence_refs[:4]:
+            digest = str(ref.get("evidence_digest", "")) if isinstance(ref, dict) else ""
+            if digest:
+                lines.append(f"evidence_digest_prefix={digest[:16]}")
     lines.append("[/reconstructed-turn-conclusion]")
     if conclusion.untrusted_summary:
         lines.append(

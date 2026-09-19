@@ -630,17 +630,33 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
     thread_id: _UUID | None = None
     if marker.exists():
         try:
-            thread_id = _UUID(
-                _json.loads(marker.read_text(encoding="utf-8"))["thread_id"]
-            )
+            document = _json.loads(marker.read_text(encoding="utf-8"))
+            thread_id = _UUID(document["thread_id"])
         except Exception:
             thread_id = None
+    preloaded_summaries: list[str] = []
+    if marker.exists():
+        try:
+            document = _json.loads(marker.read_text(encoding="utf-8"))
+            saved = document.get("summaries")
+            if isinstance(saved, list):
+                preloaded_summaries = [item for item in saved if isinstance(item, str)]
+        except Exception:
+            preloaded_summaries = []
 
     def save_marker() -> None:
         if thread_id is None:
             return
         marker.write_text(
-            _json.dumps({"thread_id": str(thread_id)}, ensure_ascii=False),
+            _json.dumps(
+                {
+                    "thread_id": str(thread_id),
+                    # D13-D23-005: persist cross-turn summaries so a restart
+                    # replays them instead of re-calling the summary model.
+                    "summaries": list(history.export_summaries()),
+                },
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
 
@@ -665,6 +681,9 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
             )
         except SessionHistoryError:
             thread_id = None
+    # D13-D23-005: replay persisted cross-turn summaries after a restart.
+    if preloaded_summaries:
+        history.preload_summaries(preloaded_summaries)
 
     # D24 W1: bind the assembly-owned plan board to the durable thread stream
     # and project it into every context build. Journal load/bind failure is
@@ -886,6 +905,18 @@ def _interactive_main(app, *, thinking: _ThinkingDisplay) -> int:
         elif payload.get("status") == "waiting_for_approval":
             drain_approvals()
         else:
+            # D13-D23-003: failed turns enter the same-process history so the
+            # next round's context carries the failure echo like a restart would.
+            if payload.get("turn_id"):
+                history.append(
+                    SessionTurn(
+                        user_input=text,
+                        final_text=None,
+                        turn_id=_UUID(payload["turn_id"]),
+                        status=payload.get("status"),
+                        error=payload.get("error"),
+                    )
+                )
             error_text = payload.get("error") or ""
             print(f"  [turn failed: {outcome.code}]")
             if "resource_budget_exceeded" in error_text:
