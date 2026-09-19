@@ -1,3 +1,0 @@
-<frozen runpy>:128: RuntimeWarning: 'koawa_agent_v2.runtime.cli' found in sys.modules after import of package 'koawa_agent_v2.runtime', but prior to execution of 'koawa_agent_v2.runtime.cli'; this may result in unpredictable behaviour
-{"code":"turn_failed","ok":false,"payload":{"error":"d2:model_finish_max_output_tokens","evidence_digest":null,"final_text":null,"ledger_uncertain":false,"run_id":"b857804a-a48f-585d-b6b0-e59d1634fba1","run_status":"failed","status":"failed","thread_id":"4fb32a4a-cbfd-5cf7-8e70-f58d6171f5c6","turn_id":"e0f97a74-4c00-5b47-8492-ecc9fed4d342","workspace_uncertain":false}}
-exit=1
