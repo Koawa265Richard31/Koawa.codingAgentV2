@@ -136,7 +136,10 @@ def repository_tool_specs(
 
     path_schema = {
         "type": "string",
-        "description": "Workspace-relative path using forward slashes.",
+        "description": (
+            "Path relative to the REPOSITORY ROOT using forward slashes, "
+            "e.g. 'src/main.py' - never prefix the repository folder name."
+        ),
         "minLength": 1,
         "maxLength": limits.max_path_chars,
     }

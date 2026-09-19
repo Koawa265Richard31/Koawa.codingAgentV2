@@ -145,7 +145,9 @@ class GoldenCompactionTest(unittest.TestCase):
     def test_100_rounds_compact_at_least_three_times_and_restart_parity(self):
         memory = MemoryConfig.from_mapping({
             "request_context_soft_chars": 4000,
-            "request_context_hard_chars": 12000,
+            # hard raised for D13-D23-001: richer replacement blocks carry bounded
+            # result-fact lines, so 100 rounds legitimately hold more than before.
+            "request_context_hard_chars": 20000,
             "request_context_reserve_chars": 800,
             "compaction_target_chars": 2000,
             "conclusion_max_chars": 1000,

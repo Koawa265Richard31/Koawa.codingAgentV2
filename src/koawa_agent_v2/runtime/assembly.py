@@ -178,7 +178,7 @@ class AssembledRuntime:
                 tool_executor=self.executor,
                 completion_gate=None,
                 claim_gate=claim_gate,
-                # Audit F12: chat turns share the same D23 memory budgets;
+                # Audit S6/F12: chat turns share the same D23 memory budgets;
                 # the worker binds the per-run compaction sink.
                 memory=self.config.memory,
                 limits=AgentLoopLimits(
@@ -189,6 +189,12 @@ class AssembledRuntime:
                 trace_sink=self.trace_sink,
                 correlation_id=self.correlation_id,
             )
+        elif claim_gate:
+            # Audit S6/DS finding: silently ignoring claim_gate for the task
+            # path hid the D22 anti-hallucination gate from task-mode callers.
+            # The task loop enables it permanently instead (see self.loop).
+            if not self.loop._claim_gate:
+                raise RuntimeError("claim_gate requires the task loop to enable it")
         return TurnWorker(
             self.runtime,
             loop,
@@ -585,6 +591,11 @@ def assemble_execution_plane(
             client,
             tool_executor=executor,
             completion_gate=registry,
+            # Audit S6 (DS smoke finding): the task path must keep the D22
+            # anti-hallucination gate too - a STOP that claims file changes
+            # without successful write tools fails fast here instead of at
+            # finalize with a vaguer error.
+            claim_gate=True,
             # Audit F12: wire the D23 in-run compaction budgets into the
             # production loop; TurnWorker binds the per-run recorder as the
             # durable compaction sink.

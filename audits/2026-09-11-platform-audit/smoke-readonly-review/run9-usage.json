@@ -1,0 +1,13 @@
+{
+ "run9_usage": [
+  {
+   "input": 3051,
+   "cached": 2816
+  },
+  {
+   "input": 3475,
+   "cached": 2816
+  }
+ ],
+ "run9_note": "turn completed with empty final_text; model emitted raw <tool_calls> XML in content"
+}

@@ -70,7 +70,11 @@ def repo_map_tool_spec(limits: RepoMapLimits | None = None) -> ToolSpec[RepoMapA
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Workspace-relative root using forward slashes.",
+                    "description": (
+                        "Root relative to the REPOSITORY ROOT using forward "
+                        "slashes, e.g. 'src/koawa_agent_v2/runtime' - never "
+                        "prefix the repository folder name; use '.' for the root."
+                    ),
                     "minLength": 1,
                     "maxLength": 512,
                 },
