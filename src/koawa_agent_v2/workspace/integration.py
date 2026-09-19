@@ -224,7 +224,18 @@ class DurableArtifactIntegrator:
         set_digest = _digest_doc([str(item.artifact_id) for item in ordered])
         receipt_id = uuid5(NAMESPACE_URL, f"koawa-v2:integration:{set_digest}")
         if existing := self._load_receipt_head(receipt_id):
-            return DurableIntegrationResult(existing, 0, "success")
+            # D12-I7-001: replay the RECORDED result, never a canned success -
+            # a persisted known_negative receipt must surface as one.
+            payload = self._load_receipt(existing)
+            exit_code = payload.get("test_exit_code")
+            kind = payload.get("test_result_kind")
+            if (
+                not isinstance(exit_code, int)
+                or isinstance(exit_code, bool)
+                or kind not in ("success", "known_negative")
+            ):
+                raise AgentError("integration_receipt_result_invalid")
+            return DurableIntegrationResult(existing, exit_code, kind)
         if self.integration_root.exists():
             if self._common_git_dir(self.integration_root) != self._common_git_dir(self.repo_root):
                 raise AgentError("integration_root_identity_mismatch")

@@ -1,0 +1,116 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "memory_retrieval_20260919",
+  "sourceEvidence": {
+    "kind": "document_collection",
+    "label": "D13-D23 memory and request-capacity findings plus inspected source",
+    "collectionSha256": "9bdd750eed1ae6b64db0d14e037709f7220f91457cd8dcedd474666adc03381e",
+    "artifactCount": 2,
+    "sourceDrift": "present",
+    "targetRevision": "2d42746"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "Controlled retrieval from existing bounded tool results is a first design candidate; added long-term result capture needs separate evidence and data policy."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": ["incremental", "medium_term"],
+    "nonNegotiables": [
+      "Prioritize test and MCP results over historical file-content snapshots.",
+      "MCP retrieval candidates must originate from allowlisted services and tools.",
+      "Sensitive logs must not be sent to the model service on first tool return or historical retrieval.",
+      "Retrieval must not expand sensitive-content visibility or grant external-send authority."
+    ],
+    "assumptions": [
+      "No measured storage, latency or retention budget was supplied.",
+      "Concurrent source edits must be rechecked before implementation."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "bounded-result-retrieval",
+      "title": "Bounded historical tool-result retrieval",
+      "summary": "Give the model scoped access to safe projections of prior test and MCP results without treating history as authority.",
+      "diagnosis": "Durable results exist, but there is no model-facing scoped retrieval path or complete request-capacity check; redaction alone cannot certify safe visibility.",
+      "evidence": [
+        {"claimType": "observed", "sourceKind": "document", "evidenceId": "E1", "path": "docs/open-active/d13-d23-memory-followup-gaps-2026-09-19.md", "claim": "Request budget does not account for the complete final request."},
+        {"claimType": "observed", "sourceKind": "document", "evidenceId": "E2", "path": "docs/open-active/d13-d23-request-capacity-gap-2026-09-19.md", "claim": "The capacity gap has a separate detailed record."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E3", "path": "src/koawa_agent_v2/ledger/store.py", "claim": "The ledger persists a redacted result string in versioned JSON events; recovery/redaction.py covers named patterns rather than all sensitive values."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E4", "path": "src/koawa_agent_v2/verification/tools.py", "claim": "Tool handlers may crop model-facing output; finalization.py does not include stdout or stderr in the final evidence document."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E5", "path": "src/koawa_agent_v2/sandbox/runtime.py", "claim": "The Docker runner disables network and mounts the whole repository read-only; runtime/assembly.py may select this or a trusted host runner."},
+        {"claimType": "inferred", "sourceKind": "source", "path": "src/koawa_agent_v2/runtime/session.py", "claim": "Current history projection cannot reconstruct full tool-result bodies for the model."}
+      ],
+      "desiredInvariants": [
+        "Every result reference is bound to a caller, thread, workspace, tool call and persisted version.",
+        "Test and MCP free-text output must pass a model-ingress gate before the first tool result and every historical replay; unknown or sensitive logs yield metadata only.",
+        "Unknown sensitivity yields metadata only; retrieved text conveys no approval authority.",
+        "All retrieved text and tool definitions count toward a pre-send full-request budget.",
+        "Each response states capture, retention and read truncation separately."
+      ],
+      "proposalPath": "proposals/bounded-result-retrieval.md",
+      "options": [
+        {
+          "optionId": "existing-events",
+          "title": "Index safe metadata from existing events",
+          "kind": "incremental",
+          "summary": "Gate first-return tool output, then build a rebuildable metadata index over old events without releasing old result bodies.",
+          "diagramPaths": {"before": "diagrams/bounded-result-retrieval-before.mmd", "after": "diagrams/bounded-result-retrieval-existing-events-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "E1", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "A complete final request check is still required."},
+            {"evidenceId": "E2", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Retrieval quotas cannot replace total request accounting."},
+            {"evidenceId": "E3", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Scoped reads narrow new exposure; existing stored sensitive data remains a separate concern."},
+            {"evidenceId": "E4", "effect": "unknown", "tacticalFixRequired": false, "rationale": "Already cropped content cannot be recreated."},
+            {"evidenceId": "E5", "effect": "unaffected", "tacticalFixRequired": true, "rationale": "Search over existing results does not prove secret-free test execution; a separate safe execution boundary is required for rich output."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "A model-ingress gate protects both initial tool return and scoped historical reads; old persisted content may still be sensitive.", "validationPlan": "Test secret-bearing first returns, cross-thread denial and unknown-sensitivity metadata-only behavior."},
+            {"dimension": "performance", "direction": "regresses", "confidence": "low", "basis": "hypothetical", "assessment": "Index and read queries add local database work.", "validationPlan": "Measure p95 retrieval latency on representative long threads."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "low", "basis": "hypothetical", "assessment": "A bounded index and page buffers use memory.", "validationPlan": "Measure peak process memory and index size."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "low", "basis": "hypothetical", "assessment": "Historical failures may become diagnosable, provided the needed text survived cropping.", "validationPlan": "Compare task recovery and retry counts using the same scenarios."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Search denial, stale references and index rebuilding need observable status.", "validationPlan": "Exercise index corruption and recovery diagnostics."},
+            {"dimension": "migration", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "Existing result events need no body migration; derived indexes can be rebuilt.", "validationPlan": "Build and remove the index against a copy of an old database."}
+          ],
+          "residualRisks": ["Existing result bodies may contain sensitive text missed by regex redaction.", "Old metadata alone may not support diagnosis."],
+          "implementationReadiness": {"affectedComponents": ["src/koawa_agent_v2/ledger/store.py", "src/koawa_agent_v2/execution/loop.py", "src/koawa_agent_v2/runtime/session.py"], "workPackages": ["Define model-ingress and visibility policy", "Gate first-return tool output", "Build rebuildable short index and paged reader", "Enforce full request budget"], "acceptanceCriteria": ["Secret-bearing logs do not enter model requests", "Cross-thread reads fail", "Unknown sensitivity returns metadata only", "Retrieved content cannot bypass request capacity"], "migrationNotes": ["Existing events are not automatically low sensitivity"], "rollback": "Disable search and read endpoints and discard the derived index; preserve the model-ingress gate."}
+        },
+        {
+          "optionId": "bounded-capture",
+          "title": "Persist the model-safe first-return projection",
+          "kind": "structural",
+          "summary": "Generate a bounded model-safe projection before the first tool return and persist that exact projection for later scoped retrieval.",
+          "diagramPaths": {"before": "diagrams/bounded-result-retrieval-before.mmd", "after": "diagrams/bounded-result-retrieval-bounded-capture-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "E1", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "The final request capacity check remains mandatory."},
+            {"evidenceId": "E2", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Longer storage does not change provider context limits."},
+            {"evidenceId": "E3", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Pre-storage classification is needed beyond pattern redaction."},
+            {"evidenceId": "E4", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Allowed diagnostics survive as the first-return projection, but never executor capture truncation."},
+            {"evidenceId": "E5", "effect": "unaffected", "tacticalFixRequired": true, "rationale": "Longer capture still needs a separate safe execution boundary before rich output can reach the model."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "low", "basis": "hypothetical", "assessment": "The same model-ingress decision governs first return and retrieval; a projection mistake can persist sensitive data.", "validationPlan": "Adversarial tests for secrets and private data in first-return and historical test/MCP output."},
+            {"dimension": "performance", "direction": "regresses", "confidence": "low", "basis": "hypothetical", "assessment": "Additional serialization and writes increase tool completion latency.", "validationPlan": "Benchmark tool completion p95 on large outputs."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Longer bounded buffers and indexes require more resources.", "validationPlan": "Measure peak memory and database growth per long task."},
+            {"dimension": "reliability", "direction": "unknown", "confidence": "low", "basis": "hypothetical", "assessment": "Better diagnostics compete with new write and cleanup failure modes.", "validationPlan": "Inject write, replay and cleanup failures."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Classification, retention deadlines and cleanup require monitoring and incident procedures.", "validationPlan": "Review rejection telemetry and rehearse expired-data cleanup."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "New event types and durable data policies require compatibility and rollback decisions.", "validationPlan": "Upgrade and roll back a copied old database."}
+          ],
+          "residualRisks": ["Content discarded by executor capture limits remains unavailable.", "An unsafe first-return projection can persist sensitive material."],
+          "implementationReadiness": {"affectedComponents": ["src/koawa_agent_v2/verification/tools.py", "src/koawa_agent_v2/mcp/connection_manager.py", "src/koawa_agent_v2/control/event_store.py", "src/koawa_agent_v2/execution/loop.py"], "workPackages": ["Define model-safe projection and policy version", "Persist the first-return projection as a typed event", "Add scoped index, reader and budget gate"], "acceptanceCriteria": ["Unknown sensitivity projects metadata only", "Historical reads reveal no more than first return", "Per-result and per-thread quotas apply", "Read responses expose all truncation states"], "migrationNotes": ["Old events are not retroactively promoted to low sensitivity"], "rollback": "Stop new projection persistence and reads; preserve first-return model-ingress checks."}
+        }
+      ],
+      "recommendedOptionId": "bounded-capture",
+      "recommendation": "Expose only metadata from old events; for new results persist the exact model-safe first-return projection and retrieve that projection under current scope and budget checks."
+    }
+  ],
+  "openQuestions": [
+    "Which test and MCP outputs are safe to expose beyond metadata?",
+    "What deterministic structured diagnostics let the model repair failures without reading free-text logs?",
+    "Can any test profiles be proven to run only on synthetic model-shareable inputs with no access to credentials, sensitive files or network?",
+    "Would a separately constructed allowlisted workspace be required for model-shareable test output?",
+    "Who owns test-profile output contracts, and what runtime control permits each structured failure field to reach the model?",
+    "What retention duration and per-thread storage quota should apply?",
+    "How will content-level egress policy consume data labels from retrieval?"
+  ]
+}

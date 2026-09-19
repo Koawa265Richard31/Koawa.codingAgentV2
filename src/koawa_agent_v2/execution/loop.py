@@ -386,6 +386,21 @@ class AgentLoop:
             batch = selected[:8]
             first = batch[0].first_context_index
             last = batch[-1].last_context_index
+            # D13-D23-001: keep bounded result semantics - error markers plus
+            # a first diagnostic line per result - so a compacted failure
+            # cannot become indistinguishable from a success.
+            semantic_lines: list[str] = []
+            for group in batch:
+                for result in group.results:
+                    marker = "error" if result.is_error else "ok"
+                    stripped = result.content.strip()
+                    head = stripped.splitlines()[0][:100] if stripped else "(empty)"
+                    semantic_lines.append(f"[result {marker}] {head}")
+            semantic_lines = semantic_lines[:4]
+            semantic_block = "".join(
+                f"[untrusted-result-fact]{line}[/untrusted-result-fact]\n"
+                for line in semantic_lines
+            )
             content = "\n".join(
                 (
                     "[run-history-compaction epoch=%d]" % (self._compaction_epoch + 1),
@@ -401,6 +416,7 @@ class AgentLoop:
                         ),
                     ),
                     "[/untrusted-history-summary]",
+                    semantic_block,
                     "[authoritative-execution-state]tool_count=%d[/authoritative-execution-state]"
                     % self._tool_count_known(),
                     "[/run-history-compaction]",

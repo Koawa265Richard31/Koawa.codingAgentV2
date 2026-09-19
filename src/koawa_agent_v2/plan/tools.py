@@ -43,7 +43,8 @@ def plan_tool_spec(limits: PlanLimits | None = None) -> ToolSpec[UpdatePlanArgum
     return ToolSpec(
         "update_plan",
         "Replace the authoritative task plan. Send the FULL plan every call "
-        "(pending and done steps); ids are positions 1..N.",
+        "(pending and done steps); ids are positions 1..N. Each status must "
+        "be exactly 'pending' or 'done' - no other values are accepted.",
         UpdatePlanArguments,
         {
             "type": "object",

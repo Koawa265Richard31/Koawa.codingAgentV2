@@ -12,6 +12,8 @@
 | D13-D23-003 | CLI 连续聊天失败回合未加入历史，失败回显无法自动覆盖该路径 | 静态接线缺口确认；未做端到端动态复现 |
 | D13-D23-004 | 跨回合压缩块持续累积，不受近期窗口限额约束 | 静态确认及 SessionHistory 级复现；未做长会话端到端耗尽测试 |
 | D13-D23-005 | 跨回合模型摘要只存内存，重启后重新生成 | 静态恢复路径确认；未测真实 provider 的文本差异与费用 |
+| D13-D23-006 | 请求容量计数遗漏指令与工具定义，硬上限检查依赖压缩路径 | 静态确认并复现指令漏计；未复现真实 provider 超窗 |
+| D13-D23-007 | conclusion_model_summary 与 journal_inject_latest 缺少运行时消费路径 | 静态引用核查确认；未做真实模型开关对照 |
 | REVIEW-001 | 高耦合模块修改的依赖分析、组合验证与返工成本 | 用户指定待核查项，尚未认定实现缺陷 |
 
 ## D12-I7-001：复用失败集成回执时返回成功状态
@@ -295,3 +297,23 @@ if payload["test_result_kind"] != "success":
 - 进程重启后，`SessionHistory.from_thread()` 从终态 Turn 重建原始历史；下一次 `context_items()` 会重新运行 `maybe_compact()`，从而再次调用摘要模型。自然语言输出可能变化，并产生新的调用与缓存成本。
 - 同一压缩块还包含由 `_authoritative_projection()` 生成的确定性字段；摘要失败会降级为仅使用该投影。因此本项不表示恢复后完全没有历史，也不同于已持久化、可重放的单 Run compaction 事件。
 - 状态：静态恢复路径确认，尚未用真实 provider 复现摘要差异、计费或任务影响。只记录，不实现、不制定修复计划。
+
+## D13-D23-006：完整模型请求容量检查缺口
+
+- 日期与基线：2026-09-19，`2d42746`；execution/loop.py 无本地修改。此项仅补充工作区文档，不改变既有暂存版本或归档操作。
+- `AgentLoop.context_chars()` 只累计 UserMessage、AssistantMessage、ReasoningSummaryEcho、ToolCallEcho 参数和 ToolResultMessage 的部分文本长度，未累计 InstructionMessage。工具定义也未进入计数；`_maybe_compact()` 在获取本轮工具目录快照并构造 ModelRequest 之前运行。
+- 当前计量使用 Python `len(str)`，不是完整请求的 UTF-8 字节数或 provider token 数；固定 reserve 不能证明未计入部分始终被覆盖。ModelRequest 的类型与调用配对校验不补足完整请求容量检查。
+- Python 3.13 函数级复现：100,000 字符的系统 InstructionMessage 加 5 字符 UserMessage，`context_chars()` 返回 5；默认 hard 为 64,000 字符。证明指令漏计，不证明真实 provider 已发生超窗或特定费用损失。
+- `_maybe_compact()` 在 memory 缺失、压缩关闭、sink 缺失或 durable pending calls 存在时，均可在其硬上限判断前返回。此前另复现无 sink 时函数直接返回。pending 分支之后仍可能被协议校验拒绝，不能因此断言开放调用一定发送成功。
+- 影响：本地软/硬阈值通过不能证明完整请求满足配置意图，更不能证明符合模型 token 窗口。关闭压缩与关闭容量保护在此函数中耦合。硬上限拒绝并非所有路径都无条件执行。
+- 设计依据：D23 文档要求完整 MemoryEnvelope 经协议、字符/字节预算及工具配对验证后形成 ModelRequest。当前检查只覆盖部分消息文本，不能称为完整请求容量门禁。
+- 本项为容量管理与长任务可靠性缺口；不声称审批绕过或数据泄露。未修改实现、未制定修复计划，待读完增强链后统一选择预算与压缩策略。
+
+## D13-D23-007：两个记忆配置开关未接入实际行为
+
+- 日期与基线：2026-09-19，`2d42746`；memory.py、session.py、cli.py、turn_conclusion.py 无本地修改。
+- 在 src 与 tests 中检索 `conclusion_model_summary`、`journal_inject_latest`，引用仅涉及 MemoryConfig 字段、允许键、类型校验和配置测试，未找到运行时读取它们以切换行为的分支。
+- `TurnConclusionStore.build()` 当前直接构造 `untrusted_summary=None`。持久 DTO 和结论文本渲染器支持该字段，但当前正式生成链未因 conclusion_model_summary=True 调用摘要模型。
+- `journal_inject_latest=True` 没有对应已接入的读取 SESSION.md 并注入上下文的路径。journal reminder、CLI /journal 文件导出与正文自动注入是不同能力。
+- CLI 另外按客户端是否具有 `_endpoint` 注入 `summarize_via_client()`，用于 SessionHistory 的旧对话压缩。该调用不读取 conclusion_model_summary；False 不能被解释为禁止所有摘要模型调用。这是开关作用域区别，不单独声称构成费用授权绕过。
+- 配置解析测试通过只证明字段可被接受，不能证明运行时效果。状态为静态接线缺口确认，尚未做真实模型开关对照；只记录，不修改实现、不制定方案。

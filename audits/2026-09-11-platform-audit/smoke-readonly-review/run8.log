@@ -1,0 +1,418 @@
+<frozen runpy>:128: RuntimeWarning: 'koawa_agent_v2.runtime.cli' found in sys.modules after import of package 'koawa_agent_v2.runtime', but prior to execution of 'koawa_agent_v2.runtime.cli'; this may result in unpredictable behaviour
+KoawaAgent V2 interactive session
+  repo : D:\A_Dev_Projects\KoawaAgent\v2
+  db   : D:\A_Dev_Projects\koawa-smoke-review\state.sqlite3
+  model: deepseek-ai/DeepSeek-V4-Flash (reasoning_effort=None)
+  thread: new (created on first message)
+type /help for commands
+you> 
+  … 思考: Let me start by setting up the plan and exploring the repository structure. This is a read-only audit task.
+
+Let me begin with repo_map and orientation.  → repo_map {"max_depth": 6, "path": "v2"}
+  → git_status {}
+  → git_diff {}
+repo_map at v2 not found; the structure is at root. Let me map root. Also there are baseline dirty paths (pre-existing modifications from parallel session): openai_client.py, protocol.py, recovery/execution.py, verification/git.py, and tests/test_usage_cache_telemetry.py is untracked. Those are baseline dirty, not agent-owned. I should note that but focus on review. Let me map root.  → repo_map {"max_depth": 6, "path": ""}
+  → list_files {"max_depth": 3, "max_entries": 200, "path": "src/koawa_agent_v2"}
+Let me set up my plan and explore the key files. The repo_map path seems to require path non-empty. Let me try with path "." maybe. Actually the error said too_short, so empty path invalid. Let me use path "src/koawa_agent_v2" for repo_map.
+
+Let me create plan first.  → update_plan {"statuses": ["pending", "pending", "pending", "pending", "pending", "pending", "pending"], "texts": ["对账仓库状态并映射结构", "审查 runtime/assembly.py 生产装配（哪些接线、哪些未启用）", "审查 execution/loop.py 与 worker.py 执行链", "审查 verification/ 完成证据链", "审查 recovery/ 崩溃恢复链", "审查 tests 覆盖是否走生产装配（policy/ledger）", "汇总 P0/P1/P2 报告"]}
+  → repo_map {"max_depth": 4, "path": "src/koawa_agent_v2"}
+  → read_file {"max_lines": 200, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 1}
+  → search_text {"case_sensitive": true, "max_depth": 0, "max_files": 1000, "max_matches": 300, "path": "src/koawa_agent_v2/runtime/assembly.py", "query": "def "}
+  → read_file {"max_lines": 200, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 200}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 400, "path": "src/koawa_agent_v2/runtime/assembly.py", "query": "def assemble"}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 100, "path": "src/koawa_agent_v2/runtime", "query": "def assemble_runtime"}
+  → read_file {"max_lines": 220, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 399}
+  → read_file {"max_lines": 200, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 618}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 200, "path": "src/koawa_agent_v2/runtime", "query": "def _bind_ledger_policy"}
+  → read_file {"max_lines": 160, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 1037}
+  → read_file {"max_lines": 150, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 1}
+  → read_file {"max_lines": 140, "path": "src/koawa_agent_v2/execution/worker.py", "start_line": 1}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 200, "path": "src/koawa_agent_v2/execution", "query": "completion_gate"}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 200, "path": "src/koawa_agent_v2/execution", "query": "claim_gate"}
+  → read_file {"max_lines": 220, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 600}
+  → read_file {"max_lines": 60, "path": "src/koawa_agent_v2/runtime/claim_gate.py", "start_line": 1}
+  → read_file {"max_lines": 180, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 150}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src/koawa_agent_v2/execution/loop.py", "query": "durable_tool_execution"}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src/koawa_agent_v2/execution/loop.py", "query": "has_tools"}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src", "query": "durable_tool_execution"}
+  → read_file {"max_lines": 200, "path": "src/koawa_agent_v2/execution/worker.py", "start_line": 140}
+  → read_file {"max_lines": 80, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 340}
+  → read_file {"max_lines": 80, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 520}
+  → read_file {"max_lines": 55, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 435}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 80, "path": "src", "query": "tool_executor.authorize"}
+  → read_file {"max_lines": 500, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 1}
+  → read_file {"max_lines": 400, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 700}
+  → read_file {"max_lines": 98, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 1099}
+  → read_file {"max_lines": 200, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 500}
+我发现生产装配里 `completion_gate=registry`（AgentLoop 的第 4 个位置参数是 completion_gate）。注意 `build_worker` 在 task_mode=False 时调用 AgentLoop(..., completion_gate=None)。这在正常装配里 completion_gate 传给 registry。让我确认 AgentLoop 构造签名 completion_gate 的语义。
+
+关键发现：
+- `assemble_execution_plane` 里 loop 用 `completion_gate=registry`，但 `claim_gate` 没有传（默认值？）。AgentLoop 构造没有传 claim_gate。让我确认 AgentLoop 签名。
+- `build_worker` 里 task_mode 重建 loop 只传 claim_gate，completion_gate=None。
+
+现在我需要看 execution/loop.py 的构造签名和 run 流程，execution/worker.py，verification/（runner 完成证据链），recovery/。以及 tests 覆盖。
+
+让我先看 loop.py 开头的构造签名和 run 主循环，还有 execution/worker.py。同时更新计划。
+
+先 update_plan 建立计划。我已经读了部分。让我建立 plan。  → update_plan {"statuses": ["done", "in_prog", "pending", "pending", "pending", "pending", "pending", "pending"], "texts": ["仓库对齐与初始定向（git status/diff + repo_map）", "审查 runtime/assembly.py 生产装配接线（registry/executor/loop/worker 的 gate 与 sink）", "审查 execution/loop.py 与 execution/worker.py 的执行链（authorize/durable_sink/completion gate）", "审查 verification/ 完成证据链与 finalize_task 接线", "审查 recovery/ 崩溃恢复链与 checkpoint/ledger 连接", "审查 tests 覆盖是否走生产装配路径还是绕过 policy/ledger", "汇总 P0/P1/P2 发现并区分[确认]/[推测]", "输出中文审查报告"]}
+  → read_file {"max_lines": 80, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 1}
+  → read_file {"max_lines": 120, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 120}
+update_plan status values rejected "in_prog". Maybe valid status only "pending"/"done". Let me use only "pending"/"done". Set first as done, rest pending. But I've done some work. Let me just keep first done, rest pending, and update as I go.
+
+Let me set plan correctly with valid statuses.  → update_plan {"statuses": ["done", "pending", "pending", "pending", "pending", "pending", "pending", "pending"], "texts": ["仓库对齐与初始定向（git status/diff + repo_map）", "审查 runtime/assembly.py 生产装配接线（registry/executor/loop/worker 的 gate 与 sink）", "审查 execution/loop.py 与 execution/worker.py 的执行链（authorize/durable_sink/completion gate）", "审查 verification/ 完成证据链与 finalize_task 接线", "审查 recovery/ 崩溃恢复链与 checkpoint/ledger 连接", "审查 tests 覆盖是否走生产装配路径还是绕过 policy/ledger", "汇总 P0/P1/P2 发现并区分[确认]/[推测]", "输出中文审查报告"]}
+  → read_file {"max_lines": 170, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 240}
+  → read_file {"max_lines": 110, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 520}
+我现在了解了 production assembly 的 loop 构造。注意到 assemble_execution_plane 构造 AgentLoop 时没有传 claim_gate（默认 False），也没传 completion_gate 之外的什么东西。completion_gate=registry（已验证 registry 有 assert_complete？）。
+
+关键发现：assembly 把 `completion_gate=registry` —— 即 build_verified_coding_tool_registry 返回的 registry 对象作为 completion gate。需要确认 registry 是否实现 assert_complete。同时 claim_gate 在 production loop 构造中是默认 False！build_worker(claim_gate=...) 只在 task_mode=False 分支传 claim_gate。等等，assemble_execution_plane 里 loop 构造没传 claim_gate。让我确认。
+
+看 loop.py run() 中 claim_gate 的用途，以及 durable_sink 是否真的接线。loop 构造中没有 durable_sink 参数！loop 用的是 self._compaction_sink（bind_compaction_sink）。而 `durable_sink` 变量在 run() 中出现。让我找 durable_sink 的来源。
+
+实际上 run() 的签名有 durable_sink 参数吗？让我看 run 的签名。让我读 verification registry 的 assert_complete，以及 worker.py 的执行链（bind_compaction_sink 调用，durable_sink 传参）。这是关键：durable_sink 是 per-run 的 DurableExecutionRecorder，由 worker 创建并通过 run() 传入，还是从 compaction_sink 取？
+
+让我搜索 worker.py 中 run、durable_sink、bind_compaction_sink、LedgerExecutor 创建 recorder。还需确认 loop.run 签名里的 durable_sink 参数。
+
+关键审计点：
+1. claim_gate 在 production 装配未启用（默认 False）—— 是否是"注册未启用"。
+2. completion_gate=registry 是否真接线（registry 是否实现 assert_complete）。
+3. durable_sink 是否来自 per-run recorder，还是 loop 从 compaction_sink 推断。
+
+让我读 worker.py 并 grep durable_sink 在 loop.py 出现处。  → read_file {"max_lines": 160, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 430}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src/koawa_agent_v2", "query": "durable_sink"}
+  → repo_map {"max_depth": 3, "path": "src/koawa_agent_v2/execution"}
+  → read_file {"max_lines": 180, "path": "src/koawa_agent_v2/execution/worker.py", "start_line": 300}
+  → read_file {"max_lines": 180, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 640}
+  → read_file {"max_lines": 120, "path": "src/koawa_agent_v2/execution/worker.py", "start_line": 1}
+  → repo_map {"max_depth": 3, "path": "src/koawa_agent_v2/runtime"}
+  → read_file {"max_lines": 200, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 1}
+  → read_file {"max_lines": 200, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 200}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 200, "path": "src/koawa_agent_v2/runtime/assembly.py", "query": "completion_gate"}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 200, "path": "src/koawa_agent_v2/runtime/assembly.py", "query": "AgentLoop("}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 200, "path": "src/koawa_agent_v2/runtime/assembly.py", "query": "claim_gate"}
+  → search_text {"case_sensitive": true, "include": ["assembly.py"], "max_depth": 12, "max_files": 1000, "max_matches": 200, "path": "src/koawa_agent_v2/runtime", "query": "completion_gate"}
+  → search_text {"case_sensitive": true, "include": ["assembly.py"], "max_depth": 12, "max_files": 1000, "max_matches": 200, "path": "src/koawa_agent_v2/runtime", "query": "AgentLoop("}
+  → search_text {"case_sensitive": true, "include": ["assembly.py"], "max_depth": 12, "max_files": 1000, "max_matches": 200, "path": "src/koawa_agent_v2/runtime", "query": "claim_gate"}
+  → read_file {"max_lines": 170, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 520}
+  → search_text {"case_sensitive": true, "include": ["composite_registry.py"], "max_depth": 12, "max_files": 1000, "max_matches": 200, "path": "src/koawa_agent_v2/runtime", "query": "assert_complete"}
+  → search_text {"case_sensitive": true, "include": ["assembly.py"], "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src/koawa_agent_v2/runtime", "query": "_bind_ledger_policy"}
+  → read_file {"max_lines": 60, "path": "src/koawa_agent_v2/runtime/composite_registry.py", "start_line": 120}
+  → read_file {"max_lines": 160, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 1037}
+重要确认：
+- policy 接线：builtin read/patch/test rules + mcp rules。READ_TOOL_NAMES 包含 12 个工具。但注意：`run_test_profile` 归类为 `SideEffectClass.READ_ONLY`，且 profile 里 `run_test_profile` 走 READ_ONLY_PROFILE（因为不是 apply_patch 不在 mcp）。而 run_test_profile 有独立 policy rule builtin-test-allow-or-ask（read_decision? 用 config.policy.test_decision）。好。
+- **关键策略发现**：`READ_ONLY_PROFILE` 用于所有非 apply_patch、非 mcp 的工具，包括 `run_test_profile`。但 policy 对 run_test_profile 用的是 test_decision，而 test rule 的 action_kinds 是 BUILTIN_TOOL，side_effect_class=READ_ONLY。与 resolve_tool 一致（run_test_profile -> side_effect READ_ONLY, profile sandbox-test？不，profiles dict: run_test_profile 不在 apply_patch 且不在 mcp，走 else READ_ONLY_PROFILE）。但 resolve_tool 里 run_test_profile 的 sandbox_profile_id = "sandbox-test"（sandbox profile），但 profiles dict 给的是 READ_ONLY_PROFILE（沙箱测试被误标为只读而非测试 profile）。
+
+等等——profiles 映射是给 LedgerExecutor 判断写/恢复 profile 的（write profile）。run_test_profile 是 READ_ONLY side effect class，所以 READ_ONLY_PROFILE 合理（测试命令是只读副作用）。sandbox-test profile id 是给 sandbox 用的，不在 profiles dict（因为 ledger profile 与 sandbox profile 分离）。这个不算明显 bug，需谨慎。不过它有一个点：policy 把 run_test_profile 声明 side_effect_class=READ_ONLY，但实际测试会执行命令——是否真的只读？这属于设计假设。先记录为 P2 推测。
+
+主装配 loop claim_gate 未传（默认 False）→ 生产中 claim gate 未启用，这是 P1/P2 发现（取决于 D22 功能的重要性——"防止幻觉声称改变文件"）。而且 build_worker(task_mode=True) 复用 self.loop，claim_gate 参数被静默忽略。这是很明确的 P1 缺陷：API 声称支持 claim_gate 但 task 模式静默忽略。
+
+等等，verify build_worker line 176-181：task_mode=False 才重建 loop 传 claim_gate。task_mode=True 用 self.loop（line ~175 loop=self.loop）。所以 build_worker(claim_gate=True, task_mode=True) 被忽略。这是明确的[确认]。且主装配 loop 本身 claim_gate=False。这表示 D22 claim gate 在 default 生产路径完全未启用。
+
+不过要看 ControlPlaneRuntime/CLI 是否用 build_worker(claim_gate=True)。搜谁调用 build_worker。之前 repo_map 显示 app.py 有 run/chat。search build_worker across src+cli. 我之前 build_worker 出现在 assembly 定义处。搜全仓调用。
+
+先看 verification/（finalization assert_complete 的真正实现）与 recovery/、以及 tests。让我读 verification 关键文件。
+
+我要保持计划纪律。逐步：
+
+已重点确认：
+1. assembly 主 loop：completion_gate=registry（接线完成证据链），claim_gate 未传（False）→ D22 未启用
+2. build_worker task_mode=True 复用 self.loop，claim_gate 参数被忽略（bug）
+3. durable_sink 由 worker execute 传入 recorder（recovery）
+4. policy 接线完整（read/patch/test/mcp + profiles + action resolver + approve）
+5. completion_gate 委托到 builtin CodingToolRegistry.assert_complete
+
+现在读 verification/finalization（assert_complete 实现）和 recovery/ 崩溃恢复，然后 tests。先看 verification 结构。
+
+让我列 verification 目录并读 finalization。
+
+我需要并行读：repo_map verification + read finalization assert_complete + recovery 结构。但 recovery 之前看到 CheckpointStore, DurableExecutionRecorder, LeaseKeeper, reconstruct_execution 等。让我 repo_map recovery 和 verification 目录，并 search build_worker 调用点。
+
+并行：repo_map verification, repo_map recovery, search build_worker (whole src, but path must be dir). build_worker defined in assembly + composite? No, defined in AssembledRuntime and ControlPlaneRuntime. Callers in app.py. search in src/koawa_agent_v2 path "build_worker".  → repo_map {"max_depth": 3, "path": "src/koawa_agent_v2/verification"}
+  → search_text {"case_sensitive": true, "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src/koawa_agent_v2", "query": "build_worker"}
+  → read_file {"max_lines": 30, "path": "src/koawa_agent_v2/runtime/app.py", "start_line": 215}
+  → read_file {"max_lines": 20, "path": "src/koawa_agent_v2/runtime/app.py", "start_line": 458}
+  → search_text {"include": ["tools.py"], "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src/koawa_agent_v2/verification", "query": "assert_complete"}
+  → search_text {"include": ["loop.py"], "max_depth": 12, "max_files": 1000, "max_matches": 80, "path": "src/koawa_agent_v2/execution", "query": "claim_gate"}
+  → search_text {"include": ["loop.py"], "max_depth": 12, "max_files": 1000, "max_matches": 80, "path": "src/koawa_agent_v2/execution", "query": "assert_complete"}
+  → search_text {"include": ["worker.py"], "max_depth": 12, "max_files": 1000, "max_matches": 80, "path": "src/koawa_agent_v2/execution", "query": "loop.run"}
+  → search_text {"include": ["loop.py"], "max_depth": 12, "max_files": 1000, "max_matches": 80, "path": "src/koawa_agent_v2/execution", "query": "completion_gate"}
+  → read_file {"max_lines": 55, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 650}
+  → read_file {"max_lines": 30, "path": "src/koawa_agent_v2/execution/worker.py", "start_line": 385}
+  → read_file {"max_lines": 160, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 155}
+重大矛盾发现：`AssembledRuntime.build_worker`（我读到的这段是 dataclass 方法，task_mode=False 时重建 loop with claim_gate，completion_gate=None）。
+
+但是 app.py line 226/467 调用 `execution.build_worker((), task_mode=False, claim_gate=True)`——execution 是 `self._ensure_execution_plane()` 返回的。让我确认 `_ensure_execution_plane` 返回什么：是 AssembledRuntime 还是 ControlPlaneRuntime？若返回 AssembledRuntime 则 build_worker 重建 loop。
+
+但更重要的发现：**生产 chat/resume 路径用 task_mode=False（completion_gate=None）+ claim_gate=True**。这意味着 chat/resume 的完成不走最终化目录证据链（completion_gate=None）。而 task_mode 主装配 loop 有 completion_gate=registry + claim_gate=False。
+
+现在关键审计点："生产装配哪些机制真正接线，哪些只是注册未启用"。
+
+我需要确认：
+1. 主装配 loop（task_mode，from assemble_execution_plane worker=self.worker）claim_gate=False → 防幻觉 claim 门未启用。谁用它？`execution.worker`（app.py line 467 非 chat 分支、line 226?）。实际上 app.py line 226 _execute_chat 里用 build_worker(task_mode=False, claim_gate=True) 重建（chat 启用了 claim_gate）。而 resume 非 chat 分支用 execution.worker（主装配 loop，claim_gate=False）。
+
+让我确认 app.py _ensure_execution_plane 返回类型，以及 line 467 那个方法叫什么（是 resume_turn?），以及主装配 worker 是否被用于初始 task 执行。
+
+关键：生产主路径（新任务执行）是哪条？通常"chat"是指交互式单轮对话。task 模式（初始任务）走 execution.worker（主装配 loop, claim_gate=False）。也就是说任务模式下防幻觉 claim 门未启用，只有 chat/resume-chat 启用。
+
+这是核心 P0/P1 发现：主装配 loop claim_gate 默认 False，防"声称改了文件却没写"的 D22 gate 在生产主任务路径默认关闭；仅在 conversation 路径通过重建 loop 启用。
+
+但等等——loop.py line 669 `if self._claim_gate:`。主装配 loop claim_gate=False。且主装配 loop completion_gate=registry 已启用完成门。所以主任务路径有完成证据门但无防幻觉 claim 门。而 chat 路径有 claim 门但无完成门（completion_gate=None）。
+
+这两者互补、互斥，是个结构性权衡/风险点。需要定位哪条是真正"生产"主执行线。
+
+我需要确认 assembly 中主装配的 worker 是被谁作为默认执行 worker。AssembledRuntime.worker = TurnWorker over self.loop（line 584 loop）。而 build_worker(task_mode=False) 新建独立 loop 用于 chat。
+
+那 app.py 调用：line 226 是处理聊天消息（生产 CLI 的 chat 命令），line 467 是 resume。所以实际上生产交互用的是 build_worker(task_mode=False, claim_gate=True)，启用 claim 门。主装配 loop 用于... 可能是 `run` CLI 任务命令或初始 turn。
+
+让我读 app.py 找 `self._ensure_execution_plane`、以及哪个方法用 `execution.worker`（主装配 loop）。以及主装配 loop 的用途。
+
+现在需要更新 plan，把已完成步骤标 done。我已确认：
+- 装配 loop claim_gate=False, completion_gate=registry（主）
+- build_worker task_mode=False 重建 loop claim_gate, no completion_gate
+- loop.run 里两门独立互锁
+- 生产 chat/resume 用 task_mode=False claim_gate=True
+
+还需要：
+- app.py 里主装配 worker（execution.worker）用于哪个命令路径（task 新任务/run）
+- recovery/ 崩溃恢复链
+- verification/tools.py assert_complete 验证链 + VerificationLedger
+- tests 是否走生产装配路径
+- recovery 崩溃恢复
+
+让我更新 plan 并继续。当前 tool_count 我已用了不少。保持聚焦。
+
+plan 步骤（5-8）：
+1. runtime/assembly.py 生产装配接线（loop/executor/worker）— done
+2. execution/loop.py + worker.py 执行链与 claim/completion gate — mostly done
+3. verification/ finalization.py tools.py 完成证据链 + VerificationLedger — in progress
+4. recovery/ 崩溃恢复链 — pending
+5. tests 覆盖面：哪些走 assemble_runtime 生产路径 vs 绕过 — pending
+6. 汇总 P0/P1/P2 — pending
+
+先读 app.py _ensure_execution_plane 和两个 build_worker 调用父方法 + execution.worker 使用。search_text app.py ": worker" / "_ensure_execution_plane"。读相应段。
+
+同时读 verification/finalization VerificationLedger 和 tools.py assert_complete 上下文。
+
+并行：
+- search app.py "execution.worker" / "_ensure_execution_plane"
+- read verification/tools.py assert_complete region
+
+先定位。读 app.py 查找主要使用 execution.worker。search in app.py "execution.worker" 和 "_ensure_execution_plane"。
+
+发 plan update + 两个 search。plan update 独立先做。
+
+我更新 plan，然后并行 search。实际上 update_plan 与 search 独立可同调。 
+
+让我 update_plan 并把 steps 标记。然后并行 search app.py：query "execution.worker", query "_ensure_execution_plane".  → update_plan {"statuses": ["done", "done", "pending", "pending", "pending", "pending"], "texts": ["runtime/assembly.py 生产装配：主 loop(claim_gate=False, completion_gate=registry)/executor(ledger+policy)/worker", "execution/loop.py+worker.py 执行链：两门独立互锁，build_worker(task_mode=False)重建loop(claim_gate, 无completion_gate)", "verification/ 完成证据链：assert_complete→VerificationLedger 接线确认", "recovery/ 崩溃恢复链：checkpoint/phase/ready_to_finalize 确认", "tests 覆盖：走 assemble_runtime 生产路径 vs 绕过 policy/ledger", "汇总 P0/P1/P2 审查报告"]}
+  → search_text {"case_sensitive": true, "include": ["app.py"], "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src/koawa_agent_v2/runtime", "query": "execution.worker"}
+  → read_file {"max_lines": 75, "path": "src/koawa_agent_v2/verification/tools.py", "start_line": 60}
+  → search_text {"case_sensitive": true, "include": ["finalization.py"], "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src/koawa_agent_v2/verification", "query": "def assert_complete"}
+  → search_text {"case_sensitive": true, "include": ["app.py"], "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src/koawa_agent_v2/runtime", "query": "claim_gate"}
+  → read_file {"max_lines": 60, "path": "src/koawa_agent_v2/verification/finalization.py", "start_line": 255}
+  → search_text {"case_sensitive": true, "include": ["app.py"], "max_depth": 12, "max_files": 1000, "max_matches": 60, "path": "src/koawa_agent_v2/runtime", "query": ".worker.execute"}
+  → repo_map {"max_depth": 2, "path": "src/koawa_agent_v2/runtime"}
+  → search_text {"case_sensitive": true, "include": ["*.py"], "max_depth": 12, "max_files": 1000, "max_matches": 80, "path": "src/koawa_agent_v2", "query": "worker.execute("}
+  → search_text {"case_sensitive": true, "include": ["app.py"], "max_depth": 12, "max_files": 1000, "max_matches": 40, "path": "src/koawa_agent_v2/runtime", "query": "def run"}
+  → search_text {"case_sensitive": true, "include": ["app.py"], "max_depth": 12, "max_files": 1000, "max_matches": 40, "path": "src/koawa_agent_v2/runtime", "query": "def chat"}
+  → read_file {"max_lines": 35, "path": "src/koawa_agent_v2/runtime/app.py", "start_line": 160}
+  → read_file {"max_lines": 30, "path": "src/koawa_agent_v2/runtime/app.py", "start_line": 430}
+  → repo_map {"max_depth": 3, "path": "src/koawa_agent_v2/recovery\""}
+  → list_files {"max_depth": 2, "max_entries": 200, "path": "src/koawa_agent_v2"}
+There's recovery/ under src/koawa_agent_v2/recovery with context.py, coordinator.py, execution.py, protocol.py, redaction.py, store.py. There's also ledger/recovery.py. Let me examine recovery chain. Note there's duplication: both `recovery/execution.py` (44351 bytes) and `ledger/recovery.py` (5452). And src has `runtime/recovery`? No, runtime has no recovery subdir in this listing but the list shows top-level koawa_agent_v2/recovery. Wait the repo_map earlier search for recovery used wrong path. The recovery directory is at src/koawa_agent_v2/recovery.
+
+Also note there are TWO copies of several source files? e.g., runtime/assembly.py and verification/... The listing shows both `src/koawa_agent_v2/runtime/assembly.py` AND the earlier search_files with path src/koawa_agent_v2/runtime assembly.py returned 1197 lines. Also `verification/tools.py`. But wait — there's ALSO a top-level `runtime` dir and... The task said review src/koawa_agent_v2 runtime/assembly.py, execution/, verification/, recovery/. These all exist.
+
+But hold on: the repo_map output earlier showed BOTH `src/koawa_agent_v2/execution/loop.py` (37332) and there may be a second one. Actually no. But note there is duplication: `recovery/execution.py` AND `execution/worker.py`, `execution/loop.py`. And there's `runtime/` vs top-level. Let me focus.
+
+Interesting: There's also a second `verification` listed? Only one top-level `verification`. But earlier search found `src/koawa_agent_v2/verification/tools.py`. Good.
+
+Now I need recovery chain. Let me look at recovery coordinator and execution recovery, and checkpoint store usage in worker (resume ready_to_finalize). Also recovery/redaction.py (redaction policy). And check tests coverage. Let me examine recovery and then tests.
+
+Let me update plan (step 3 verified mostly: completion evidence chain confirmed via assert_complete→VerificationLedger.assert_complete→git recheck). Step 4 recovery pending.
+
+Now examine recovery: coordinator.py, execution.py (recovery resume). Also ledger/recovery.py. And check worker's resume/checkpoint path already seen (ready_to_finalize → AgentLoopResult directly, skipping loop). That's a potential P2: resume at ready_to_finalize bypasses completion gate/claim gate revalidation.
+
+Let me read recovery coordinator + execution recovery quickly, plus check whether TurnWorker recovery uses checkpoint store & recovery/execution.py. Let me look at tests directory too.
+
+Let me do repo_map recovery and list tests.  → repo_map {"max_depth": 2, "path": "src/koawa_agent_v2/recovery"}
+  → list_files {"max_depth": 1, "max_entries": 120, "path": "tests"}
+tests 目录很大。我需要检查 tests 是否走 assemble_runtime 生产装配，还是绕过. 重点 test_runtime_assembly.py、test_d22_completion_gate.py、test_d6_recovery.py、test_d23（loop）、test_agent_loop.py。
+
+我需要定位几个关键测试文件检查是否走生产装配路径（assemble_runtime / AppRuntime），还是直接构造 loop/TurnWorker（绕过 policy/ledger）。
+
+让我先搜索 tests 里如何使用 build_worker / claim_gate / assemble_runtime 等。
+
+由于时间有限，聚焦：
+- test_d22_completion_gate.py：测试 completion_gate 是否走生产装配。
+- test_d23_in_run_compaction 或 loop_compaction：测 loop 走哪条路径。
+- test_agent_loop.py：可能直接构造 AgentLoop。
+- test_runtime_assembly.py：装配测试。
+
+让我搜索 tests 目录中的关键使用。
+
+并行 search tests: "assemble_runtime(" , "claim_gate", "AgentLoop(", "AppRuntime(".
+
+这要较多调用。先搜最关键的几个。
+
+update plan 步骤3（verification证据链）已读完 assert_complete。步骤4 recovery 还没深读。我时间有限，需要平衡深度与数量。
+
+让我并行搜索 tests 中生产路径 vs 直构。分几个 query 对 tests 目录。
+
+query1: "assemble_runtime"
+query2: "AgentLoop("
+query3: "claim_gate"
+query4: "AppRuntime("
+
+4 searches on tests path.  → search_text {"case_sensitive": true, "include": ["test_d22_completion_gate.py", "test_agent_loop.py", "test_d23_in_run_compaction.py", "test_runtime_assembly.py"], "max_depth": 2, "max_files": 40, "max_matches": 80, "path": "tests", "query": "claim_gate"}
+  → search_text {"case_sensitive": true, "include": ["test_d22_completion_gate.py", "test_agent_loop.py"], "max_depth": 2, "max_files": 40, "max_matches": 80, "path": "tests", "query": "AgentLoop("}
+  → search_text {"case_sensitive": true, "include": ["test_d22_completion_gate.py", "test_runtime_assembly.py"], "max_depth": 2, "max_files": 40, "max_matches": 80, "path": "tests", "query": "assemble_runtime"}
+  → search_text {"case_sensitive": true, "max_depth": 4, "max_files": 300, "max_matches": 100, "path": "tests", "query": "assemble_runtime"}
+  → search_text {"case_sensitive": true, "max_depth": 4, "max_files": 300, "max_matches": 60, "path": "tests", "query": "AppRuntime("}
+  → search_text {"case_sensitive": true, "max_depth": 4, "max_files": 300, "max_matches": 60, "path": "tests", "query": "LedgerExecutor("}
+  → search_text {"case_sensitive": true, "include": ["worker.py"], "max_depth": 12, "max_files": 1000, "max_matches": 40, "path": "src/koawa_agent_v2/execution", "query": "AgentLoop("}
+  → search_text {"case_sensitive": true, "include": ["worker.py"], "max_depth": 12, "max_files": 1000, "max_matches": 40, "path": "src/koawa_agent_v2/execution", "query": "completion_gate"}
+  → read_file {"max_lines": 130, "path": "src/koawa_agent_v2/execution/worker.py", "start_line": 1}
+  → search_text {"case_sensitive": true, "include": ["loop.py"], "max_depth": 12, "max_files": 1000, "max_matches": 40, "path": "src/koawa_agent_v2/execution", "query": "completion_gate"}
+  → search_text {"case_sensitive": true, "include": ["worker.py"], "max_depth": 12, "max_files": 1000, "max_matches": 20, "path": "src/koawa_agent_v2/execution", "query": "def build_worker"}
+  → read_file {"max_lines": 40, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 655}
+  → search_text {"case_sensitive": true, "include": ["*.py"], "max_depth": 12, "max_files": 1000, "max_matches": 40, "path": "src/koawa_agent_v2", "query": "def build_worker"}
+  → read_file {"max_lines": 180, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 150}
+  → read_file {"max_lines": 45, "path": "src/koawa_agent_v2/execution/loop.py", "start_line": 220}
+  → search_text {"case_sensitive": true, "include": ["assembly.py"], "max_depth": 12, "max_files": 1000, "max_matches": 40, "path": "src/koawa_agent_v2/runtime", "query": "completion_gate="}
+  → search_text {"case_sensitive": true, "include": ["assembly.py"], "max_depth": 12, "max_files": 1000, "max_matches": 40, "path": "src/koawa_agent_v2/runtime", "query": "AgentLoop("}
+  → read_file {"max_lines": 165, "path": "src/koawa_agent_v2/execution/worker.py", "start_line": 130}
+  → read_file {"max_lines": 30, "path": "src/koawa_agent_v2/runtime/assembly.py", "start_line": 575}
+  → read_file {"max_lines": 115, "path": "src/koawa_agent_v2/execution/worker.py", "start_line": 294}
+  → read_file {"max_lines": 80, "path": "tests/test_d22_completion_gate.py", "start_line": 1}
+  → read_file {"max_lines": 50, "path": "tests/test_d22_completion_gate.py", "start_line": 100}
+  → search_text {"case_sensitive": true, "include": ["test_*.py"], "max_depth": 3, "max_files": 400, "max_matches": 40, "path": "tests", "query": "completion_gate="}
+  → search_text {"case_sensitive": true, "include": ["test_*.py"], "max_depth": 3, "max_files": 400, "max_matches": 40, "path": "tests", "query": "build_worker("}
+  → read_file {"max_lines": 105, "path": "tests/test_d5_vertical_slice.py", "start_line": 300}
+  → update_plan {"statuses": ["done", "done", "done", "done", "done", "in_prog", "pending"], "texts": ["repo_map 定位 src 与 tests 结构", "读 assembly.py 生产装配 build_worker/主loop（完成门/claim门接线）", "读 loop.py 完成门与 recovery 分支", "读 worker.py 执行链 + 恢复路径绕过", "查 tests 是否走生产装配 vs 直连 loop", "核实 recovery/ 恢复链与 tests 覆盖", "整理发现并输出 P0/P1/P2 报告"]}
+  → search_text {"case_sensitive": true, "include": ["test_*.py"], "max_depth": 3, "max_files": 400, "max_matches": 30, "path": "tests", "query": "ready_to_finalize"}
+  → read_file {"max_lines": 60, "path": "src/koawa_agent_v2/recovery/execution.py", "start_line": 1}
+
+agent> [turn_failed] d2:max_model_rounds_exceeded
+  [turn failed: turn_failed]
+【回合主体已完成，最终回复生成失败】
+已执行：git_diff、git_status、list_files、read_file、repo_map、search_text、update_plan
+动作已持久化；输入 /resume 可重试生成回复
+  ✗ repo_map [workspace_path_not_found]
+  ✓ git_status
+  ✓ git_diff
+  ✓ list_files
+  ✓ update_plan
+  ✓ repo_map
+  ✓ read_file
+  ✗ search_text [workspace_not_directory]
+  ✓ read_file
+  ✗ search_text [workspace_not_directory]
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✓ search_text
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✗ search_text [workspace_not_directory]
+  ✗ search_text [workspace_not_directory]
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✗ update_plan [plan_status_invalid]
+  ✓ read_file
+  ✓ read_file
+  ✓ update_plan
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✓ search_text
+  ✓ repo_map
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✓ repo_map
+  ✓ read_file
+  ✓ read_file
+  ✗ search_text [workspace_not_directory]
+  ✗ search_text [workspace_not_directory]
+  ✗ search_text [workspace_not_directory]
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ read_file
+  ✓ search_text
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✓ repo_map
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✓ update_plan
+  ✓ search_text
+  ✓ read_file
+  ✓ search_text
+  ✓ search_text
+  ✓ read_file
+  ✓ search_text
+  ✓ repo_map
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✗ repo_map [workspace_io_error]
+  ✓ list_files
+  ✓ repo_map
+  ✓ list_files
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ search_text
+  ✓ read_file
+  ✓ search_text
+  ✓ search_text
+  ✓ read_file
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✓ search_text
+  ✓ search_text
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✓ read_file
+  ✓ search_text
+  ✓ search_text
+  ✓ read_file
+  ✗ update_plan [plan_status_invalid]
+  [ctx] history_turns=0 projected_items=1
+you> 
+bye
+exit=0
