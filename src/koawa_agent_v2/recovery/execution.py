@@ -222,6 +222,10 @@ def model_turn_document(turn: ModelTurn) -> dict[str, Any]:
             "input_tokens": turn.usage.input_tokens,
             "output_tokens": turn.usage.output_tokens,
             "total_tokens": turn.usage.total_tokens,
+            # F19: prompt-cache hit telemetry (None = provider did not
+            # report); analysis reads it from the fact, projections/replay
+            # deliberately stay unchanged.
+            "cached_input_tokens": turn.usage.cached_input_tokens,
         }
     return {
         "protocol_version": turn.protocol_version,

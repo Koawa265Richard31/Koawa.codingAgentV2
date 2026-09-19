@@ -3,7 +3,7 @@
 版本：v1.1（T7 应用修订）。日期：2026-09-06。
 状态：维护者指令（2026-09-06 会话）：规划先行，实现由多个 Agent 接管推进；维护者只读规划与各切片策略文档，待实现完成后按切片阅读。v0.1 已经外部评审 Agent 审查（判定 APPROVE-WITH-FIXES，7 条修订全部采纳），按 §3.0 升版 v1.0 生效；v1.1：维护者批准 T7 应用，§3.2 冻结面相应修订。
 基线：`PSEC_BASE_COMMIT = e213580`（与 origin/main 同步，2026-09-06 核对；接管会话开工时必须 `git log -1` 复核基线未被移动）。
-进度账本：`docs/psec-progress.md`（**唯一状态事实源**，本规划书不含进度）。
+进度账本：`docs/open-active/psec-progress.md`（**唯一状态事实源**，本规划书不含进度）。
 
 变更记录：v0.1 初稿（2026-09-06）。
 
@@ -59,7 +59,7 @@ v0.1 → v1.0 必须经外部评审 Agent 审查（复用 RT/J 的评审流程�
 ### 3.1 会话开工门（每个接管会话按序执行）
 
 1. AGENTS.md 对齐检查（`git status --porcelain`、local ahead、remote head）并报告；
-2. 读 `docs/psec-progress.md`：确认目标切片为 `pending` 且无其他会话认领记录；
+2. 读 `docs/open-active/psec-progress.md`：确认目标切片为 `pending` 且无其他会话认领记录；
 3. 在账本登记认领（会话标识、时间、切片号）后，立即以 `PSEC/CLAIM:S<n>:` 前缀单独 commit，提交后重读账本确认无同切片他人认领，冲突以先提交者为准；认领会话超过 5 天无对应 commit，其他会话可在账本备注后接管。**单切片单会话**，禁止并行改同一切片；
 4. `git log -1` 复核基线；若基线已推进，以账本中最新已完成切片的 commit 为个人基线；
 5. 切片完成后：全量测试（若有代码变更）→ 账本更新（状态 + 证据）→ commit。
@@ -81,7 +81,7 @@ v0.1 → v1.0 必须经外部评审 Agent 审查（复用 RT/J 的评审流程�
 
 ### 3.4 切片完成门（统一，四件套缺一不可）
 
-1. **切片策略文档** `docs/psec/s<n>-*.md`：目标问题、结论、证据指针（file:line / commit / 测试名）、诚实边界、若适用的提案；正文 ≤ 2 页，证据入附录；
+1. **切片策略文档** `docs/closed-archive/s<n>-*.md`：目标问题、结论、证据指针（file:line / commit / 测试名）、诚实边界、若适用的提案；正文 ≤ 2 页，证据入附录；
 2. 研究摘要内嵌策略文档：材料清单带 URL / 版本 / immutable revision（遵守 RT/J 语料钉定纪律；floating 来源即作废）；
 3. 测试证据（纯文档切片写明"无代码变更"）；
 4. 账本更新。
@@ -102,7 +102,7 @@ v0.1 → v1.0 必须经外部评审 Agent 审查（复用 RT/J 的评审流程�
 - **学什么**：OWASP GenAI Security / Agentic AI Initiative 当前出版物（候选入口：owasp.org 的 GenAI Security 与 Agentic AI Initiative 页面）；NIST AI RMF GenAI Profile（NIST AI 600-1，nist.gov）；CSA Agentic AI 威胁分类（cloudsecurityalliance.org）；（选）MITRE ATLAS。以官方源为准，钉定所读版本（URL + 页面版本标注 + 访问日期；floating 来源即作废）。
 - **与 Koawa 映射**：每条框架威胁 → Koawa 已有控制（引用文档/测试/commit）→ 状态（covered / partial / gap）→ S/C/N 预判。
 - **执行步骤**：①收集并钉定框架文本版本；②逐条映射；③产出差距清单供 S1–S5 引用。
-- **产出物**：`docs/psec/s0-framework-mapping.md`。
+- **产出物**：`docs/closed-archive/s0-framework-mapping.md`。
 - **完成门**：覆盖所选框架的类目全集；每条映射有仓库证据指针；明确声明"映射≠认证"。
 - **代码资格**：N（无代码）。
 
@@ -112,7 +112,7 @@ v0.1 → v1.0 必须经外部评审 Agent 审查（复用 RT/J 的评审流程�
 - **学什么**：MCP 规范授权章节（钉定 spec revision；注意授权面主要在 HTTP transport，stdio 本地 server 无 OAuth 面——这决定本切片的 S/C 边界）；RFC 8707（resource indicators / audience binding）；RFC 9700（OAuth 2.0 安全 BCP，选读）。
 - **与 Koawa 映射**：`sandboxed` 路径容器默认无秘密（D25 §2.1）；审计面集中在 `host_trusted` 路径的 env/secret 展开、失败信息脱敏、以及"远程 MCP"这一 D25 明确不做的扩展点。
 - **执行步骤**：①写授权规范摘要（含 stdio/HTTP 差异表）；②审计 `mcp/launcher.py`、`mcp/connection_manager.py`、`mcp/transport.py`、`runtime/assembly.py` 的 secret/env 传播，产出 file:line 事实表；③按审计交接文档 **§9** 裁决表格式出结论（每项 S/C/N + 最小修复 + 不做什么）；④条件代码仅限**新模块**（如 env 过滤 helper、失败脱敏 helper）加新测试；任何触碰 `host_trusted` launcher 既有语义的修复只产提案并登记 blocker，且须先过 §3.3 第 1 条的 S 判定；证明真实缺口但需改既有行为 → 登记 C 与触发条件。
-- **产出物**：`docs/psec/s1-mcp-auth-identity.md`（+ 条件代码与测试）。
+- **产出物**：`docs/closed-archive/s1-mcp-auth-identity.md`（+ 条件代码与测试）。
 - **完成门**：裁决表完整；事实表带 file:line；若有代码，全量回归绿。
 - **代码资格**：条件 S（审计先行，代码加法性）。
 
@@ -122,7 +122,7 @@ v0.1 → v1.0 必须经外部评审 Agent 审查（复用 RT/J 的评审流程�
 - **学什么**：MCP 工具发现与变更通知语义（钉定 spec revision）；对照 OpenHands SDK 的动态工具刷新实现（只读其源码，作为基线对照）。
 - **与 Koawa 映射**：`mcp/tool_binding.py`、`mcp/activation.py`、`mcp/connection_manager.py`、`mcp/sandbox_reconcile.py`。
 - **执行步骤**：①建语义矩阵：初次 binding / 重连 / 崩溃恢复 / server 重启 / sandbox reconcile / 变更通知（若存在处理路径），每格记预期 vs 实际 vs 证据；②发现缺口 → 用 `@unittest.expectedFailure`（或 skip 并引用 blocker）的回归测试**固化缺陷现状**，测试注释注明"固化当前缺陷、随修复提案翻转"，全量回归须保持绿；**不得把缺陷行为写成预期通过的断言**；随后提最小修复提案；③把结论整理为 T3（MCP poisoning）countermeasure 的证据材料（引用不改威胁模型）。
-- **产出物**：`docs/psec/s2-tool-surface-pinning.md`（+ 条件测试）。
+- **产出物**：`docs/closed-archive/s2-tool-surface-pinning.md`（+ 条件测试）。
 - **完成门**：矩阵全格覆盖且有证据；无"静默替换"路径或已被测试钉住；诚实边界写明验证范围。
 - **代码资格**：条件 S（测试优先）。
 
@@ -132,7 +132,7 @@ v0.1 → v1.0 必须经外部评审 Agent 审查（复用 RT/J 的评审流程�
 - **学什么**：OPA 架构文档（decision log、sidecar 模式，openpolicyagent.org）；Cedar 官方文档与白皮书（cedar-policy.github.io，钉定版本）；（选）Zanzibar 作为关系授权背景。基线文档：`docs/day-09-policy-approval-network.md`（现有策略/审批/网络语义的权威描述）。
 - **与 Koawa 映射**：现有语义逐分支映射——ALLOW/DENY/ASK、fail-open 仅限 detector 故障、fail-closed 其余、审批粘性、预算 CAS。**约束**：审计文档明确"不预先建设通用策略语言"，本研究只回答"若外置，边界在哪、代价是什么"，不建引擎、不写策略 DSL。
 - **执行步骤**：①摘要 OPA/Cedar 的决策模型与日志语义；②语义映射表（每个 gate 分支 → PDP/PEP 职责划分 → 事件流表示）；③迁移草图（数据流图，非实现承诺）；④结论定级（预期 C）与 C→S 触发条件（如出现多 runtime 共享策略、策略热更新需求）。
-- **产出物**：`docs/psec/s3-pdp-pep-externalization.md`。
+- **产出物**：`docs/closed-archive/s3-pdp-pep-externalization.md`。
 - **完成门**：语义映射表覆盖全部分支（含 fail-open/fail-closed 各路径）；草图完整；结论明确。
 - **代码资格**：N（无代码）。
 
@@ -142,7 +142,7 @@ v0.1 → v1.0 必须经外部评审 Agent 审查（复用 RT/J 的评审流程�
 - **学什么**：CaMeL（arXiv:2503.18813，钉定版本）；Spotlighting（arXiv:2403.14720）；dual-LLM 模式（Simon Willison）；（选）Invariant Labs 的 agent 设计模式综述。
 - **与 Koawa 映射**：审计交接文档 §6"暂缓：provenance、taint 与 memory quarantine"条款的触发条件逐条对照（长期 memory 写入、富文本加载、跨信任域组合、实际出站 sink——RT/J 的 controlled sink 目前仅存在于测试面）；设计只覆盖动作边界消费点。
 - **执行步骤**：①摘要 CaMeL 能力模型（capability / taint / policy 三层）与 dual-LLM 分工；②对照暂缓条款定触发条件表；③最小设计：若未来开放网络工具，taint 门挂在哪个执行点、事件如何表示、与现有 policy 的先后关系；④结论定级（预期 C）。
-- **产出物**：`docs/psec/s4-scoped-taint.md`。
+- **产出物**：`docs/closed-archive/s4-scoped-taint.md`。
 - **完成门**：逐条对照暂缓条款；设计严格限于动作边界；触发条件表完整。
 - **代码资格**：N（无代码）。
 
@@ -152,7 +152,7 @@ v0.1 → v1.0 必须经外部评审 Agent 审查（复用 RT/J 的评审流程�
 - **学什么**：A2A 协议认证与委派模型（a2aproject/A2A，钉定 revision）；复用 S1 授权摘要；（选）AutoGen/OpenHands SDK 的 sub-agent 权限实现对照。
 - **与 Koawa 映射**：`agents/control.py`、`agents/graph.py`、`agents/messages.py`、`agents/resources.py`、`security/gate.py`（只读）。
 - **执行步骤**：①D11 现状事实表（file:line，重点：子 agent 实际可用工具面 vs 声明、mailbox 消息的信任等级、takeover 后授权继承现状）；②T7 草案：委派链威胁清单 + 每条的真实入口/现有控制/缺口；③J2 树级传播设计提案（canary/escalation 在子 agent 的三种语义：继承 / 独立 / 上浮，给出推荐与理由）；④产 T7 增补提案文件（含 before/after 文本与 hash 占位，**不直接修改威胁模型**）。
-- **产出物**：`docs/psec/s5-delegation-security.md` + `docs/psec/t7-amendment-proposal.md`。
+- **产出物**：`docs/closed-archive/s5-delegation-security.md` + `docs/psec/t7-amendment-proposal.md`。
 - **完成门**：威胁模型原文件零改动（`git diff` 证明）；事实表带 file:line；三种传播语义有明确推荐；提案文件须含：当前 threat model 文件 sha256、精确插入锚点（节/表/行）、完整 after 文本、参照 RT/J 规划 §5 的 diff allowlist 自检清单。RT/J §1.3 冻结"不新增 T7"、J2 子 Agent 传播按冻结决策留待版本化设计——因此 T7 与 J2 树级传播**均为提案**，登记 blocker，经维护者按 RT/J 版本化审批后方可实施。
 - **代码资格**：N（提案与设计，无代码；实现需维护者批准后另行排期）。
 
@@ -191,7 +191,7 @@ v1.0 定稿
 
 ## 7. 维护者阅读路径
 
-实现完成后：本规划 §0 → `docs/psec/s0-framework-mapping.md` → `s1` → `s2` → `s3` → `s4` → `s5`，每篇 ≤ 2 页正文 + 证据附录；提案类内容（T7、条件代码清单）单独成节，批准与否逐项勾选即可。
+实现完成后：本规划 §0 → `docs/closed-archive/s0-framework-mapping.md` → `s1` → `s2` → `s3` → `s4` → `s5`，每篇 ≤ 2 页正文 + 证据附录；提案类内容（T7、条件代码清单）单独成节，批准与否逐项勾选即可。
 
 ## 8. 变更记录
 

@@ -277,6 +277,13 @@ class GitFacade:
     def _git_prefix(self) -> tuple[str, ...]:
         return (
             str(self._git),
+            # The hermetic environment ignores the user's global gitconfig,
+            # including their safe.directory exceptions; on Windows a repo
+            # owned by another local account (sandbox/service users) then
+            # fails every probe with "dubious ownership" -> surfaces as
+            # not_a_git_repository.  Self-authorize ONLY the root this facade
+            # was explicitly configured with (smoke Phase-0 unblock).
+            "-c", f"safe.directory={self._root}",
             "-c", "core.hooksPath=" + os.devnull,
             "-c", "core.fsmonitor=false",
             "-c", "core.untrackedCache=false",

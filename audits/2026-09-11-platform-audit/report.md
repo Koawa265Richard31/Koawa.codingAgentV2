@@ -1,6 +1,6 @@
 # KoawaAgent V2 平台审计续审报告（2026-09-11）
 
-日期：2026-09-11。本报告接续 `../2026-09-07-platform-audit/report.md`（下称"首轮报告"），是其续审而非替代：首轮结论在本轮逐项复核，未推翻任何一条；按首轮第 7 节续审入口推进后，新增 3 项实测确认发现（F6、F7、flaky 测试观察）并大幅强化 F5。
+日期：2026-09-11。本报告接续 `../closed/2026-09-07-platform-audit/report.md`（下称"首轮报告"），是其续审而非替代：首轮结论在本轮逐项复核，未推翻任何一条；按首轮第 7 节续审入口推进后，新增 3 项实测确认发现（F6、F7、flaky 测试观察）并大幅强化 F5。
 
 **同日第二阶段（用户指令"一口气审完"+"api你直接用"）**：Docker daemon 拉起后全部容器 lane 通过（含此前一直缺席的 golden 全链 kill/resume 复合测试）；三项静态审查（schema/并发、MCP transport、凭据持久层）由主审完成（三个审查子代理因账号用量上限失败，21:07 重置）；全量回归重跑（首次因与容器 lane 并发产生 d10 竞争假阳性，已单独干净重跑确认，见 §9）；真实模型链被凭据阻塞（环境唯一 key `AAA1_API_KEY` 在 z.ai/bigmodel 全部兼容端点 401 失效，`KOAWA_PROVIDER_KEY` 未设置），基线已冻结于 `baseline-real-model.md`。
 
@@ -31,8 +31,8 @@
 
 | 验证 | 命令/位置 | 结果 | 等级 |
 |---|---|---|---|
-| F1 内容漂移反例复核 | `../2026-09-07-platform-audit/repro_content_drift.py` | `completion_accepted_after_drift=true`、`status_digest_equal=true`、独立验收 exit=1 | **实测确认**（复现成立） |
-| F2 J2 配置入口复核 | `../2026-09-07-platform-audit/repro_config_and_eval.py` | `canary_key_env` → `config_unknown_field`；eval 20/20 且 `agent_loop_calls=0`（F3 一并复核） | **实测确认**（复现成立） |
+| F1 内容漂移反例复核 | `../closed/2026-09-07-platform-audit/repro_content_drift.py` | `completion_accepted_after_drift=true`、`status_digest_equal=true`、独立验收 exit=1 | **实测确认**（复现成立） |
+| F2 J2 配置入口复核 | `../closed/2026-09-07-platform-audit/repro_config_and_eval.py` | `canary_key_env` → `config_unknown_field`；eval 20/20 且 `agent_loop_calls=0`（F3 一并复核） | **实测确认**（复现成立） |
 | D4 kill 三窗口 + 回滚失败 | `repro_patch_windows.py` 重跑 | 与 09-09 产物语义一致（见 F6） | **实测确认**（双重复现） |
 | F7 profile 预算断层 | `repro_profile_budget.py`（新增） | 第 5 个必测 profile `test_run_budget_exceeded`，finalize `required_test_profile_not_run`，门 `verification_required` | **实测确认** |
 | D5/J2/T7/golden 专项 | `focused-tests-20260911.txt` | 30/30 OK（53.8s，无 skip） | 实测确认 |
@@ -341,6 +341,10 @@ F12/F13/F15/F16 四项全部修复，回归测试 `tests/test_wiring_memory_plan
 验证：受影响面 17 个套件 156/156 绿（D23 全部、D16/D19 交互、D24、D6、装配）；全量回归 1040 项 / 0 errors / 唯一失败为已知 D25 flaky（skips=32 为 Docker daemon 掉线，与本轮无关）。**真实模型 a8**：生产链首次真实触发 in-run 压缩（10 个 `run.context-compact*` 事件）与 TurnConclusion 生产写入（1 个）；终态 `context_capacity_exhausted` 系验证配置把 soft 压至 2500 过紧所致的诚实 fail-closed——机制全部按设计工作，生产默认预算（48k/64k）不受影响。repo_map/update_plan 在 a8 中未被模型主动调用（非被拒），policy 放行由单元测试证明。
 
 **对判定的更新**：§10.1 的两条新断点与 F12/F13 闭合；"机制-接线"债务清单剩余项为设计性空位（agents/context/workspace 三包属 F5 范畴的 D12+ 欠账，journal_inject_latest 死字段待 D19 owner 决定）。
+
+### 10.3 只读审查冒烟（2026-09-13）：DS 侧发现与缓存遥测
+
+详见 `smoke-readonly-review/report.md`。要点：DS-V4-Flash 三次运行未产出最终报告（容量/轮数上限/空 final_text 异常各一），但 run8 进度行挖出 **S6（task 主 loop 无 claim gate，F16 的合法扩展）**、**S7（update_plan 状态枚举与工具路径语义缺失）**、**S8（run_test_profile READ_ONLY 分类为设计裁决项）**，并交叉验证 F12-F16 修复后装配面接线正常。缓存遥测（F19）首次实战：稳态命中 91-97%，含 12 次压缩全程 84.5%，压缩后回落轮确认前缀重排代价。平台侧新发现 S1（facade 属主 bug，已修待回归）/S2（status 无界）/S3（预算暗坑群：budget_action_limits 默认 20 等）/S4（completed 但 final_text 空 + 原始 tool_calls XML 吞入内容，待离线定位）。工作区未提交修复：verification/git.py（S1）、model/protocol.py + openai_client.py + recovery/execution.py（F19）。
 
 ### 9.8 三阶段交付结果：T1 首次真实模型全绿交付（跨 kill/resume）
 

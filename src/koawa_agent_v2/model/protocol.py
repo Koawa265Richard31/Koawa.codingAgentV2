@@ -118,17 +118,26 @@ class ModelCallRef:
 
 @dataclass(frozen=True, slots=True)
 class ModelUsage:
-    """Provider 明确报告的 token 计数；缺失 total 时不自行合成。"""
+    """Provider 明确报告的 token 计数；缺失 total 时不自行合成。
+
+    ``cached_input_tokens`` 是 Provider 报告的提示词缓存命中量（OpenAI 形态
+    ``usage.prompt_tokens_details.cached_tokens`` 或 DeepSeek 原生
+    ``prompt_cache_hit_tokens``）；未报告时为 None，绝不合成。长任务的输入
+    成本几乎由缓存命中率决定，缺失该字段则成本/延迟不可分析。
+    """
 
     input_tokens: int
     output_tokens: int
     total_tokens: int | None = None
+    cached_input_tokens: int | None = None
 
     def __post_init__(self) -> None:
         _non_negative_int(self.input_tokens, "input_tokens")
         _non_negative_int(self.output_tokens, "output_tokens")
         if self.total_tokens is not None:
             _non_negative_int(self.total_tokens, "total_tokens")
+        if self.cached_input_tokens is not None:
+            _non_negative_int(self.cached_input_tokens, "cached_input_tokens")
 
 
 @dataclass(frozen=True, slots=True, repr=False)

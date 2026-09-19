@@ -1099,7 +1099,24 @@ def _parse_usage(value: Any) -> ModelUsage:
         or total_tokens < 0
     ):
         raise _fault("openai.invalid_usage")
-    return ModelUsage(input_tokens, output_tokens, total_tokens)
+    # Prompt-cache hit reporting: OpenAI/SiliconFlow shape
+    # usage.prompt_tokens_details.cached_tokens, DeepSeek-native shape
+    # usage.prompt_cache_hit_tokens.  Unreported stays None (never synthesized).
+    cached_tokens: int | None = None
+    details = value.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        candidate = details.get("cached_tokens")
+        if candidate is not None:
+            cached_tokens = candidate
+    if cached_tokens is None:
+        cached_tokens = value.get("prompt_cache_hit_tokens")
+    if cached_tokens is not None and (
+        not isinstance(cached_tokens, int)
+        or isinstance(cached_tokens, bool)
+        or cached_tokens < 0
+    ):
+        raise _fault("openai.invalid_usage")
+    return ModelUsage(input_tokens, output_tokens, total_tokens, cached_tokens)
 
 
 def _finish_reason(value: Any) -> FinishReason:

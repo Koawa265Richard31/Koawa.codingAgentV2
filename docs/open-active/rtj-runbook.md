@@ -62,4 +62,4 @@ PYTHONPATH=src nice -n 19 taskset -c 1 python3.12 -B -m unittest \
 - 报告：`.dsh_tmp/rt1/*.json`、`redteam/freeze/baseline-formal.json`
 - 语料：`redteam/corpus/data/` + `manifest.json`（commit+sha256 钉定）
 - 依赖：`redteam/lock/`（hash lock + SBOM + licenses）
-- 全流程留档：`docs/rtj-progress.md`（阻塞/处理清单 + 诚实边界）
+- 全流程留档：`docs/open-active/rtj-progress.md`（阻塞/处理清单 + 诚实边界）
