@@ -63,3 +63,5 @@ E1/E2 两份原始缺口记录已被本包吸收为证据，移至 docs/closed-a
 ## 进度日志（续）
 
 - 2026-09-19：并入 hardening-memory-retrieval 设计包（新增 E 组）；E1/E2 归档。**C1 完成**：integrate() 复用分支回放持久化结果（known_negative 不再报 0/success；非法字段 integration_receipt_result_invalid fail-closed；成功复用与 deliver 拒绝语义不变），tests/test_d12_i7_001_reuse_status.py 3 项 + I7/I9 回归 41/41 绿。下一项：C2。
+
+- 2026-09-19（续）：**C3-C6 全部完成**。C3：CLI 聊天失败分支把失败回合写入同进程历史（恢复后与重启视图一致）。C4：结论投影增加有界 test_evidence_refs 行（计数+前 4 个 digest 前缀）。C5：跨回合压缩块总量受 history_max_chars/4（下限 1000）预算约束，超限最旧块折叠为确定性 merged 摘要行。C6：跨回合模型摘要经会话 marker 持久化（export/preload_summaries），重启按块位次重放、不再重调摘要模型。回归 tests/test_c3456_session_gaps.py 4 项 + 会话全套（d16/d19/d23 projection/recall/config）58/58 绿。**C 组（C1-C6）全部完成**；剩余 C7/C8 待裁决，D 组等外部条件。cli.py/session.py 的 CI 全量回归与 d16 交互端到端建议下窗口补跑。
