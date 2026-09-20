@@ -541,6 +541,9 @@ class AppRuntime:
 
 
 def _failure(exc: BaseException) -> CommandOutcome:
+    import sys, traceback
+    if getattr(exc, "code", None) is None:
+        traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
     return CommandOutcome(False, getattr(exc, "code", "runtime_error"), {})
 
 

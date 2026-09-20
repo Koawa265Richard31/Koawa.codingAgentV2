@@ -550,6 +550,9 @@ def _real_main(argv: list[str]) -> int:
         print(json.dumps({"ok": False, "code": exc.code, "payload": {}}))
         return 2
     except Exception as exc:
+        import sys, traceback
+        if getattr(exc, "code", None) is None:
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
         print(json.dumps({"ok": False, "code": getattr(exc, "code", "runtime_error"), "payload": {}}))
         return 1
     finally:
