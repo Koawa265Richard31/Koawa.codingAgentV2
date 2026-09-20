@@ -20,6 +20,7 @@ from ..model.protocol import (
     AssistantTextItem,
     BlockedItem,
     FinishReason,
+    InstructionMessage,
     ModelCallRef,
     ModelContextItem,
     ModelError,
@@ -315,7 +316,9 @@ class AgentLoop:
         """Canonical UTF-8 byte+char budget of the request projection (D23 §5.4)."""
         chars = 0
         for item in context:
-            if isinstance(item, UserMessage):
+            if isinstance(item, (UserMessage, InstructionMessage)):
+                # E1: trusted instructions are part of the request and must
+                # be metered with everything else.
                 chars += len(item.content)
             elif isinstance(item, AssistantMessage):
                 # AssistantMessage wraps an AssistantTextItem (.text), while
@@ -342,16 +345,25 @@ class AgentLoop:
         memory = self._memory
         if memory is None or not memory.in_run_compaction_enabled:
             return
-        if self._compaction_sink is None:
-            return
         if self.durable_tool_execution and self._pending_tool_calls():
             return  # open calls may never be compressed
-        current = self.context_chars(context)
+        # Hardening 2026-09-19 (E1/E2): the gate meters the FULL request -
+        # context items (including trusted instructions, counted above) plus
+        # the pinned tool-definition schemas - and runs regardless of whether
+        # a compaction sink is bound, so a sink-less path can no longer
+        # silently bypass the budget.
+        current = self.context_chars(context) + self._definitions_chars()
         reserve = memory.request_context_reserve_chars
         soft = memory.request_context_soft_chars
         hard = memory.request_context_hard_chars
         target = memory.compaction_target_chars
         if current + reserve <= soft:
+            return
+        if self._compaction_sink is None:
+            # Nothing on this path is compressible: refuse the oversized
+            # request instead of sending it (fail-closed, same contract).
+            if current + reserve > hard:
+                raise AgentLoopError("context_capacity_exhausted")
             return
         from ..execution.compaction import (
             CompactionError,
@@ -454,6 +466,15 @@ class AgentLoop:
     def _tool_count_known(self) -> int:
         sink = self._compaction_sink
         return int(getattr(sink, "tool_count", 0) or 0)
+
+    def _definitions_chars(self) -> int:
+        """E1/E2: pinned tool-definition schemas ride every request and must
+        count against the capacity gate even though they are not context
+        items."""
+        return sum(
+            len(definition.input_schema_json)
+            for definition in (self._tool_definitions or ())
+        )
 
     def _pending_tool_calls(self) -> bool:
         sink = self._compaction_sink
