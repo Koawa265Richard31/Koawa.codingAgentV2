@@ -27,6 +27,7 @@ from ..model.protocol import (
 )
 from ..control.models import TurnState, TurnStatus
 from ..recovery import (
+    CheckpointError,
     CheckpointStore,
     DurableExecutionRecorder,
     LeaseConflict,
@@ -453,6 +454,20 @@ class TurnWorker:
                 expected_version=running.version,
                 run_id=running.current_run_id,
                 command_id=_command_id(resolved_execution_id, "fail"),
+            )
+            finish_durable(); return TurnWorkerResult(failed, None)
+        except CheckpointError as exc:
+            # Audit F21: compaction fact failures raised CheckpointError,
+            # which escaped fail_turn and left the Turn RUNNING forever -
+            # blocking the whole thread with a bare runtime_error and no
+            # user recovery. Terminalize honestly instead; the execution
+            # log keeps the failure facts for operator inspection.
+            failed = self._runtime.fail_turn(
+                running.turn_id,
+                "d2:checkpoint_error",
+                expected_version=running.version,
+                run_id=running.current_run_id,
+                command_id=_command_id(resolved_execution_id, "fail-checkpoint"),
             )
             finish_durable(); return TurnWorkerResult(failed, None)
         except BaseException:
