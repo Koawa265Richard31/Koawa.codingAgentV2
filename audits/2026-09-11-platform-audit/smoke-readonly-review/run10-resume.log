@@ -1,0 +1,3 @@
+<frozen runpy>:128: RuntimeWarning: 'koawa_agent_v2.runtime.cli' found in sys.modules after import of package 'koawa_agent_v2.runtime', but prior to execution of 'koawa_agent_v2.runtime.cli'; this may result in unpredictable behaviour
+{"code":"turn_already_terminal","ok":true,"payload":{"error":"d2:openai.malformed_sse_json","final_text":null,"status":"failed","thread_id":"a5ef13a3-ae70-553e-a94f-28678aeed7bb","turn_id":"c044db14-09e2-5664-b4e8-45d35ba558e2"}}
+exit=0
