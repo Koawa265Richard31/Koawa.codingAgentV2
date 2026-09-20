@@ -1,0 +1,9 @@
+<frozen runpy>:128: RuntimeWarning: 'koawa_agent_v2.runtime.cli' found in sys.modules after import of package 'koawa_agent_v2.runtime', but prior to execution of 'koawa_agent_v2.runtime.cli'; this may result in unpredictable behaviour
+KoawaAgent V2 interactive session
+  repo : D:\A_Dev_Projects\KoawaAgent\v2
+  db   : D:\A_Dev_Projects\koawa-smoke-review\state.sqlite3
+  model: deepseek-ai/DeepSeek-V4-Flash (reasoning_effort=None)
+  thread: a5ef13a3-ae70-553e-a94f-28678aeed7bb
+type /help for commands
+you> {"ok": false, "code": "runtime_error", "payload": {}}
+exit=1
