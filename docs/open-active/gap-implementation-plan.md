@@ -48,14 +48,16 @@
 
 ## E. 检索加固轨道（2026-09-19 新增，来源 hardening-memory-retrieval-2026-09-19 包）
 
-安全加固设计包（context.md 证据清单 E1-E5 + hardening.md 评审 + proposals/bounded-result-retrieval.md 提案 + 3 图）定义了有界历史工具结果检索的实现轨道。与 C 组关系：**C5/C6（会话压缩块/摘要持久化）不在该包范围**（它管工具结果检索，不管会话块）；其"完整请求计量门禁"（E1/E2）与 C 组互补且优先级高——请求容量漏计指令与工具定义、无独立最终门禁。
+安全加固设计包已于 2026-09-20 更新为[已选完整设计](hardening-memory-retrieval-2026-09-19/proposals/bounded-result-retrieval.md)，附 E1-E9 证据清单、3 张边界图、结构化状态及[实施交接](hardening-memory-retrieval-2026-09-19/implementation/bounded-capture.md)。用户已接受方案并授权文档交付，**架构不再逐节待确认；运行时代码本次未实施**。C5/C6 的既有修复不在此重复实施；新方案连接其摘要与可信结果引用，另补完整请求计量、首返/恢复入口、安全诊断、检索和内容外发边界。F20/F21 需按最新取证独立核验，不能由本设计宣称关闭。
 
-工作包（按提案依赖序，**未授权不动工**，需维护者对提案逐节确认）：
-1. 定义结果身份与可见等级（含"运行时已切断敏感可达性"的测试分类标准）；
-2. 补完整请求计量门禁（E1/E2 修正：指令+工具定义+输出预留全计量，独立最终门禁）；
-3. 旧记录可重建短元数据索引 + 权限校验（选项 1）；
-4. 新回合持久化安全投影 + 分页读取与截断说明（选项 2，首次回执同入口）；
-5. 跨边界与长任务验证（敏感样例、跨线程拒绝、命中率/拒绝率/p95 实测）。
+工作包（具体内容与验收以实施交接为准；此处记录后续顺序）：
+
+1. 核验恢复/压缩基线，定义可信数据契约，接入首次回执、恢复、摘要和完整请求门；
+2. 建立允许文件/合成输入的安全诊断环境及测试/MCP 适配器；
+3. 发布不可变安全 JSON 投影，旧记录仅建安全元数据索引；
+4. 实现当前作用域的搜索、分页读取、摘要引用与累计预算；
+5. 接入固定产物外发，复用 D9/D7，并核验旁路与 uncertain；
+6. 真实长任务、故障与成本实验决定页大小、累计限额、窗口及留存参数，不预设数字。
 验收基线：提案 Validation Plan 节。首版约束：测试/MCP 优先、敏感日志不进模型服务、MCP 白名单、历史文件正文快照不做。
 
 E1/E2 两份原始缺口记录已被本包吸收为证据，移至 docs/closed-archive/；包内引用路径已更新。
@@ -65,3 +67,5 @@ E1/E2 两份原始缺口记录已被本包吸收为证据，移至 docs/closed-a
 - 2026-09-19：并入 hardening-memory-retrieval 设计包（新增 E 组）；E1/E2 归档。**C1 完成**：integrate() 复用分支回放持久化结果（known_negative 不再报 0/success；非法字段 integration_receipt_result_invalid fail-closed；成功复用与 deliver 拒绝语义不变），tests/test_d12_i7_001_reuse_status.py 3 项 + I7/I9 回归 41/41 绿。下一项：C2。
 
 - 2026-09-19（续）：**C3-C6 全部完成**。C3：CLI 聊天失败分支把失败回合写入同进程历史（恢复后与重启视图一致）。C4：结论投影增加有界 test_evidence_refs 行（计数+前 4 个 digest 前缀）。C5：跨回合压缩块总量受 history_max_chars/4（下限 1000）预算约束，超限最旧块折叠为确定性 merged 摘要行。C6：跨回合模型摘要经会话 marker 持久化（export/preload_summaries），重启按块位次重放、不再重调摘要模型。回归 tests/test_c3456_session_gaps.py 4 项 + 会话全套（d16/d19/d23 projection/recall/config）58/58 绿。**C 组（C1-C6）全部完成**；剩余 C7/C8 待裁决，D 组等外部条件。cli.py/session.py 的 CI 全量回归与 d16 交互端到端建议下窗口补跑。
+
+- 2026-09-19（E 组开工）：**工作包 2「完整请求计量门禁」完成**（E1/E2 修正）。loop `context_chars` 计入 InstructionMessage（指令漏计修复）；`_maybe_compact` 计量先于 sink 判定，full request = context + 固定项（工具定义 schema，新增 `_definitions_chars`）；无 sink 路径超 hard 同样 fail-closed（`context_capacity_exhausted`），不再静默旁路。回归 tests/test_request_metering_gate.py 4/4（指令计量、定义计量、小请求通过、和值超硬）+ d23/wiring/d16 套件 62/62。E 组剩余：工作包 1（结果身份与可见等级）→ 3（元数据索引）→ 4（安全投影+分页）→ 5（验证），按提案依赖序推进。

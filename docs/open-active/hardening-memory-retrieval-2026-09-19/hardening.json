@@ -2,115 +2,552 @@
   "documentType": "codex-security.hardening-analysis",
   "schemaVersion": "1.0",
   "analysisId": "memory_retrieval_20260919",
+  "updatedAt": "2026-09-20",
   "sourceEvidence": {
     "kind": "document_collection",
-    "label": "D13-D23 memory and request-capacity findings plus inspected source",
-    "collectionSha256": "9bdd750eed1ae6b64db0d14e037709f7220f91457cd8dcedd474666adc03381e",
-    "artifactCount": 2,
+    "label": "Memory/capacity findings, inspected runtime boundaries and latest F20/F21 evidence",
+    "collectionSha256": "f08de167e205c1d9ddc586cda367fe452fdf8c84d79217d79d4024c6b29e92d6",
+    "artifactCount": 15,
     "sourceDrift": "present",
-    "targetRevision": "2d42746"
+    "targetRevision": "84d22889228e629b5cd6f146591aca750408ea77",
+    "driftNotes": [
+      "Unrelated working-tree change in tests/test_unified_runtime.py excluded from evidence and edits."
+    ],
+    "hashAlgorithm": "SHA256 of ordered repository-relative path + space + lowercase file SHA256 lines, LF joined, no trailing LF",
+    "artifacts": [
+      {
+        "path": "docs/closed-archive/d13-d23-memory-followup-gaps-2026-09-19.md",
+        "sha256": "5caae54629e72fbf2e9e7ed1fcccb4c78c467d7bc31020a0558d677945b1661f"
+      },
+      {
+        "path": "docs/closed-archive/d13-d23-request-capacity-gap-2026-09-19.md",
+        "sha256": "9cc30369960b6bafe4160026644c256cac046c2684be513c3837593ee565f093"
+      },
+      {
+        "path": "src/koawa_agent_v2/execution/loop.py",
+        "sha256": "665e885c7c1d769be27ac285a486ea806e1dfac456df4e356a523f7368ee8219"
+      },
+      {
+        "path": "src/koawa_agent_v2/recovery/execution.py",
+        "sha256": "024a35262883b7c4cf4006c387305385bd6acb68a977df2ad6931215c59cb820"
+      },
+      {
+        "path": "src/koawa_agent_v2/recovery/redaction.py",
+        "sha256": "02ade6f2fb3cc8e13f0806bd728a91667f4fcb0183f5e37dbd9014dfa23c41bd"
+      },
+      {
+        "path": "src/koawa_agent_v2/ledger/store.py",
+        "sha256": "d92c03b0c2331bcb04f0711a1f5caca2218ef18519db23a1f2d8e09273f60127"
+      },
+      {
+        "path": "src/koawa_agent_v2/verification/tools.py",
+        "sha256": "3014e636c00a41da7766b51a243d09add4d060a8fceade54ababcadeb15e8c45"
+      },
+      {
+        "path": "src/koawa_agent_v2/verification/finalization.py",
+        "sha256": "e4ff561b210faab8df7cea38fa3f899fa69fedd4db6bbff40cb066659b681984"
+      },
+      {
+        "path": "src/koawa_agent_v2/mcp/connection_manager.py",
+        "sha256": "aafb321664a558d5da5add6075ba140d56787be9f4aba5460722018599a0b59a"
+      },
+      {
+        "path": "src/koawa_agent_v2/sandbox/runtime.py",
+        "sha256": "f5ff7fbee09da02c5dff8be1e57d0c17c2e6d4f259daf9ae0e85161143092127"
+      },
+      {
+        "path": "src/koawa_agent_v2/runtime/assembly.py",
+        "sha256": "492d9f8bbfd1deb7cad6434076b634036513560dad3d333ecd8167722358c08e"
+      },
+      {
+        "path": "src/koawa_agent_v2/runtime/session.py",
+        "sha256": "cca4789568d5fa7f28490d95abbf4a746c7dba6487fe76282153ccd451ec3563"
+      },
+      {
+        "path": "src/koawa_agent_v2/policy.py",
+        "sha256": "00c2eecbf23bf123b5d9bf9ac2eaaeb348e43475f51a017036b005ea045eeca8"
+      },
+      {
+        "path": "audits/2026-09-11-platform-audit/smoke-readonly-review/f20-smoking-gun.md",
+        "sha256": "04abdc77eecbb50271796115ff144f656148b37458f7eec38dc19fc1177491d9"
+      },
+      {
+        "path": "audits/2026-09-11-platform-audit/smoke-readonly-review/f20-f21-diagnosis.md",
+        "sha256": "af1111b9b92160397fd849a35957417ecff9b8b1808229eb10cba3c5bd5303e6"
+      }
+    ]
   },
   "assessment": {
     "outcome": "opportunities_identified",
-    "summary": "Controlled retrieval from existing bounded tool results is a first design candidate; added long-term result capture needs separate evidence and data policy."
+    "summary": "User selected the complete safe-diagnostics, historical-retrieval and recipient-bound egress design. Documentation only; runtime implementation and measured limits remain pending."
+  },
+  "decision": {
+    "status": "selected_design",
+    "date": "2026-09-20",
+    "scope": "Design documents and implementation handoff; no runtime implementation, commit or push in this task.",
+    "selectedOptionIds": [
+      "bounded-capture"
+    ],
+    "legacyCompatibilityOptionId": "existing-events"
   },
   "constraints": {
-    "profile": "balanced",
-    "changeHorizons": ["incremental", "medium_term"],
+    "profile": "confidentiality_first",
+    "changeHorizons": [
+      "incremental",
+      "medium_term"
+    ],
     "nonNegotiables": [
-      "Prioritize test and MCP results over historical file-content snapshots.",
-      "MCP retrieval candidates must originate from allowlisted services and tools.",
-      "Sensitive logs must not be sent to the model service on first tool return or historical retrieval.",
-      "Retrieval must not expand sensitive-content visibility or grant external-send authority."
+      "Sensitive logs must not enter model services, including through first returns, replay, summarization and retrieval.",
+      "Old results expose only contract-approved metadata.",
+      "New retrieval reads the exact published first-return safe projection, not additional raw body.",
+      "MCP source allowlisting does not imply content safety or outbound permission.",
+      "Historical tests do not automatically satisfy current delivery gates.",
+      "Outbound data uses trusted fixed artifacts and recipient-specific authorization; generic free text is closed by default.",
+      "JSON only; authoritative state changes require typed events and exact expected versions.",
+      "Page size, cumulative limits, context target and retention are measurement decisions."
     ],
     "assumptions": [
-      "No measured storage, latency or retention budget was supplied.",
-      "Concurrent source edits must be rechecked before implementation."
+      "No new performance or real-model experiments ran in this documentation task.",
+      "Whole-repository Docker mounts do not attest to safe diagnostic inputs.",
+      "F20/F21 fixes and later source drift must be independently rechecked."
     ]
   },
   "opportunities": [
     {
       "opportunityId": "bounded-result-retrieval",
-      "title": "Bounded historical tool-result retrieval",
-      "summary": "Give the model scoped access to safe projections of prior test and MCP results without treating history as authority.",
-      "diagnosis": "Durable results exist, but there is no model-facing scoped retrieval path or complete request-capacity check; redaction alone cannot certify safe visibility.",
+      "title": "Safe diagnostics, historical retrieval and content egress",
+      "summary": "Unify first-return/replay visibility, scoped historical access and recipient-bound dispatch without elevating retrieved text into authority.",
+      "diagnosis": "Result persistence, context projection and action authorization do not by themselves prove content is allowed for each recipient.",
       "evidence": [
-        {"claimType": "observed", "sourceKind": "document", "evidenceId": "E1", "path": "docs/open-active/d13-d23-memory-followup-gaps-2026-09-19.md", "claim": "Request budget does not account for the complete final request."},
-        {"claimType": "observed", "sourceKind": "document", "evidenceId": "E2", "path": "docs/open-active/d13-d23-request-capacity-gap-2026-09-19.md", "claim": "The capacity gap has a separate detailed record."},
-        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E3", "path": "src/koawa_agent_v2/ledger/store.py", "claim": "The ledger persists a redacted result string in versioned JSON events; recovery/redaction.py covers named patterns rather than all sensitive values."},
-        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E4", "path": "src/koawa_agent_v2/verification/tools.py", "claim": "Tool handlers may crop model-facing output; finalization.py does not include stdout or stderr in the final evidence document."},
-        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E5", "path": "src/koawa_agent_v2/sandbox/runtime.py", "claim": "The Docker runner disables network and mounts the whole repository read-only; runtime/assembly.py may select this or a trusted host runner."},
-        {"claimType": "inferred", "sourceKind": "source", "path": "src/koawa_agent_v2/runtime/session.py", "claim": "Current history projection cannot reconstruct full tool-result bodies for the model."}
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "E1",
+          "path": "docs/closed-archive/d13-d23-memory-followup-gaps-2026-09-19.md",
+          "claim": "Historical follow-up memory gaps record incomplete request accounting; individual status must be checked against current source."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "E2",
+          "path": "docs/closed-archive/d13-d23-request-capacity-gap-2026-09-19.md",
+          "claim": "The recorded capacity gap covers instruction/tool-definition accounting and an independent final gate."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E3",
+          "path": "src/koawa_agent_v2/execution/loop.py",
+          "claim": "Tool results enter context; compaction precedes final tool snapshot and ModelRequest construction. Related ledger/redaction/recovery sources are hashed in the evidence inventory."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E4",
+          "path": "src/koawa_agent_v2/verification/tools.py",
+          "claim": "Test return serialization includes stdout/stderr; MCP envelope/redaction and finalization evidence are distinct paths."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E5",
+          "path": "src/koawa_agent_v2/sandbox/runtime.py",
+          "claim": "Docker disables network but mounts the whole repository read-only; this does not prove secret-free input."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E6",
+          "path": "src/koawa_agent_v2/policy.py",
+          "claim": "Action documents bind canonical arguments, target and MCP identities; the inspected fields do not provide a general data-release contract."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "E7",
+          "path": "audits/2026-09-11-platform-audit/smoke-readonly-review/f20-smoking-gun.md",
+          "claim": "The latest report records zero seed items against 19 loop items and an earlier committed compaction. The exact construction-path defect remains to be verified."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "E8",
+          "path": "audits/2026-09-11-platform-audit/smoke-readonly-review/f20-f21-diagnosis.md",
+          "claim": "Historical F21 report describes CheckpointError escaping terminalization; c9dfb5e claims a fix, not revalidated in this documentation task."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E9",
+          "path": "src/koawa_agent_v2/runtime/session.py",
+          "claim": "Session projections populate future context, so restoration and summarization require the same model-ingress boundary."
+        }
       ],
       "desiredInvariants": [
-        "Every result reference is bound to a caller, thread, workspace, tool call and persisted version.",
-        "Test and MCP free-text output must pass a model-ingress gate before the first tool result and every historical replay; unknown or sensitive logs yield metadata only.",
-        "Unknown sensitivity yields metadata only; retrieved text conveys no approval authority.",
-        "All retrieved text and tool definitions count toward a pre-send full-request budget.",
-        "Each response states capture, retention and read truncation separately."
+        "Every model-visible item has trusted provenance and current audience authorization.",
+        "Unknown bodies yield only explicitly releasable metadata.",
+        "Result identity and current applicability remain distinct.",
+        "Immutable publication precedes visibility; indexes are rebuildable.",
+        "Final model requests account for all input and output reserve.",
+        "Egress binds actual payload, recipient, artifact version, policy and tool identity.",
+        "Compaction/recovery integrity is independently validated."
       ],
       "proposalPath": "proposals/bounded-result-retrieval.md",
       "options": [
         {
           "optionId": "existing-events",
-          "title": "Index safe metadata from existing events",
+          "title": "Option 1: Legacy safe metadata",
           "kind": "incremental",
-          "summary": "Gate first-return tool output, then build a rebuildable metadata index over old events without releasing old result bodies.",
-          "diagramPaths": {"before": "diagrams/bounded-result-retrieval-before.mmd", "after": "diagrams/bounded-result-retrieval-existing-events-after.mmd"},
+          "summary": "Keep old bodies closed and add scoped structured metadata search.",
+          "diagramPaths": {
+            "before": "diagrams/bounded-result-retrieval-before.mmd",
+            "after": "diagrams/bounded-result-retrieval-existing-events-after.mmd"
+          },
           "evidenceCoverage": [
-            {"evidenceId": "E1", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "A complete final request check is still required."},
-            {"evidenceId": "E2", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Retrieval quotas cannot replace total request accounting."},
-            {"evidenceId": "E3", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Scoped reads narrow new exposure; existing stored sensitive data remains a separate concern."},
-            {"evidenceId": "E4", "effect": "unknown", "tacticalFixRequired": false, "rationale": "Already cropped content cannot be recreated."},
-            {"evidenceId": "E5", "effect": "unaffected", "tacticalFixRequired": true, "rationale": "Search over existing results does not prove secret-free test execution; a separate safe execution boundary is required for rich output."}
+            {
+              "evidenceId": "E1",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Old safe metadata reduces retrieval exposure; common ingress and capacity fixes remain required."
+            },
+            {
+              "evidenceId": "E2",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Old safe metadata reduces retrieval exposure; common ingress and capacity fixes remain required."
+            },
+            {
+              "evidenceId": "E3",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Old safe metadata reduces retrieval exposure; common ingress and capacity fixes remain required."
+            },
+            {
+              "evidenceId": "E4",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Old safe metadata reduces retrieval exposure; common ingress and capacity fixes remain required."
+            },
+            {
+              "evidenceId": "E5",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Old safe metadata reduces retrieval exposure; common ingress and capacity fixes remain required."
+            },
+            {
+              "evidenceId": "E6",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Old safe metadata reduces retrieval exposure; common ingress and capacity fixes remain required."
+            },
+            {
+              "evidenceId": "E7",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Independent compaction/recovery fixes and validation remain prerequisites."
+            },
+            {
+              "evidenceId": "E8",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Independent compaction/recovery fixes and validation remain prerequisites."
+            },
+            {
+              "evidenceId": "E9",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Old safe metadata reduces retrieval exposure; common ingress and capacity fixes remain required."
+            }
           ],
           "tradeoffs": [
-            {"dimension": "security", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "A model-ingress gate protects both initial tool return and scoped historical reads; old persisted content may still be sensitive.", "validationPlan": "Test secret-bearing first returns, cross-thread denial and unknown-sensitivity metadata-only behavior."},
-            {"dimension": "performance", "direction": "regresses", "confidence": "low", "basis": "hypothetical", "assessment": "Index and read queries add local database work.", "validationPlan": "Measure p95 retrieval latency on representative long threads."},
-            {"dimension": "memory", "direction": "regresses", "confidence": "low", "basis": "hypothetical", "assessment": "A bounded index and page buffers use memory.", "validationPlan": "Measure peak process memory and index size."},
-            {"dimension": "reliability", "direction": "improves", "confidence": "low", "basis": "hypothetical", "assessment": "Historical failures may become diagnosable, provided the needed text survived cropping.", "validationPlan": "Compare task recovery and retry counts using the same scenarios."},
-            {"dimension": "operability", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Search denial, stale references and index rebuilding need observable status.", "validationPlan": "Exercise index corruption and recovery diagnostics."},
-            {"dimension": "migration", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "Existing result events need no body migration; derived indexes can be rebuilt.", "validationPlan": "Build and remove the index against a copy of an old database."}
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Unknown bodies stay closed; visibility is enforced independently of model claims.",
+              "validationPlan": "Test synthetic secrets across first return, replay, retrieval and egress."
+            },
+            {
+              "dimension": "performance",
+              "direction": "regresses",
+              "confidence": "low",
+              "basis": "hypothetical",
+              "assessment": "Index queries add work; the selected design also serializes and publishes safe projections.",
+              "validationPlan": "Compare retrieval and tool-completion p95 on the same representative tasks."
+            },
+            {
+              "dimension": "memory",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "Bounded index/page buffers and, for new projections, JSON body storage add resource use.",
+              "validationPlan": "Measure peak RSS, retained bytes and per-thread growth."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Additional publication and cleanup states require recovery; old metadata alone may be insufficient for diagnosis.",
+              "validationPlan": "Inject CAS, write, replay, index and expiry faults without re-executing effects."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Operators need safe watermarks, policy versions and rejection/retention status.",
+              "validationPlan": "Exercise policy revocation, index rebuilding and incident handling."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Old bodies must not be auto-promoted; restoration readers need compatibility handling.",
+              "validationPlan": "Upgrade a copied legacy store and test safe feature rollback."
+            },
+            {
+              "dimension": "developer_ergonomics",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "Central adapters reduce duplicated checks but require explicit per-tool release contracts.",
+              "validationPlan": "Review a newly added tool for all ingress and egress paths."
+            },
+            {
+              "dimension": "rollback",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Features can be disabled, but rollback must retain ingress and final request enforcement.",
+              "validationPlan": "Disable retrieval/egress and verify no legacy raw-body fallback."
+            }
           ],
-          "residualRisks": ["Existing result bodies may contain sensitive text missed by regex redaction.", "Old metadata alone may not support diagnosis."],
-          "implementationReadiness": {"affectedComponents": ["src/koawa_agent_v2/ledger/store.py", "src/koawa_agent_v2/execution/loop.py", "src/koawa_agent_v2/runtime/session.py"], "workPackages": ["Define model-ingress and visibility policy", "Gate first-return tool output", "Build rebuildable short index and paged reader", "Enforce full request budget"], "acceptanceCriteria": ["Secret-bearing logs do not enter model requests", "Cross-thread reads fail", "Unknown sensitivity returns metadata only", "Retrieved content cannot bypass request capacity"], "migrationNotes": ["Existing events are not automatically low sensitivity"], "rollback": "Disable search and read endpoints and discard the derived index; preserve the model-ingress gate."}
+          "residualRisks": [
+            "Old metadata can be insufficient for diagnosis.",
+            "Historical raw bodies remain private and may require separate cleanup."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "src/koawa_agent_v2/execution/loop.py",
+              "src/koawa_agent_v2/recovery/execution.py",
+              "src/koawa_agent_v2/runtime/session.py",
+              "src/koawa_agent_v2/ledger/store.py"
+            ],
+            "workPackages": [
+              "Shared model gates",
+              "Legacy safe metadata index",
+              "Scoped search and rebuild"
+            ],
+            "acceptanceCriteria": [
+              "Sensitive logs never enter model requests through covered paths.",
+              "References do not confer authority.",
+              "Complete final request capacity is checked.",
+              "Index/projection failure never re-executes an effect.",
+              "Unknown outcomes remain uncertain."
+            ],
+            "migrationNotes": [
+              "Old bodies remain closed.",
+              "Restore paths require the same current audience policy.",
+              "No numeric quota is selected before measurement."
+            ],
+            "rollback": "Disable retrieval, rich diagnostics or egress separately; preserve model-ingress and complete-request gates."
+          }
         },
         {
           "optionId": "bounded-capture",
-          "title": "Persist the model-safe first-return projection",
+          "title": "Option 2: Safe projection, retrieval and recipient-bound egress",
           "kind": "structural",
-          "summary": "Generate a bounded model-safe projection before the first tool return and persist that exact projection for later scoped retrieval.",
-          "diagramPaths": {"before": "diagrams/bounded-result-retrieval-before.mmd", "after": "diagrams/bounded-result-retrieval-bounded-capture-after.mmd"},
+          "summary": "Publish the exact first-return safe projection; add scoped reads, trusted references and fixed-artifact egress.",
+          "diagramPaths": {
+            "before": "diagrams/bounded-result-retrieval-before.mmd",
+            "after": "diagrams/bounded-result-retrieval-bounded-capture-after.mmd"
+          },
           "evidenceCoverage": [
-            {"evidenceId": "E1", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "The final request capacity check remains mandatory."},
-            {"evidenceId": "E2", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Longer storage does not change provider context limits."},
-            {"evidenceId": "E3", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Pre-storage classification is needed beyond pattern redaction."},
-            {"evidenceId": "E4", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Allowed diagnostics survive as the first-return projection, but never executor capture truncation."},
-            {"evidenceId": "E5", "effect": "unaffected", "tacticalFixRequired": true, "rationale": "Longer capture still needs a separate safe execution boundary before rich output can reach the model."}
+            {
+              "evidenceId": "E1",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Design coverage only; implement the specified boundary and validate the source path."
+            },
+            {
+              "evidenceId": "E2",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Design coverage only; implement the specified boundary and validate the source path."
+            },
+            {
+              "evidenceId": "E3",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Design coverage only; implement the specified boundary and validate the source path."
+            },
+            {
+              "evidenceId": "E4",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Design coverage only; implement the specified boundary and validate the source path."
+            },
+            {
+              "evidenceId": "E5",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Design coverage only; implement the specified boundary and validate the source path."
+            },
+            {
+              "evidenceId": "E6",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Design coverage only; implement the specified boundary and validate the source path."
+            },
+            {
+              "evidenceId": "E7",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Independent compaction/recovery fixes and validation remain prerequisites."
+            },
+            {
+              "evidenceId": "E8",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Independent compaction/recovery fixes and validation remain prerequisites."
+            },
+            {
+              "evidenceId": "E9",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Design coverage only; implement the specified boundary and validate the source path."
+            }
           ],
           "tradeoffs": [
-            {"dimension": "security", "direction": "improves", "confidence": "low", "basis": "hypothetical", "assessment": "The same model-ingress decision governs first return and retrieval; a projection mistake can persist sensitive data.", "validationPlan": "Adversarial tests for secrets and private data in first-return and historical test/MCP output."},
-            {"dimension": "performance", "direction": "regresses", "confidence": "low", "basis": "hypothetical", "assessment": "Additional serialization and writes increase tool completion latency.", "validationPlan": "Benchmark tool completion p95 on large outputs."},
-            {"dimension": "memory", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Longer bounded buffers and indexes require more resources.", "validationPlan": "Measure peak memory and database growth per long task."},
-            {"dimension": "reliability", "direction": "unknown", "confidence": "low", "basis": "hypothetical", "assessment": "Better diagnostics compete with new write and cleanup failure modes.", "validationPlan": "Inject write, replay and cleanup failures."},
-            {"dimension": "operability", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Classification, retention deadlines and cleanup require monitoring and incident procedures.", "validationPlan": "Review rejection telemetry and rehearse expired-data cleanup."},
-            {"dimension": "migration", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "New event types and durable data policies require compatibility and rollback decisions.", "validationPlan": "Upgrade and roll back a copied old database."}
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Unknown bodies stay closed; visibility is enforced independently of model claims.",
+              "validationPlan": "Test synthetic secrets across first return, replay, retrieval and egress."
+            },
+            {
+              "dimension": "performance",
+              "direction": "regresses",
+              "confidence": "low",
+              "basis": "hypothetical",
+              "assessment": "Index queries add work; the selected design also serializes and publishes safe projections.",
+              "validationPlan": "Compare retrieval and tool-completion p95 on the same representative tasks."
+            },
+            {
+              "dimension": "memory",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "Bounded index/page buffers and, for new projections, JSON body storage add resource use.",
+              "validationPlan": "Measure peak RSS, retained bytes and per-thread growth."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Additional publication and cleanup states require recovery; old metadata alone may be insufficient for diagnosis.",
+              "validationPlan": "Inject CAS, write, replay, index and expiry faults without re-executing effects."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Operators need safe watermarks, policy versions and rejection/retention status.",
+              "validationPlan": "Exercise policy revocation, index rebuilding and incident handling."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Old bodies must not be auto-promoted; restoration readers need compatibility handling.",
+              "validationPlan": "Upgrade a copied legacy store and test safe feature rollback."
+            },
+            {
+              "dimension": "developer_ergonomics",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "Central adapters reduce duplicated checks but require explicit per-tool release contracts.",
+              "validationPlan": "Review a newly added tool for all ingress and egress paths."
+            },
+            {
+              "dimension": "rollback",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Features can be disabled, but rollback must retain ingress and final request enforcement.",
+              "validationPlan": "Disable retrieval/egress and verify no legacy raw-body fallback."
+            }
           ],
-          "residualRisks": ["Content discarded by executor capture limits remains unavailable.", "An unsafe first-return projection can persist sensitive material."],
-          "implementationReadiness": {"affectedComponents": ["src/koawa_agent_v2/verification/tools.py", "src/koawa_agent_v2/mcp/connection_manager.py", "src/koawa_agent_v2/control/event_store.py", "src/koawa_agent_v2/execution/loop.py"], "workPackages": ["Define model-safe projection and policy version", "Persist the first-return projection as a typed event", "Add scoped index, reader and budget gate"], "acceptanceCriteria": ["Unknown sensitivity projects metadata only", "Historical reads reveal no more than first return", "Per-result and per-thread quotas apply", "Read responses expose all truncation states"], "migrationNotes": ["Old events are not retroactively promoted to low sensitivity"], "rollback": "Stop new projection persistence and reads; preserve first-return model-ingress checks."}
+          "residualRisks": [
+            "Projection adapters or isolation can be wrong.",
+            "Already disclosed content cannot be recalled.",
+            "Arbitrary semantic exfiltration is not solved by labels; free-text egress remains restricted.",
+            "Historical evidence cannot certify the current candidate."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "src/koawa_agent_v2/execution/loop.py",
+              "src/koawa_agent_v2/recovery/execution.py",
+              "src/koawa_agent_v2/runtime/session.py",
+              "src/koawa_agent_v2/ledger/store.py",
+              "src/koawa_agent_v2/verification/tools.py",
+              "src/koawa_agent_v2/mcp/connection_manager.py",
+              "src/koawa_agent_v2/policy.py"
+            ],
+            "workPackages": [
+              "Verify recovery baseline",
+              "Shared projection contracts and model gates",
+              "Safe diagnostic environment",
+              "Immutable JSON publication",
+              "Scoped search/read and summary references",
+              "Fixed-artifact egress",
+              "Real-task benchmarks"
+            ],
+            "acceptanceCriteria": [
+              "Sensitive logs never enter model requests through covered paths.",
+              "References do not confer authority.",
+              "Complete final request capacity is checked.",
+              "Index/projection failure never re-executes an effect.",
+              "Unknown outcomes remain uncertain."
+            ],
+            "migrationNotes": [
+              "Old bodies remain closed.",
+              "Restore paths require the same current audience policy.",
+              "No numeric quota is selected before measurement."
+            ],
+            "rollback": "Disable retrieval, rich diagnostics or egress separately; preserve model-ingress and complete-request gates.",
+            "planPath": "implementation/bounded-capture.md"
+          }
         }
       ],
       "recommendedOptionId": "bounded-capture",
-      "recommendation": "Expose only metadata from old events; for new results persist the exact model-safe first-return projection and retrieve that projection under current scope and budget checks."
+      "recommendation": "Selected by the user; combine new safe projections with legacy metadata-only compatibility."
     }
   ],
   "openQuestions": [
-    "Which test and MCP outputs are safe to expose beyond metadata?",
-    "What deterministic structured diagnostics let the model repair failures without reading free-text logs?",
-    "Can any test profiles be proven to run only on synthetic model-shareable inputs with no access to credentials, sensitive files or network?",
-    "Would a separately constructed allowlisted workspace be required for model-shareable test output?",
-    "Who owns test-profile output contracts, and what runtime control permits each structured failure field to reach the model?",
-    "What retention duration and per-thread storage quota should apply?",
-    "How will content-level egress policy consume data labels from retrieval?"
-  ]
+    "Measured finite page/query/cumulative/storage/retention budgets and context targets.",
+    "Actual provider/audience and destination configuration, with authority from existing owners.",
+    "Approved profile input manifests and per-field release contracts.",
+    "Measured quality, latency, cache and cost thresholds before production enablement."
+  ],
+  "validation": {
+    "performed": [
+      "Read-only source and evidence review; documentation consistency checks recorded at handoff."
+    ],
+    "notPerformed": [
+      "Runtime implementation",
+      "New provider benchmarks",
+      "Full implementation regression",
+      "New vulnerability validation"
+    ]
+  }
 }

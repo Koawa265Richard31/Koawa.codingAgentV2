@@ -234,11 +234,12 @@ class AssemblyOwnershipTest(unittest.TestCase):
         self.assertTrue(recorded[1].closed)
 
     def test_assembled_runtime_close_is_reverse_ordered_and_idempotent(self) -> None:
-        # Full assemble_runtime() with configured MCP servers cannot currently
-        # reach AgentLoop (composite_registry.CompositeToolRegistry is not a
-        # CompletionGate; I6 replaces the owner).  So attach two real connected
+        # Historical note (2026-09-19): CompositeToolRegistry DOES implement
+        # the D5 CompletionGate facade (assert_complete delegates fail-closed)
+        # - an earlier version of this comment claiming otherwise misled a
+        # model auditor into a false P0.  This test attaches two real connected
         # fixture sessions to a no-MCP assembled runtime via dataclasses.replace
-        # and exercise AssembledRuntime.close()/__enter__/__exit__ directly.
+        # and exercises AssembledRuntime.close()/__enter__/__exit__ directly.
         repo = self._git_repo()
         config = _runtime_config(repo)
         base = assemble_runtime(config, model_client=_TextModel())
