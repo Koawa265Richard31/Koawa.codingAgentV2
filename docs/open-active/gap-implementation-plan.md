@@ -71,3 +71,5 @@ E1/E2 两份原始缺口记录已被本包吸收为证据，移至 docs/closed-a
 - 2026-09-19（E 组开工）：**工作包 2「完整请求计量门禁」完成**（E1/E2 修正）。loop `context_chars` 计入 InstructionMessage（指令漏计修复）；`_maybe_compact` 计量先于 sink 判定，full request = context + 固定项（工具定义 schema，新增 `_definitions_chars`）；无 sink 路径超 hard 同样 fail-closed（`context_capacity_exhausted`），不再静默旁路。回归 tests/test_request_metering_gate.py 4/4（指令计量、定义计量、小请求通过、和值超硬）+ d23/wiring/d16 套件 62/62。E 组剩余：工作包 1（结果身份与可见等级）→ 3（元数据索引）→ 4（安全投影+分页）→ 5（验证），按提案依赖序推进。
 
 - 2026-09-19（WP-A 基线核验①）：新增 tests/test_f20_second_compaction.py——同线程"失败回合 + 历史前缀 + 多工具轮 + 双次压缩预算"受控场景，钉住 WP-A 第一契约：**压缩门失败必须落诚实终态（d2:context_capacity_exhausted / d2:checkpoint_error）且线程保持可用**（F21 修复回归）。当前该场景实际终态为 context_capacity_exhausted（预算与 keep 组形状未调优），F20 映射根因（同 run 第二次压缩对齐，见 f20-correction.md）仍开放，下窗口以 `_source_versions` 全表打印定位。
+
+- 2026-09-19（WP-A 深挖②）：recorder 级探针新增两条事实——① seed 各项共享版本 0，版本表非逐项递增；② 无 assistant 边界的连续工具轮被 parse_closed_groups 聚成单巨组。run11 intended 范围 0..18 因此极可能吞掉了 seed 前缀（instruction/user 本应是边界）——首次压缩"成功"但吞前缀，第二次压缩在替换后索引-版本错位上爆炸。WP-A 修正清单（assistant 边界多组复现、替换后对齐不变量、巨组契约）已写入 f20-correction.md；根因修复与 WP-1 实现待新窗口（上下文已尽）。
