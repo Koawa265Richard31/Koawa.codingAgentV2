@@ -1,0 +1,31 @@
+<frozen runpy>:128: RuntimeWarning: 'koawa_agent_v2.runtime.cli' found in sys.modules after import of package 'koawa_agent_v2.runtime', but prior to execution of 'koawa_agent_v2.runtime.cli'; this may result in unpredictable behaviour
+Traceback (most recent call last):
+  File "D:\A_Dev_Projects\KoawaAgent\v2\src\koawa_agent_v2\recovery\coordinator.py", line 165, in claim_stale
+    context = self.reconstruct(item)
+              ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\A_Dev_Projects\KoawaAgent\v2\src\koawa_agent_v2\recovery\coordinator.py", line 116, in reconstruct
+    full = reduce_execution(events)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\A_Dev_Projects\KoawaAgent\v2\src\koawa_agent_v2\recovery\context.py", line 581, in reduce_execution
+    _apply_compaction(
+  File "D:\A_Dev_Projects\KoawaAgent\v2\src\koawa_agent_v2\recovery\context.py", line 698, in _apply_compaction
+    raise ReconstructionError("compaction source range not found")
+koawa_agent_v2.recovery.context.ReconstructionError: compaction source range not found
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\A_Dev_Projects\KoawaAgent\v2\src\koawa_agent_v2\runtime\cli.py", line 524, in _real_main
+    outcome = app.resume(arguments.turn_id)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\A_Dev_Projects\KoawaAgent\v2\src\koawa_agent_v2\runtime\app.py", line 267, in resume
+    claimed = self._claim_stale(resolved)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\A_Dev_Projects\KoawaAgent\v2\src\koawa_agent_v2\runtime\app.py", line 540, in _claim_stale
+    ).claim_stale(matches[0], force=True)
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\A_Dev_Projects\KoawaAgent\v2\src\koawa_agent_v2\recovery\coordinator.py", line 167, in claim_stale
+    raise AutomaticRecoveryBlocked("corrupt execution log") from exc
+koawa_agent_v2.recovery.coordinator.AutomaticRecoveryBlocked: corrupt execution log
+{"ok": false, "code": "runtime_error", "payload": {}}
+exit=1
