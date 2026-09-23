@@ -6,6 +6,7 @@ tests; production CLI uses this module when ``--config`` is supplied.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -474,7 +475,57 @@ class AppRuntime:
             event_sink=event_sink,
         )
         self._record_turn_conclusion(result.turn)
+        self._publish_result_projections(result.turn)
         return result
+
+    def _publish_result_projections(self, turn) -> None:
+        """Hardening WP-D: publish metadata-only projections for the run's
+        test-result facts (best-effort; never fails the turn)."""
+        try:
+            from ..retrieval.projection import (
+                ResultProjectionStore,
+                scan_test_results,
+            )
+
+            projection_store = ResultProjectionStore(self.assembled.store)
+            for fact in scan_test_results(self.assembled.store, turn.turn_id):
+                receipt = fact.get("receipt") or {}
+                diagnostics = {
+                    key: receipt.get(key)
+                    for key in (
+                        "exit_code",
+                        "outcome",
+                        "duration_ms",
+                        "stdout_bytes",
+                        "stderr_bytes",
+                        "stdout_truncated",
+                        "stderr_truncated",
+                    )
+                    if receipt.get(key) is not None
+                }
+                projection_store.publish(
+                    turn_id=turn.turn_id,
+                    thread_id=turn.thread_id,
+                    run_id=turn.current_run_id,
+                    call_id=fact["call_id"],
+                    source_kind="test",
+                    diagnostics=diagnostics,
+                    body_ref={
+                        "stream": "run-execution",
+                        "turn_id": str(turn.turn_id),
+                        "event_id": fact["event_id"],
+                        "event_version": fact["event_version"],
+                        "content_digest": hashlib.sha256(
+                            json.dumps(
+                                fact.get("receipt"),
+                                sort_keys=True,
+                                ensure_ascii=False,
+                            ).encode("utf-8")
+                        ).hexdigest(),
+                    },
+                )
+        except Exception:
+            return
 
     def _record_turn_conclusion(self, turn) -> None:
         """Audit F13: persist a TurnConclusion for every terminal Turn.
