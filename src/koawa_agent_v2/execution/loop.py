@@ -391,6 +391,30 @@ class AgentLoop:
                 return
             if not anchors_are_preserved(groups, selected):
                 raise AgentLoopError("compaction_anchor_violation")
+            # Audit F20: instruction/user items are compaction anchors - the
+            # recorder refuses any source span that contains one.  Session
+            # prefixes (agents note, reminders, prior turns, older replacement
+            # blocks) inject anchors BEFORE the run's own tool groups, so a
+            # naive oldest-first batch would span across them and die with
+            # compaction_source_range_missing on the second compaction.  Trim
+            # the selection to the anchor-free tail after the LAST anchor.
+            last_anchor = max(
+                (
+                    index
+                    for index, item in enumerate(context)
+                    if isinstance(item, (InstructionMessage, UserMessage))
+                ),
+                default=-1,
+            )
+            selected = [
+                group
+                for group in selected
+                if group.first_context_index > last_anchor
+            ]
+            if not selected:
+                if self.context_chars(context) + reserve > hard:
+                    raise AgentLoopError("context_capacity_exhausted")
+                return
             # Compact up to a bounded batch of the oldest closed groups.  The
             # batch never crosses an earlier replacement (parse_closed_groups
             # treats replacements as boundaries), and source_versions_for
