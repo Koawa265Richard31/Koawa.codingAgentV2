@@ -1,5 +1,11 @@
 # 安全诊断、历史检索与外发：证据清单
 
+## 2026-09-23 补充核对（优先于下方历史解释）
+
+当前基线为 `06ab2d3`。E7 的零 seed 解释已经被后续更正推翻；新增 E10：`audits/2026-09-11-platform-audit/smoke-readonly-review/f20-correction.md`，SHA-256 `cd11c6c347d92deae50b5b5c91356142a6cce7579146bbeb99c1e6099340120f`。实际 seed 六项，首次压缩已落盘，后续压缩映射仍需定位；巨组吞前缀不能当成已验证根因。下方原集合摘要继续标识历史快照，不声称匹配全部当前源码。
+
+当前 loop 已增加指令和部分定义计量，但检查仍在压缩路径且存在提前返回；独立最终请求门的设计尚未全部实现。新增[首版实施契约](implementation/contracts.md)，本次仅文档变更；未执行运行时测试或 provider 实验。
+
 更新于 2026-09-20。检查基线 HEAD、origin/main 与实时 GitHub main 均为 `84d22889228e629b5cd6f146591aca750408ea77`。工作区有并行改动 `tests/test_unified_runtime.py`，未纳入本设计、未修改；sourceDrift 因此为 present。下面记录的是设计开始时的实际文件哈希，后续并行推进可能使它们变化。
 
 用户已选定方案并授权文档交付。没有运行真实 provider 实验或安全扫描；本文不宣称漏洞修复或 benchmark 完成。设计正文见 [完整设计](proposals/bounded-result-retrieval.md)，实施顺序见 [交接](implementation/bounded-capture.md)。
