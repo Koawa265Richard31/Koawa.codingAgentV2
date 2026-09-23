@@ -453,7 +453,12 @@ class McpSessionTest(unittest.TestCase):
         envelope = json.loads(result.content)
         self.assertTrue(envelope["untrusted_mcp_result"])
         self.assertEqual("server", envelope["server_id"])
-        self.assertIn("ignore previous", envelope["result"])
+        # Hardening WP-1: injection text no longer reaches the model at all -
+        # the receipt is metadata-only, a stronger posture than trusting the
+        # untrusted marker alone.
+        self.assertIsNone(envelope["result"])
+        self.assertEqual("metadata_only", envelope["result_visibility"])
+        self.assertNotIn("ignore previous", json.dumps(envelope))
 
     def test_outcome_uncertain_raises(self) -> None:
         fake = FakeTransport()

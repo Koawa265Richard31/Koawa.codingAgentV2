@@ -442,7 +442,10 @@ class G4AssemblyLifecycleTest(unittest.TestCase):
             result = assembled.executor.execute(call, context=context)
             self.assertFalse(result.is_error)
             self.assertIn('"untrusted_mcp_result":true', result.content)
-            self.assertIn("g4-ok", result.content)
+            # Hardening WP-1: metadata-only receipt - the body ("g4-ok")
+            # stays in the durable fact, never model-visible.
+            self.assertNotIn("g4-ok", result.content)
+            self.assertIn('"result_visibility":"metadata_only"', result.content)
 
             allocation = next(
                 event.payload.get("allocation_id")

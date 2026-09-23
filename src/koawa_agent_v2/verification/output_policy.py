@@ -20,6 +20,13 @@ BODY_VISIBILITY = "metadata_only"
 environment would introduce a new value (e.g. ``safe_diagnostics_rich``)
 together with the runtime proof that justifies it."""
 
+MCP_POLICY_VERSION = "mcp-output-policy-v1"
+MCP_BODY_VISIBILITY = "metadata_only"
+"""MCP whitelist membership proves the SOURCE, never the body.  Until a
+verified safe-projection adapter exists for a server/tool pair, MCP receipts
+carry metadata only (server, tool, status, byte counts) - the redacted body
+stays operator-side and never enters the model service."""
+
 
 def safe_diagnostics(result) -> dict:
     """Fixed structured diagnostic fields for one CommandResult.

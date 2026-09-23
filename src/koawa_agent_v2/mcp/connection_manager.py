@@ -32,6 +32,7 @@ from .tool_binding import McpBinding, McpBindingError, McpCatalog, bind_catalog
 from .transport import TransportError, TransportTimeout
 from ..telemetry.trace import TraceProbe, TraceSink
 from ..telemetry.faults import FaultPort, NO_OP_FAULT_PORT
+from ..verification.output_policy import MCP_BODY_VISIBILITY, MCP_POLICY_VERSION
 
 
 def _bounded_positive(value: float, minimum: float, maximum: float, code: str) -> float:
@@ -668,12 +669,21 @@ def bind_tool_handler(session: McpSession, binding: McpBinding):
         result = session.call(binding, arguments_json)
         if result.uncertain:
             raise McpOutcomeUncertain("mcp_call_timeout")
+        # Hardening 2026-09-19 (WP-1): whitelist membership proves the SOURCE,
+        # never the body.  MCP receipts carry metadata only - the redacted
+        # body stays operator-side (durable fact) and never enters the model
+        # service until a verified safe-projection adapter exists for this
+        # server/tool pair.  ``untrusted_mcp_result`` keeps marking every
+        # byte of MCP-derived data wherever it flows downstream.
         redacted = redact_text(result.content)
         envelope = {
             "untrusted_mcp_result": True,
             "server_id": binding.server_id,
             "tool": binding.tool_name,
-            "result": redacted,
+            "result_visibility": MCP_BODY_VISIBILITY,
+            "output_policy": MCP_POLICY_VERSION,
+            "body_bytes": len(redacted),
+            "result": None,
         }
         content = json.dumps(
             envelope,

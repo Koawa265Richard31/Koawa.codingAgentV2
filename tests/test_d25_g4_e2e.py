@@ -265,7 +265,11 @@ class SandboxEndToEndTest(SandboxE2ETest):
         self.assertFalse(result.is_error)
         envelope = json.loads(result.content)
         self.assertTrue(envelope["untrusted_mcp_result"])
-        self.assertIn("sample.txt", json.dumps(envelope.get("result")))
+        # Hardening WP-1: the receipt is metadata-only - the file name stays
+        # operator-side in the durable fact, never model-visible.
+        self.assertIsNone(envelope["result"])
+        self.assertEqual("metadata_only", envelope["result_visibility"])
+        self.assertGreater(envelope["body_bytes"], 0)
         record = self.ledger.load(authorized.record.execution_id)
         from koawa_agent_v2.ledger import ToolExecutionState
 
