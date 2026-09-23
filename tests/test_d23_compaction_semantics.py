@@ -47,10 +47,12 @@ def _append_group(context: list, call_id: str, content: str, is_error: bool) -> 
     )
     context.append(echo)
     context.append(ToolResultMessage(echo.call_ref, content, is_error))
-    context.append(UserMessage(f"n{call_id}", "y" * 200))
 
 
 def _context(result_content: str, *, is_error: bool) -> list:
+    # Production reality: a run appends NO user items between tool groups -
+    # anchors (user/instruction items) only exist in the seed/prefix, and the
+    # F20 trim refuses batches that span one.  Groups stay contiguous here.
     context = [UserMessage(f"u{uuid4()}", "x" * 800)]
     for call_id in ("c1", "c2"):
         _append_group(context, call_id, result_content, is_error)
