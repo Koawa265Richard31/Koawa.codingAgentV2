@@ -2,7 +2,18 @@
   "documentType": "codex-security.hardening-analysis",
   "schemaVersion": "1.0",
   "analysisId": "memory_retrieval_20260919",
-  "updatedAt": "2026-09-20",
+  "updatedAt": "2026-09-23",
+  "cacheDecision": {
+    "date": "2026-09-23",
+    "status": "selected_design_not_implemented",
+    "rules": [
+      "Reuse controlled dependency and safe-build artifacts read-only under current scope and input identity checks.",
+      "Do not share artifacts or cache writes from sensitive runs across executions.",
+      "Publish immutable verified objects through a trusted publisher; reject partial, revoked or corrupt objects.",
+      "Protect active cache references during cleanup; a cache hit never grants a test-pass result."
+    ],
+    "detailStandard": "Specify observable input/output, authority, state transitions, commit and failure behavior, identity invalidation and acceptance counterexamples; leave internal Python decomposition to implementation."
+  },
   "sourceEvidence": {
     "kind": "document_collection",
     "label": "Memory/capacity findings, inspected runtime boundaries and latest F20/F21 evidence",
@@ -88,7 +99,68 @@
     "selectedOptionIds": [
       "bounded-capture"
     ],
-    "legacyCompatibilityOptionId": "existing-events"
+    "legacyCompatibilityOptionId": "existing-events",
+    "refinements": [
+      {
+        "date": "2026-09-21",
+        "status": "selected_design_not_implemented",
+        "topic": "Sensitive test container inputs, writable scratch, artifact handling and bounded validation",
+        "rules": [
+          "Read-only immutable candidate and minimally scoped sensitive inputs; validated per-file manifests.",
+          "Writable per-run ephemeral scratch is preauthorized; no host workspace writeback, network or shared sensitive cache.",
+          "All generated files remain restricted; no automatic indexing, model read, export or reuse by synthetic tests.",
+          "Cleanup failure quarantines scratch; no new arbitrary raw-log persistence.",
+          "Approvals bind specific additional inputs or fixed exports; they do not grant general container permissions.",
+          "Fixed scripts and quotas alone cannot stop candidate-code secret probes; define allowed candidate and release contracts.",
+          "Prefer fresh synthetic reproduction; report insufficient diagnosis when safe evidence is unavailable."
+        ]
+      },
+      {
+        "date": "2026-09-23",
+        "status": "selected_design_not_implemented",
+        "topic": "Fixed-candidate admission for sensitive validation",
+        "rules": [
+          "Iterate with synthetic inputs before submitting a fixed candidate for sensitive validation.",
+          "Bind code, tests, dependencies, runtime configuration, input version and profile; approvals do not survive binding changes.",
+          "Automatic admission is limited to maintainer-preauthorized policies; other candidates require local review.",
+          "Arbitrary new code accessing highly sensitive data with model-visible outcomes defaults to fixed-candidate local review.",
+          "Admission and result disclosure are independent; receipt principles are confirmed; concrete profile permissions remain deployment inputs.",
+          "Reuse matching known execution evidence; uncertain outcomes require recovery; candidate/turn changes do not reset cumulative disclosure limits.",
+          "Static checks or model review alone do not prove absence of semantic secret probes."
+        ]
+      },
+      {
+        "date": "2026-09-23",
+        "status": "selected_design_not_implemented",
+        "topic": "Synthetic-first repair and explicit human handoff when disclosure is prohibited",
+        "rules": [
+          "Use model-shareable synthetic tests for normal automatic repair and rich diagnostics.",
+          "Sensitive validation returns aggregate conclusions only when authorized by its release contract.",
+          "Result unavailable is a distinct stop signal, never a test pass/fail inference.",
+          "Stop dependent automatic repair and hand off to human testing when safe evidence is insufficient; independent safe work may continue.",
+          "Accept incomplete automation rather than disclose prohibited results; do not claim full verified delivery.",
+          "Human handoff and subsequent feedback remain subject to content policy.",
+          "Post-disclosure handling uses the subsequently confirmed conservative pause, local review and safe reconstruction; automatic lossless cleansing is deferred."
+        ]
+      },
+      {
+        "date": "2026-09-23",
+        "status": "selected_design_not_implemented",
+        "topic": "Reconciled receipt, artifact cleanup, policy change and incident decisions",
+        "rules": [
+          "Safe tests return detailed diagnostics; sensitive conclusions require explicit profile grants, otherwise human handoff.",
+          "Register permitted evidence before normal cleanup; isolate failed cleanup and verify resource ownership before retry.",
+          "Current audience/policy applies to historical reads and future model requests.",
+          "After disclosure, pause affected calls, review locally and reconstruct only from confirmed safe inputs; do not send secrets to a cleansing model.",
+          "Automatic lossless semantic cleansing is deferred, not a first-version prerequisite."
+        ]
+      }
+    ],
+    "confirmationConvention": {
+      "date": "2026-09-23",
+      "rule": "User saying next section confirms the immediately preceding proposal unless they express reservations; later accepted revisions supersede earlier alternatives.",
+      "scope": "Design selection, not runtime implementation or authority to access real sensitive resources."
+    }
   },
   "constraints": {
     "profile": "confidentiality_first",
@@ -166,7 +238,7 @@
           "sourceKind": "document",
           "evidenceId": "E7",
           "path": "audits/2026-09-11-platform-audit/smoke-readonly-review/f20-smoking-gun.md",
-          "claim": "The latest report records zero seed items against 19 loop items and an earlier committed compaction. The exact construction-path defect remains to be verified."
+          "claim": "Historical report whose zero-seed diagnosis was retracted by E10; not a current root-cause fact."
         },
         {
           "claimType": "observed",
@@ -181,6 +253,13 @@
           "evidenceId": "E9",
           "path": "src/koawa_agent_v2/runtime/session.py",
           "claim": "Session projections populate future context, so restoration and summarization require the same model-ingress boundary."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "E10",
+          "path": "audits/2026-09-11-platform-audit/smoke-readonly-review/f20-correction.md",
+          "claim": "Correction records six seed items, successful first compaction and later mapping failure; giant-group trigger remains a hypothesis."
         }
       ],
       "desiredInvariants": [
@@ -257,6 +336,12 @@
               "effect": "mitigates",
               "tacticalFixRequired": true,
               "rationale": "Old safe metadata reduces retrieval exposure; common ingress and capacity fixes remain required."
+            },
+            {
+              "evidenceId": "E10",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Compaction root-cause fixes and regression remain independent prerequisites; this design does not resolve them."
             }
           ],
           "tradeoffs": [
@@ -419,6 +504,12 @@
               "effect": "mitigates",
               "tacticalFixRequired": true,
               "rationale": "Design coverage only; implement the specified boundary and validate the source path."
+            },
+            {
+              "evidenceId": "E10",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Compaction root-cause fixes and regression remain independent prerequisites; this design does not resolve them."
             }
           ],
           "tradeoffs": [
@@ -537,7 +628,8 @@
     "Measured finite page/query/cumulative/storage/retention budgets and context targets.",
     "Actual provider/audience and destination configuration, with authority from existing owners.",
     "Approved profile input manifests and per-field release contracts.",
-    "Measured quality, latency, cache and cost thresholds before production enablement."
+    "Measured quality, latency, cache and cost thresholds before production enablement.",
+    "Per-profile release contracts: trusted field derivation, admissible candidate policy, default unavailable response and cumulative disclosure rules."
   ],
   "validation": {
     "performed": [
@@ -549,5 +641,21 @@
       "Full implementation regression",
       "New vulnerability validation"
     ]
-  }
+  },
+  "implementationContractPath": "implementation/contracts.md",
+  "currentStatus": {
+    "checkedRevision": "06ab2d3",
+    "date": "2026-09-23",
+    "runtime": "Capacity accounting increment exists but does not fulfill the independent final-request contract; this documentation task implements no runtime changes.",
+    "f20": "Zero-seed diagnosis retracted; seed has six items per correction. Later-compaction mapping remains under investigation.",
+    "pending": "Concrete resource grants and per-profile configurations, code/test mapping and measured limits."
+  },
+  "supplementalEvidence": [
+    {
+      "evidenceId": "E10",
+      "path": "audits/2026-09-11-platform-audit/smoke-readonly-review/f20-correction.md",
+      "sha256": "cd11c6c347d92deae50b5b5c91356142a6cce7579146bbeb99c1e6099340120f",
+      "supersedes": "E7 zero-seed interpretation; original evidence hashes remain historical."
+    }
+  ]
 }

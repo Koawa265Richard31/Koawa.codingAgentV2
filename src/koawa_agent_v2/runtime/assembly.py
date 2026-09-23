@@ -530,7 +530,17 @@ def assemble_execution_plane(
     try:
         runner = _build_command_runner(config, store)
         plan_board = PlanBoard()
-        # Audit F7: the JSON config admits up to 64 required profiles while
+
+        def _register_recall(built_registry):
+            # Hardening 2026-09-19 (WP-E): metadata-only history recall for
+            # the model - thread-scoped, no result bodies.
+            from ..retrieval.recall_tool import register_recall_tool
+
+            register_recall_tool(
+                built_registry, store=control.store, runtime=control.runtime
+            )
+
+        # Hardening E1/E2: the JSON config admits up to 64 required profiles while
         # VerificationLimits defaults to max_test_runs=4, so 5+ profiles were
         # structurally unsatisfiable (the 5th reservation always failed).
         # Derive the budget from the config: every required profile must fit
@@ -546,7 +556,7 @@ def assemble_execution_plane(
             verification_limits=verification_limits,
             git_facade=control.git,
             plan_board=plan_board,
-            post_build_registrars=tuple(post_build_registrars),
+            post_build_registrars=(*post_build_registrars, _register_recall),
         )
         mcp_sessions, mcp_bindings = _connect_execution_mcp_servers(
             control, granted_plan, launcher_builder=launcher_builder,

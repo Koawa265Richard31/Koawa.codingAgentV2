@@ -11,6 +11,7 @@ from uuid import UUID
 from ..execution.loop import ToolExecutionContext, ToolExecutionResult
 from .finalization import VerificationError, VerificationLedger, VerificationLimits
 from .git import GitDiffSnapshot, GitFacade, GitFacadeError, GitLimits
+from . import output_policy
 from ..editing.protocol import PatchLimits
 from ..editing.tools import register_patch_tool
 from ..editing.transaction import FaultInjector
@@ -168,6 +169,9 @@ class _VerificationTools:
             )
 
     def _command_json(self, result: CommandResult) -> str:
+        # Hardening 2026-09-19: the model-visible receipt carries fixed
+        # structured diagnostics only - stdout/stderr bodies stay in the
+        # durable record (operator side) and never enter the model service.
         payload: dict[str, Any] = {
             "allocation_id": (
                 str(result.allocation_id) if result.allocation_id is not None else None
@@ -181,15 +185,15 @@ class _VerificationTools:
             "outcome": result.outcome.value,
             "profile_id": result.profile_id,
             "profile_digest": result.profile_digest,
-            "stderr": result.stderr,
             "stderr_bytes": result.stderr_bytes,
             "stderr_truncated": result.stderr_truncated,
-            "stdout": result.stdout,
             "stdout_bytes": result.stdout_bytes,
             "stdout_truncated": result.stdout_truncated,
             "timeout_seconds": result.timeout_seconds,
+            "test_output_policy": output_policy.POLICY_VERSION,
+            "test_output_visibility": output_policy.BODY_VISIBILITY,
         }
-        return _bounded_json(payload, self._limits.max_tool_result_chars, crop=("stdout", "stderr"))
+        return _bounded_json(payload, self._limits.max_tool_result_chars)
 
     def _diff_json(self, diff: GitDiffSnapshot) -> str:
         return _bounded_json(
