@@ -224,7 +224,11 @@ class D10McpIntegrationTest(unittest.TestCase):
         envelope = json.loads(result.content)
         self.assertTrue(envelope["untrusted_mcp_result"])
         self.assertEqual("server", envelope["server_id"])
-        self.assertIn("hi", envelope["result"])
+        # Hardening WP-1: MCP receipts are metadata-only - the body never
+        # enters the model service from a whitelisted-but-unverified source.
+        self.assertIsNone(envelope["result"])
+        self.assertEqual("metadata_only", envelope["result_visibility"])
+        self.assertGreater(envelope["body_bytes"], 0)
         record = self.ledger.load(ticket.record.execution_id)
         self.assertEqual(ToolExecutionState.SUCCEEDED, record.state)
         self.assertEqual(binding.binding_digest, record.binding_digest)
