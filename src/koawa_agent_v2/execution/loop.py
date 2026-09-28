@@ -213,6 +213,18 @@ class AgentLoopResult:
 ModelEventSink = Callable[[ModelStreamEvent], None]
 OwnershipGuard = Callable[[], None]
 
+# R4 (closure review 2026-09-25): conservative protocol-overhead allowances
+# for the independent final-send gate.  These are flat char estimates for
+# request framing (role labels, ids, wire structure) - deliberately NOT a
+# verified token metering; measured provider budgets land with WP-H.
+_PROTOCOL_OVERHEAD_PER_ITEM_CHARS = 48
+_PROTOCOL_OVERHEAD_PER_TOOL_CHARS = 48
+# Fail-safe ceiling for loops assembled without a MemoryConfig: the config
+# schema's own chars-class ceiling (memory.py), not a tuned budget.
+_UNCONFIGURED_HARD_CHARS = 2_000_000
+# Schema-default reserve when no MemoryConfig and no output cap exist.
+_UNCONFIGURED_RESERVE_CHARS = 8_000
+
 
 class AgentLoop:
     """完整验证模型回合后，确定性执行工具或返回最终答案。"""
@@ -232,9 +244,14 @@ class AgentLoop:
         memory: object | None = None,
         compaction_sink: object | None = None,
         ancestor_turn_ids: tuple[UUID, ...] = (),
+        result_projection_publisher=None,
     ) -> None:
         if not hasattr(client, "stream"):
             raise TypeError("client must implement ModelClient")
+        if result_projection_publisher is not None and not callable(
+            result_projection_publisher
+        ):
+            raise TypeError("result_projection_publisher must be callable")
         if tool_executor is not None and (
             not hasattr(tool_executor, "execute")
             or not hasattr(tool_executor, "definitions")
@@ -256,6 +273,10 @@ class AgentLoop:
         if not all(isinstance(item, UUID) for item in ancestor_turn_ids):
             raise TypeError("ancestor_turn_ids must be a tuple of UUIDs")
         self._ancestor_turn_ids = tuple(ancestor_turn_ids)
+        # WP-D/R2: invoked after a tool result's durable fact is committed
+        # and before the receipt joins any later model-round context; the
+        # hook is failure-isolated and never re-executes or fails the turn.
+        self._result_projection_publisher = result_projection_publisher
         self._successful_writes: frozenset[str] = frozenset()
         definitions = (
             tuple(tool_executor.definitions())
@@ -352,7 +373,7 @@ class AgentLoop:
         # the pinned tool-definition schemas - and runs regardless of whether
         # a compaction sink is bound, so a sink-less path can no longer
         # silently bypass the budget.
-        current = self.context_chars(context) + self._definitions_chars()
+        current = self._request_estimate(context)
         reserve = memory.request_context_reserve_chars
         soft = memory.request_context_soft_chars
         hard = memory.request_context_hard_chars
@@ -386,7 +407,7 @@ class AgentLoop:
             except CompactionError:
                 raise AgentLoopError("compaction_source_invalid") from None
             if not selected:
-                if self.context_chars(context) + reserve > hard:
+                if self._request_estimate(context) + reserve > hard:
                     raise AgentLoopError("context_capacity_exhausted")
                 return
             if not anchors_are_preserved(groups, selected):
@@ -412,7 +433,7 @@ class AgentLoop:
                 if group.first_context_index > last_anchor
             ]
             if not selected:
-                if self.context_chars(context) + reserve > hard:
+                if self._request_estimate(context) + reserve > hard:
                     raise AgentLoopError("context_capacity_exhausted")
                 return
             # Compact up to a bounded batch of the oldest closed groups.  The
@@ -484,21 +505,74 @@ class AgentLoop:
             if self.context_chars(context) + reserve <= soft:
                 return
         # Epoch cap reached while still over budget -> fail closed.
-        if self.context_chars(context) + reserve > hard:
+        if self._request_estimate(context) + reserve > hard:
             raise AgentLoopError("context_capacity_exhausted")
 
     def _tool_count_known(self) -> int:
         sink = self._compaction_sink
         return int(getattr(sink, "tool_count", 0) or 0)
 
-    def _definitions_chars(self) -> int:
-        """E1/E2: pinned tool-definition schemas ride every request and must
+    def _definitions_chars(self, definitions=None) -> int:
+        """E1/E2 + R4: pinned tool definitions ride every request and must
         count against the capacity gate even though they are not context
-        items."""
+        items.  The final protocol payload carries the tool NAME and
+        DESCRIPTION alongside the input schema, so all three are metered
+        (R2/R4 review: schema-only counting under-measured real requests).
+        """
+
+        pinned = self._tool_definitions if definitions is None else definitions
         return sum(
-            len(definition.input_schema_json)
-            for definition in (self._tool_definitions or ())
+            len(definition.name)
+            + len(definition.description or "")
+            + len(definition.input_schema_json)
+            + _PROTOCOL_OVERHEAD_PER_TOOL_CHARS
+            for definition in (pinned or ())
         )
+
+    def _request_estimate(self, context, definitions=None) -> int:
+        """R4: conservative full-request char estimate.
+
+        Context items (with trusted instructions), the complete tool
+        definitions, and a flat per-item protocol allowance for request
+        framing.  This is a deliberate conservative ESTIMATE, not a
+        verified token metering; measured provider budgets land with WP-H.
+        """
+
+        return (
+            self.context_chars(context)
+            + self._definitions_chars(definitions)
+            + _PROTOCOL_OVERHEAD_PER_ITEM_CHARS * len(context)
+        )
+
+    def _assert_request_fits(
+        self,
+        context,
+        definitions,
+        max_output_tokens,
+    ) -> None:
+        """R4: independent final-send gate.
+
+        Runs against the FINAL message list and the SAME pinned tool
+        snapshot the request will use, right before ModelRequest
+        construction.  Whether compaction ran, whether a compaction sink is
+        bound, or whether any compressible group exists does not influence
+        this gate.  With no MemoryConfig the loop falls back to the config
+        schema's own chars ceiling - a fail-safe, not a tuned budget.
+        """
+
+        memory = self._memory
+        if memory is not None:
+            hard = memory.request_context_hard_chars
+            reserve = memory.request_context_reserve_chars
+        else:
+            hard = _UNCONFIGURED_HARD_CHARS
+            reserve = (
+                4 * max_output_tokens
+                if max_output_tokens
+                else _UNCONFIGURED_RESERVE_CHARS
+            )
+        if self._request_estimate(context, definitions) + reserve > hard:
+            raise AgentLoopError("request_capacity_exceeded")
 
     def _pending_tool_calls(self) -> bool:
         sink = self._compaction_sink
@@ -663,6 +737,10 @@ class AgentLoop:
                 self._successful_writes = self._successful_writes | frozenset({"apply_patch"})
             context.append(message); total_tool_calls += 1
             if durable_sink is not None: durable_sink.tool_completed(message, total_tool_calls)
+            # WP-D/R2 ordering: the execution fact is durable above; publish
+            # the projection BEFORE the receipt reaches any later round.
+            if self._result_projection_publisher is not None:
+                self._result_projection_publisher(call.name, message, execution_context)
 
         for model_round in range(initial_model_rounds + 1, self._limits.max_model_rounds + 1):
             token.raise_if_cancelled()
@@ -680,6 +758,12 @@ class AgentLoop:
                 self._tool_definitions
                 if snapshot is None
                 else snapshot.definitions
+            )
+            # R4: independent final-send gate - same messages, same pinned
+            # tool snapshot, protocol overhead and output reserve included,
+            # regardless of any compaction path taken above.
+            self._assert_request_fits(
+                context, round_definitions, max_output_tokens,
             )
             model_turn_id = _model_turn_id(run_id, model_round)
             self._trace("model", "round", {"kind": "round"})
@@ -839,6 +923,12 @@ class AgentLoop:
                 total_tool_calls += 1
                 if durable_sink is not None:
                     durable_sink.tool_completed(result_message, total_tool_calls)
+                # WP-D/R2 ordering: publish while the durable fact is fresh;
+                # context.extend below is the first later-round visibility.
+                if self._result_projection_publisher is not None:
+                    self._result_projection_publisher(
+                        call.name, result_message, execution_context,
+                    )
             context.extend(results)
 
         raise AgentLoopError("max_model_rounds_exceeded")

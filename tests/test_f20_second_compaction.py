@@ -36,10 +36,14 @@ from tests.test_agent_loop import (
 
 
 def _memory() -> MemoryConfig:
+    # Re-baselined for R4 (closure review 2026-09-25): the capacity meter
+    # now includes tool name/description and protocol overhead, so the
+    # coding registry (~4.1k metered) needs headroom for compactions to
+    # actually run before the honest send-boundary failure.
     return MemoryConfig.from_mapping(
         {
-            "request_context_soft_chars": 300,
-            "request_context_hard_chars": 1200,
+            "request_context_soft_chars": 5000,
+            "request_context_hard_chars": 6200,
             "request_context_reserve_chars": 50,
             "compaction_target_chars": 250,
             "conclusion_max_chars": 600,
@@ -127,24 +131,41 @@ class RepeatedCompactionMappingTest(unittest.TestCase):
             # (compaction_source_range_missing) remains open for the
             # loop/recorder alignment fix.
             # WP-A pinned baseline: the gate either completes the run or
-            # fails it HONESTLY (d2:context_capacity_exhausted /
-            # d2:checkpoint_error) - the F21 fix guarantees a terminal state
-            # instead of a thread-blocking RUNNING turn.
+            # fails it HONESTLY - the F21 fix guarantees a terminal state
+            # instead of a thread-blocking RUNNING turn.  R4 added the
+            # independent final-send gate, whose request_capacity_exceeded
+            # belongs to the same honest-failure family.
             self.assertIn(result.turn.status.value, ("completed", "failed"))
             self.assertIn(
                     result.turn.error,
                     (
                         "d2:context_capacity_exhausted",
                         "d2:checkpoint_error",
+                        "d2:request_capacity_exceeded",
                     ),
                     result.turn.error,
                 )
 
-            # The thread must remain usable after the honest failure.
+            # The thread must remain usable after the honest failure.  The
+            # follow-up proves usability, so it gets a budget that fits the
+            # FULL request metering (R4: tool name/description/protocol
+            # overhead now count; the coding registry alone exceeds the
+            # first turn's deliberately-tiny budgets).
+            followup_memory = MemoryConfig.from_mapping(
+                {
+                    "request_context_soft_chars": 4000,
+                    "request_context_hard_chars": 8000,
+                    "request_context_reserve_chars": 200,
+                    "compaction_target_chars": 250,
+                    "conclusion_max_chars": 600,
+                    "compaction_summary_max_chars": 600,
+                    "in_run_keep_groups": 1,
+                }
+            )
             followup_loop = AgentLoop(
                 ScriptedClient(_final_script("recovered", "wpa-recovered")),
                 tool_executor=executor,
-                memory=_memory(),
+                memory=followup_memory,
             )
             follow_worker = TurnWorker(
                 runtime,

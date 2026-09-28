@@ -2,7 +2,7 @@
   "documentType": "codex-security.hardening-analysis",
   "schemaVersion": "1.0",
   "analysisId": "memory_retrieval_20260919",
-  "updatedAt": "2026-09-23",
+  "updatedAt": "2026-09-25",
   "cacheDecision": {
     "date": "2026-09-23",
     "status": "selected_design_not_implemented",
@@ -644,11 +644,12 @@
   },
   "implementationContractPath": "implementation/contracts.md",
   "currentStatus": {
-    "checkedRevision": "06ab2d3",
-    "date": "2026-09-23",
-    "runtime": "Capacity accounting increment exists but does not fulfill the independent final-request contract; this documentation task implements no runtime changes.",
+    "checkedRevision": "73270c2",
+    "date": "2026-09-25",
+    "runtime": "WP-1 committed (3072bd7). Closure-review fixes in the working tree (uncommitted). R1 complete incl. the recovery entry; milestone accepted after re-verification round 3 (cross-turn call-id identity fix, non-vacuous R3 test, unverified/untrusted split). R2 PARTIALLY complete: scan/read page-walk, ledger source binding, in-loop publication ordering; slice (b) read-by-reference DONE with the round-3 ambiguity boundary (shorthand accepted only on a unique match, else ambiguous_reference with candidates; full reference resolves exactly) - read chain still not claimable closed until current-permission checks and production-entry verification. Slice (a) ruled as CORRECTED PLAN B (r2-delivery-gate-proposal.md is the implementation spec): deliver the published projection document (never the execution-path receipt), delivery-decided identity excludes the decision value (conflicting decisions rejected via fingerprint), delivery-write failure pauses further model requests with resume backfill (no re-execution, no history rewrite), semantics-version gate so missing delivery fails recovery closed and old readers reject new streams, historical delivery never grants current read permission; fixed projection_unavailable placeholder text archived in the spec. R3 partially complete on the recall face (observation scoped to context content, not wire serialization). R4 landed with char-level ESTIMATE metering, not measured guarantees. R5 (WP-C) NOT implemented.",
     "f20": "Zero-seed diagnosis retracted; seed has six items per correction. Later-compaction mapping remains under investigation.",
-    "pending": "Concrete resource grants and per-profile configurations, code/test mapping and measured limits."
+    "closureReview": "docs/open-active/implementation-closure-review-2026-09-25.md records R1 complete; R2/R3/R4 partially complete across three maintainer re-verification rounds (verdicts archived); corrected plan B ruled; spec at r2-delivery-gate-proposal.md v4 (round 4 revisions + round 5 supplements all merged: SPEC-1 passed incl. restore-replays-original-decision; SPEC-2 five digest/reference precision items; SPEC-3 four recovery-safety constraints incl. verify-before-write, full-identity digest match with no latest-pick, not-found vs read-failure separation, crash matrix extended with backfill-fault/concurrent-recovery/divergent-source-digest); implementation not started, nothing committed; R5/WP-C open.",
+    "pending": "Maintainer green light to implement corrected plan B per the round-4 revised spec (delivery key without digest, three-digest canonicalization, delivery_pending state machine with three-window crash acceptance); commit decision for the working-tree changes; current-permission read checks + production-entry verification before claiming the read chain closed; per-profile release contracts (deployment input); WP-C/R5 implementation with experiments; measured provider budgets (WP-H)."
   },
   "supplementalEvidence": [
     {

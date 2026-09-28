@@ -83,17 +83,121 @@ class RecallHistoryToolTest(unittest.TestCase):
         self.assertFalse(result.is_error, result.content)
         document = json.loads(result.content)
         self.assertEqual("metadata_only", document["visibility"])
+        # R3: free-text previews are not metadata - only lengths are served,
+        # and the content state is an explicit not-released marker.
+        self.assertEqual(
+            "unavailable_without_release_rule", document["content_release"]
+        )
         self.assertEqual(1, len(document["hits"]))
         hit = document["hits"][0]
         self.assertEqual(str(hit_record.turn_id), hit["turn_id"])
-        self.assertLessEqual(len(hit["user_input"]), 120)
-        self.assertLessEqual(len(hit["final_text"]), 120)
-        self.assertNotIn("U" * 300, result.content)
+        self.assertNotIn("user_input", hit)
+        self.assertNotIn("final_text", hit)
+        self.assertNotIn("U", result.content)
+        self.assertNotIn("F", result.content)
+        self.assertEqual(300, hit["user_input_chars"])
+        self.assertEqual(300, hit["final_text_chars"])
         # thread scope resolved from the execution context's turn
         self.assertEqual(
             (str(thread.thread_id), "audit findings", 5),
             stub.seen_threads[0],
         )
+
+    def test_hit_text_never_reaches_provider_request(self) -> None:
+        """R3 acceptance: the retrieval must actually RUN and HIT, and the
+        final provider request must still carry no seeded text.  The turn
+        is bound so recall resolves; the query is neutral (the secret must
+        not ride the request as a search argument); success is asserted
+        before the leak check (re-verification 2026-09-25: the previous
+        version ran without a turn, got recall_unavailable, and passed
+        vacuously).
+
+        SCOPE (re-verification round 3): this observes the request CONTEXT
+        items (``.content``), not the full provider wire serialization -
+        the proven conclusion is that historical input/reply previews no
+        longer leak via this retrieval receipt, not a wire-level
+        guarantee."""
+        from uuid import uuid4 as new_id
+
+        from koawa_agent_v2.execution.loop import AgentLoop
+        from koawa_agent_v2.model.protocol import (
+            InstructionMessage,
+            InstructionRole,
+            ToolResultMessage,
+        )
+        from koawa_agent_v2.runtime.memory import MemoryConfig
+        from tests.test_agent_loop import (
+            ScriptedClient,
+            _final_script,
+            _tool_script,
+        )
+
+        marker = "TOPSECRET-SEED-"
+        hit_record = _Hit()
+        hit_record.user_input = marker + "U" * 300
+        hit_record.final_text = marker + "F" * 300
+        stub = _StubMemory([hit_record])
+        registry, queued, thread, event_store = self._registry_with_stub(stub)
+        scripts = [
+            _tool_script(
+                [("rc", "recall_history", json.dumps({"query": "audit findings"}))],
+                "r1",
+            ),
+            _final_script("done", "r2"),
+        ]
+        client = ScriptedClient(*scripts)
+        memory = MemoryConfig.from_mapping(
+            {
+                "request_context_soft_chars": 5000,
+                "request_context_hard_chars": 12000,
+                "request_context_reserve_chars": 200,
+                "compaction_target_chars": 3000,
+                "conclusion_max_chars": 600,
+                "compaction_summary_max_chars": 600,
+                "in_run_keep_groups": 1,
+            }
+        )
+        loop = AgentLoop(client, tool_executor=registry, memory=memory)
+        loop.run(
+            run_id=new_id(),
+            turn_id=queued.turn_id,
+            turn_version=queued.version,
+            input_items=(
+                InstructionMessage(InstructionRole.SYSTEM, "search history"),
+            ),
+            provider="test",
+            model="model",
+        )
+        self.assertEqual(2, len(client.requests))
+        # The recall actually executed against the bound thread and HIT
+        # the seeded turn (not a vacuous recall_unavailable path).
+        self.assertEqual(
+            [(str(thread.thread_id), "audit findings", 5)],
+            stub.seen_threads,
+        )
+        recall_results = [
+            item
+            for item in client.requests[1].input_items
+            if isinstance(item, ToolResultMessage)
+            and item.call_ref.call_id == "rc"
+        ]
+        self.assertEqual(1, len(recall_results))
+        self.assertFalse(recall_results[0].is_error, recall_results[0].content)
+        document = json.loads(recall_results[0].content)
+        self.assertEqual(
+            [str(hit_record.turn_id)],
+            [item["turn_id"] for item in document["hits"]],
+        )
+        self.assertEqual(
+            "unavailable_without_release_rule", document["content_release"]
+        )
+        # The full request stream never carries the seeded text.
+        for request in client.requests:
+            serialized = "".join(
+                getattr(item, "content", "") or ""
+                for item in request.input_items
+            )
+            self.assertNotIn(marker, serialized)
 
     def test_memory_failure_is_explicit_unavailable(self) -> None:
         class _Broken:

@@ -81,6 +81,63 @@ class FullRequestMeteringTest(unittest.TestCase):
             loop._maybe_compact(context)
         self.assertEqual("context_capacity_exhausted", raised.exception.code)
 
+    def test_definitions_meter_name_and_description(self) -> None:
+        """R4: the final protocol payload carries tool name and description
+        next to the schema - a huge description alone must trip the gate."""
+        from koawa_agent_v2.model.protocol import ToolDefinition
+
+        schema = json.dumps({"type": "object"})
+        definition = ToolDefinition("read_file", "D" * 900, schema)
+        loop = AgentLoop(
+            ScriptedClient(),
+            tool_executor=RecordingToolExecutor(definitions=(definition,)),
+            memory=_memory(soft=200, hard=400),
+        )
+        context = [UserMessage(f"u{uuid4()}", "x" * 10)]
+        with self.assertRaises(AgentLoopError) as raised:
+            loop._maybe_compact(context)
+        self.assertEqual("context_capacity_exhausted", raised.exception.code)
+
+    def test_final_gate_blocks_before_provider_when_compaction_off(self) -> None:
+        """R4: the independent final-send gate runs even with in-run
+        compaction disabled, and fires BEFORE the provider is called."""
+        from koawa_agent_v2.model.protocol import InstructionMessage, InstructionRole
+
+        memory = _memory(soft=200, hard=400)
+        config = MemoryConfig.from_mapping(
+            {
+                **memory.to_document(),
+                "in_run_compaction_enabled": False,
+            }
+        )
+        client = ScriptedClient()
+        loop = AgentLoop(client, memory=config)
+        with self.assertRaises(AgentLoopError) as raised:
+            loop.run(
+                run_id=uuid4(),
+                input_items=(
+                    InstructionMessage(InstructionRole.SYSTEM, "S" * 500),
+                ),
+                provider="test",
+                model="model",
+            )
+        self.assertEqual("request_capacity_exceeded", raised.exception.code)
+        # The provider was never reached: the gate is pre-send.
+        self.assertEqual([], client.requests)
+
+    def test_unconfigured_loop_still_gated_by_failsafe_ceiling(self) -> None:
+        """R4: memory=None loops keep a schema-ceiling fail-safe, not an
+        unbounded send path."""
+        from koawa_agent_v2.model.protocol import InstructionMessage, InstructionRole
+
+        loop = AgentLoop(ScriptedClient())
+        small = [InstructionMessage(InstructionRole.SYSTEM, "S" * 100)]
+        loop._assert_request_fits(small, (), max_output_tokens=None)
+        huge = [InstructionMessage(InstructionRole.SYSTEM, "S" * 2_000_100)]
+        with self.assertRaises(AgentLoopError) as raised:
+            loop._assert_request_fits(huge, (), max_output_tokens=None)
+        self.assertEqual("request_capacity_exceeded", raised.exception.code)
+
 
 if __name__ == "__main__":
     unittest.main()
