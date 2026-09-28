@@ -147,7 +147,11 @@ class GoldenCompactionTest(unittest.TestCase):
             "request_context_soft_chars": 4000,
             # hard raised for D13-D23-001: richer replacement blocks carry bounded
             # result-fact lines, so 100 rounds legitimately hold more than before.
-            "request_context_hard_chars": 20000,
+            # Raised again for R4 (closure review 2026-09-25): the capacity
+            # meter now includes tool name/description and a conservative
+            # per-item protocol allowance, so the same history needs more
+            # headroom than the schema-only meter granted.
+            "request_context_hard_chars": 28000,
             "request_context_reserve_chars": 800,
             "compaction_target_chars": 2000,
             "conclusion_max_chars": 1000,

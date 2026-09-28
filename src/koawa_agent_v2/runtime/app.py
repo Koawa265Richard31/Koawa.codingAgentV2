@@ -101,6 +101,10 @@ class AppRuntime:
         self._execution_plane: AssembledRuntime | None = None
         # Turns started through chat() resume without the D5 completion gate.
         self._chat_turn_ids: set[UUID] = set()
+        # WP-D/R1: per-turn result-projection publication status, exposed on
+        # every turn outcome so a pending/failed projection is observable
+        # instead of swallowed.
+        self._projection_publications: dict[UUID, dict] = {}
 
     def _ensure_execution_plane(self) -> AssembledRuntime:
         # Preflight activation, then lazily assemble the execution plane.
@@ -261,8 +265,15 @@ class AppRuntime:
             resolved = UUID(str(turn_id))
             current = self.assembled.runtime.get_turn(resolved)
             if current.status in TERMINAL_TURN_STATUSES:
+                # WP-D/R1 residual: a terminal turn may still carry pending
+                # projections (publication failed, possibly before a
+                # restart).  resume is the recovery entry: republish
+                # idempotently and expose the fresh status.
+                republished = self._publish_result_projections(current)
+                payload = _turn_document_from_state(current)
+                payload["result_projections"] = republished
                 return CommandOutcome(
-                    True, "turn_already_terminal", _turn_document_from_state(current),
+                    True, "turn_already_terminal", payload,
                 )
             if current.status is TurnStatus.RUNNING:
                 claimed = self._claim_stale(resolved)
@@ -310,9 +321,7 @@ class AppRuntime:
             payload = {
                 "threads": len(_thread_id_events(self.assembled.store)),
                 "turns": [
-                    _turn_document_from_state(
-                        self.assembled.runtime.get_turn(turn_id),
-                    )
+                    self._turn_document_with_projections(turn_id)
                     for turn_id in turn_ids
                 ],
                 "pending_approvals": self._pending_approval_documents(),
@@ -323,6 +332,34 @@ class AppRuntime:
             return CommandOutcome(True, "ok", payload)
         except (RuntimeAssemblyError, AgentError) as exc:
             return _failure(exc)
+
+    def _turn_document_with_projections(self, turn_id: UUID) -> dict:
+        document = _turn_document_from_state(
+            self.assembled.runtime.get_turn(turn_id),
+        )
+        document["result_projections"] = self._durable_projection_status(turn_id)
+        return document
+
+    def _durable_projection_status(self, turn_id: UUID) -> dict:
+        """Durable, restart-safe projection status (WP-D/R1 residual).
+
+        Reads the projection stream and the run-execution facts instead of
+        the process-local publication dict, so pending projections stay
+        visible after a restart.  A reader-level failure is reported via
+        ``scan_error``; it never silently reads as all-published.
+        """
+
+        try:
+            from ..retrieval.projection import read_publication_status
+
+            return read_publication_status(self.assembled.store, turn_id)
+        except Exception as exc:
+            return {
+                "published": 0,
+                "failed": 0,
+                "pending": [],
+                "scan_error": type(exc).__name__,
+            }
 
     def pending_approvals(self) -> CommandOutcome:
         try:
@@ -478,54 +515,109 @@ class AppRuntime:
         self._publish_result_projections(result.turn)
         return result
 
-    def _publish_result_projections(self, turn) -> None:
-        """Hardening WP-D: publish metadata-only projections for the run's
-        test-result facts (best-effort; never fails the turn)."""
+    def _publish_result_projections(self, turn) -> dict:
+        """Hardening WP-D/R1: publish metadata-only projections for the run's
+        test-result facts at terminal.
+
+        A publication failure never fails the turn, never rewrites the
+        completed tool results, and never re-executes tools: the failing
+        fact is registered durably as a pending projection
+        (``result.projection-publication-failed.v1``) and every later fact
+        still publishes.  The returned status is also stored on the app and
+        merged into the turn outcome, so no projection gap can silently
+        pass as complete.
+        """
+
+        status: dict = {
+            "published": 0,
+            "failed": 0,
+            "pending": [],
+            "scan_error": None,
+            "untrusted": 0,
+            "unverified": 0,
+        }
+        self._projection_publications[turn.turn_id] = status
         try:
             from ..retrieval.projection import (
                 ResultProjectionStore,
                 scan_test_results,
+                test_diagnostics,
             )
 
             projection_store = ResultProjectionStore(self.assembled.store)
-            for fact in scan_test_results(self.assembled.store, turn.turn_id):
-                receipt = fact.get("receipt") or {}
-                diagnostics = {
-                    key: receipt.get(key)
-                    for key in (
-                        "exit_code",
-                        "outcome",
-                        "duration_ms",
-                        "stdout_bytes",
-                        "stderr_bytes",
-                        "stdout_truncated",
-                        "stderr_truncated",
-                    )
-                    if receipt.get(key) is not None
-                }
+            scan = scan_test_results(self.assembled.store, turn.turn_id)
+        except Exception as exc:
+            # The scan itself failed: no fact is known, so nothing counts as
+            # published or failed - scan_error keeps the gap observable.
+            status["scan_error"] = type(exc).__name__
+            return status
+        status["untrusted"] = scan.untrusted
+        status["unverified"] = scan.unverified
+        for fact in scan.facts:
+            try:
                 projection_store.publish(
                     turn_id=turn.turn_id,
                     thread_id=turn.thread_id,
                     run_id=turn.current_run_id,
                     call_id=fact["call_id"],
                     source_kind="test",
-                    diagnostics=diagnostics,
+                    diagnostics=test_diagnostics(fact["receipt"]),
                     body_ref={
                         "stream": "run-execution",
                         "turn_id": str(turn.turn_id),
-                        "event_id": fact["event_id"],
-                        "event_version": fact["event_version"],
-                        "content_digest": hashlib.sha256(
-                            json.dumps(
-                                fact.get("receipt"),
-                                sort_keys=True,
-                                ensure_ascii=False,
-                            ).encode("utf-8")
-                        ).hexdigest(),
+                        "model_turn_id": fact["model_turn_id"],
+                        "content_sha256": fact["content_sha256"],
                     },
                 )
-        except Exception:
+                status["published"] += 1
+            except Exception as exc:
+                # error_code stays a class name: exception text can carry
+                # paths or payloads and must not enter durable events.
+                self._register_projection_failure(
+                    turn,
+                    projection_store=projection_store,
+                    call_id=fact.get("call_id"),
+                    body_ref={
+                        "stream": "run-execution",
+                        "turn_id": str(turn.turn_id),
+                        "model_turn_id": fact.get("model_turn_id"),
+                        "content_sha256": fact.get("content_sha256"),
+                    },
+                    error_code=type(exc).__name__,
+                    status=status,
+                )
+        return status
+
+    def _register_projection_failure(
+        self,
+        turn,
+        *,
+        projection_store,
+        call_id,
+        body_ref,
+        error_code: str,
+        status: dict,
+    ) -> None:
+        status["failed"] += 1
+        status["pending"].append({"call_id": call_id, "error_code": error_code})
+        if projection_store is None:
             return
+        try:
+            projection_store.register_publication_failure(
+                turn_id=turn.turn_id,
+                thread_id=turn.thread_id,
+                run_id=turn.current_run_id,
+                call_id=call_id,
+                body_ref=body_ref,
+                error_code=error_code,
+            )
+        except Exception as registration_error:
+            # The durable marker itself failed (e.g. store-level outage):
+            # keep the in-memory + outcome exposure truthful rather than
+            # masking the original failure.
+            status["pending"][-1]["registration_error"] = (
+                type(registration_error).__name__
+            )
 
     def _record_turn_conclusion(self, turn) -> None:
         """Audit F13: persist a TurnConclusion for every terminal Turn.
@@ -560,6 +652,19 @@ class AppRuntime:
             ),
             "ledger_uncertain": truth.ledger_uncertain,
             "workspace_uncertain": truth.workspace_uncertain,
+            # WP-D/R1: projection publication state must ride every turn
+            # outcome; a turn is never reported as fully closed while a
+            # projection is pending or failed (or the scan errored).
+            "result_projections": self._projection_publications.get(
+                result.turn.turn_id,
+            ) or {
+                "published": 0,
+                "failed": 0,
+                "pending": [],
+                "scan_error": None,
+                "untrusted": 0,
+                "unverified": 0,
+            },
         })
         return CommandOutcome(
             truth.turn.status is TurnStatus.COMPLETED

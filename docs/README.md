@@ -23,6 +23,8 @@
 - `d12-i7-receipt-reuse-followup.md`：切片阅读问题台账——D12-I7-001/002 待动态复现与修复（D12+ owner）。
 - `d25-sandboxed-mcp-operations.md`、`d25-sandboxed-mcp-runbook.md`、`examples/`、`rtj-runbook.md`：持续使用的操作手册与配置样例。
 - `Koawa_Runtime_Security_Audit_Handoff.md`：外部安全审计交接文档（待外部审计执行）。
+- `hardening-memory-retrieval-2026-09-19/`：有界结果检索加固（2026-09-19 起）——设计（proposals/bounded-result-retrieval.md）、实施契约与工作包（implementation/）、WP-1/WP-D/R2-R4 进度记录。当前状态：WP-1 已提交；R1 完成待提交；R2/R3/R4 **部分完成**待提交（复验第二轮裁决：发布身份含 model_turn_id、当轮回执顺序与按引用读取链开放；r2r4-progress.md）；R5/WP-C、per-profile 释放契约开放。
+- `implementation-closure-review-2026-09-25.md`：E 轨道实现闭环审查（基线 73270c2）+ R1 修复闭合记录、两轮复验修正与 R2-R4 部分完成裁决（文末追加节）。R5（WP-C 隔离诊断）开放。
 
 ## 相关目录
 

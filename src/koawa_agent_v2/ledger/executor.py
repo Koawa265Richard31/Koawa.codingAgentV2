@@ -442,11 +442,6 @@ class LedgerExecutor:
     ) -> ToolExecutionResult:
         """Consume one executor-issued ticket and invoke at most one handler."""
         if not isinstance(authorization, AuthorizedToolCall):
-            import sys as _s
-            print('DBG-445 type:', type(authorization).__name__,
-                  'len:', len(authorization) if hasattr(authorization, "__len__") else "-",
-                  'elem0:', type(authorization[0]).__name__ if hasattr(authorization, "__len__") and len(authorization) else "-",
-                  file=_s.stderr); _s.stderr.flush()
             raise TypeError("authorization must be AuthorizedToolCall")
         if (
             authorization._executor is not self

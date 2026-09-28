@@ -45,6 +45,8 @@
 
 入口覆盖普通 tool result、恢复回执、session preload、摘要模型、检索工具、错误与异常输出；最终 provider adapter 再验证请求中每项 provenance，防止漏接入口。工具 schema/描述同样受配置来源和大小约束，但可见不代表有指令权威。
 
+状态（2026-09-25，R4 部分）：独立最终请求门已落地（`_assert_request_fits`，ModelRequest 构造前、同一 pinned 快照、含工具 name/description/schema、协议开销保守估算与输出预留；压缩开关/sink/可压缩组不影响；memory=None 有 schema 上限 fail-safe）。协议开销是保守估算非实测 token 计量；per-provenance 的 adapter 级验证未实施。
+
 定义最终 request 计量接口，包含真实序列化输入和 provider 已知开销/预留；任何压缩开关与提前返回不影响该检查。先用离线合成请求建立测量正确性，再实测估算误差。验收：所有通往 provider 的实际路径使用门禁，未知模型计量配置不能静默零估算。
 
 ### WP-C：安全诊断环境与适配器
@@ -75,6 +77,8 @@ WP-C 增补验收：目录新文件与链接不能绕过清单；准备后输入
 
 ### WP-D：JSON 投影发布与留存
 
+状态（2026-09-25，复验第二轮裁决）：**部分完成**。R1 全部完成（含复验恢复链）；R2 已实施长流翻页、ledger 来源身份绑定、in-loop 发布时序（发布身份 = turn+model_turn+call+digest，复验修正了跨轮同 call_id 同内容被错误去重的缺陷；发布失败后当轮回执仍进上下文——"先成功发布再交付"完整契约不存在）。未实施：完全的首轮回执缓冲、按引用读取链（recall 接投影流）、撤销/过期事件、故障注入矩阵。见 `implementation/r2r4-progress.md`、`implementation/wpd-r1-progress.md` 与 `../implementation-closure-review-2026-09-25.md` 闭合记录。
+
 落实完整设计的发布提交点。拟定领域事件族：result.projection-published.v1、result.projection-unavailable.v1、result.projection-revoked.v1、result.projection-expired.v1；命名可按仓库规范细化，含义不能混为工具成功/失败。正文是不可变 JSON，发布事件记录正文引用和安全元数据；写入使用 expected stream version。
 
 执行终态先有可信记录；投影失败不得重新调用工具。模型首次回执必须来自已发布的同一投影；未发布则返回安全不可用状态，不能临时回显私有文本。幂等发布键绑定 execution_id＋投影契约版本；重试不能写出同身份不同内容。
@@ -82,6 +86,8 @@ WP-C 增补验收：目录新文件与链接不能绕过清单；准备后输入
 注入故障：工具已完成/正文未写、正文已写/事件 CAS 冲突、事件已写/索引未更新、撤销已写/清理未完成。验收：无越权可见孤儿、无自动重执行、可辨别正文不可用、清理有状态。
 
 ### WP-E：元数据搜索与投影读取
+
+状态（2026-09-25）：`ResultProjectionStore.read`/`read_publication_status` 已翻页读取投影流（R2），但 recall 工具仍未接到投影流读取（仍查会话历史）——本工作包主体未实施。
 
 当前线程和工作区作用域从 execution context 取。索引由已发布事件增量重建，正文不可索引时不提取关键词。旧事件仅允许已审核的身份/状态字段；现有脱敏记录不自动获准全文。
 

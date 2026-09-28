@@ -188,6 +188,11 @@ class AssembledRuntime:
                 stream_limits=StreamLimits(),
                 trace_sink=self.trace_sink,
                 correlation_id=self.correlation_id,
+                # WP-D/R2: chat turns publish test projections with the same
+                # ordering contract as task turns.
+                result_projection_publisher=getattr(
+                    self.loop, "_result_projection_publisher", None,
+                ),
             )
         elif claim_gate:
             # Audit S6/DS finding: silently ignoring claim_gate for the task
@@ -504,6 +509,19 @@ def preflight_execution_activation(
     )
 
 
+def _make_projection_publisher(store, runtime, ledger):
+    """WP-D/R2: build the in-loop test-projection publication hook.
+
+    Lazy import keeps the retrieval module out of assembly when unused; the
+    hook itself is failure-isolated (never fails the turn, never re-runs
+    tools) and the terminal catch-up stays authoritative for recovery.
+    """
+
+    from ..retrieval.projection import make_test_receipt_publisher
+
+    return make_test_receipt_publisher(store, ledger, runtime)
+
+
 def assemble_execution_plane(
     control: ControlPlaneRuntime,
     granted_plan: GrantedExecutionPlan,
@@ -531,12 +549,19 @@ def assemble_execution_plane(
         runner = _build_command_runner(config, store)
         plan_board = PlanBoard()
 
-        def _register_recall(built_registry):
+        def _register_retrieval_tools(built_registry):
             # Hardening 2026-09-19 (WP-E): metadata-only history recall for
             # the model - thread-scoped, no result bodies.
             from ..retrieval.recall_tool import register_recall_tool
 
             register_recall_tool(
+                built_registry, store=control.store, runtime=control.runtime
+            )
+            # R2 slice (b): read published result projections by reference -
+            # thread-scoped, three-valued availability, no raw bodies.
+            from ..retrieval.result_read_tool import register_result_read_tool
+
+            register_result_read_tool(
                 built_registry, store=control.store, runtime=control.runtime
             )
 
@@ -556,7 +581,10 @@ def assemble_execution_plane(
             verification_limits=verification_limits,
             git_facade=control.git,
             plan_board=plan_board,
-            post_build_registrars=(*post_build_registrars, _register_recall),
+            post_build_registrars=(
+                *post_build_registrars,
+                _register_retrieval_tools,
+            ),
         )
         mcp_sessions, mcp_bindings = _connect_execution_mcp_servers(
             control, granted_plan, launcher_builder=launcher_builder,
@@ -617,6 +645,9 @@ def assemble_execution_plane(
             stream_limits=StreamLimits(),
             trace_sink=trace_sink,
             correlation_id=correlation_id,
+            # WP-D/R2: publish test-result projections at the recording
+            # point - after the durable fact, before any later model round.
+            result_projection_publisher=_make_projection_publisher(store, runtime, ledger),
         )
         checkpoint_store = control.checkpoint_store
         worker = TurnWorker(
