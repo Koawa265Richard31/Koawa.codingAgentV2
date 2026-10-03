@@ -65,20 +65,50 @@ R5（如实评估，未实施）。关联：[wpd-r1-progress.md](wpd-r1-progress
   属独立切片。
 - recall 工具尚未接到 result-projection 流读取（见 R3 残余）。
 
-### 切片进展（2026-09-25 第三轮）
+### 切片进展（2026-09-25 第五轮后：修正版 B 已实施）
 
-- **切片 (b) 按引用读取：已实施**。新模型工具
-  `read_result_projection`（`retrieval/result_read_tool.py`，生产接线在
-  assembly 检索 registrar）：按 (turn_id, call_id[, model_turn_id]) 读取
-  已发布投影，线程作用域硬边界（跨线程 `cross_thread_read_denied`），
-  可用性三态 `published`/`projection_unavailable`/`not_found`，只返回
-  元数据投影与 body_ref，绝不回退原始事件正文；查询失败为
-  `read_unavailable`，不伪造结果。测试
-  `tests/test_result_read_tool.py`（命中/不可用/未找到/跨线程拒绝）。
-- **切片 (a) 发布失败阻止回执进模型：协议提案待裁决**。涉及 recorder
-  协议（durable 交付决策），按仓库纪律以策略文档为审阅面：
-  [r2-delivery-gate-proposal.md](r2-delivery-gate-proposal.md)
-  （方案 B 两段式 durable 交付 vs 方案 C 引用交付，含验收与裁决点）。
+- **切片 (b) 按引用读取：已实施（复验通过）**。`read_result_projection`
+  工具（线程作用域、三态可用性、`ambiguous_reference` 歧义边界）。
+- **切片 (a) 修正版 B：已实施**（按 r2-delivery-gate-proposal.md v4
+  规格，含第四/五轮全部补充约束）：
+  - **SPEC-1**：`result.delivery-decided.v1` 事件，幂等键 =
+    (turn, model_turn, call) 不含内容维度；delivery 值/三摘要/投影引用
+    进指纹；同身份异指纹 `IdempotencyConflict` 拒绝；恢复发现已有决策
+    → 校验后重放原决策（`decide_delivery` + `delivery_command_id`）。
+  - **SPEC-2**：统一规范化（`canonical_text`，单一实现点，live 与
+    reducer 共用）；三摘要分立——`source_digest`（源回执）、
+    `projection_payload_digest` + 四字段不可变引用（stream category +
+    aggregate_id + event_id + stream_version）、`delivery_content_digest`
+    （交付字符串 UTF-8 字节，禁止二次 JSON 编码）；自排除仅限被计算
+    摘要自身字段；投影事件 body_ref 字段更名
+    `source_content_sha256`/`stream_version`，遇既有数据按版本拒绝规则
+    显式处理（`protocol_version_mismatch`），不静默改写。
+  - **SPEC-3**：事实载荷携带 recorder 可信 `tool_name`；活投影与
+    reducer 对测试回执一致地先服务固定占位符（
+    `projection_unavailable`，逐字节文案入档，is_error=False），决策
+    落地后替换为交付字符串（`delivery_content_sha256` 可重算校验）；
+    loop `_deliver_result`：发布→决策持久化（写失败
+    `delivery_decision_failed` 暂停）→ context 只进投影派生内容；
+    worker 恢复路径在 reduce 前执行 backfill（先验后写，精确 turn 头
+    fence）；`pending_delivery_calls` 区分 pending/已决/legacy；
+    `delivery_paused`（查询故障不持久化"未发布"判断）/
+    `protocol_version_mismatch`（legacy 事实拒绝恢复）/
+    `log_corruption`（歧义引用/分歧 source digest/重复决策）三态分离，
+    app.resume 映射为显式非终态 outcome，turn 保持可恢复；终态 resume
+    亦执行 backfill 并在 payload 暴露。
+  - REDUCER_VERSION 2→3（reducer 消费交付事件）；SEED 形状未变。
+  - **验收**：`tests/test_delivery_gate.py` 9 项——SPEC-1 幂等/异
+    digest 拒绝/异决策拒绝；W1（仅事实→backfill unavailable/
+    not_published，补发后不改写历史、按引用可读）、W2（+发布→receipt
+    绑定确切事件）、W3（+决策→重放无新事件）均经正式 resume 入口，
+    断言无工具重执行、决策唯一、上下文不回流原回执；backfill 查询
+    故障→paused 且零持久化；并发恢复竞态→败者幂等重放、总量 1；
+    分歧 source digest→corruption；伪造重复决策→reduce 拒绝；
+    legacy→protocol mismatch 拒绝且零写入。
+  - 受影响面更新：`_RepairModel` 接受投影派生回执与占位符（模型可见
+    形状变化即计划 B 本义）；d6/golden/compaction 等恢复族全部保持。
+- 读取链闭环仍挂起：当前权限检查、检索资源限额、生产读取链验证
+  （`read_result_projection` 生产入口的端到端验证在 R5 切片一并做）。
 
 ## R3：自由文本预览不再自动开放（已实施，范围如实声明）
 
@@ -157,3 +187,59 @@ profile 的详细诊断适配器、合成秘密覆盖 env/文件/镜像/链接/�
 
 - `ledger/executor.py` 移除 6367a16 带入的遗留 `DBG-445` stderr 调试打印
   （生产防御分支泄漏内部状态形状）。
+
+## 第三轮切片（2026-10-03，R1–R5 闭环目标下的收口）
+
+### R3 收口（测试面，已实施）
+
+- per-profile 字段释放契约落地（部署输入）：`ReleaseRule`
+  （`verification/output_policy.py`）——默认=完整安全诊断集；显式契约=
+  白名单字段（策略标记与 profile 身份恒随行）；**sensitive 无契约 →
+  固定 `result_withheld` + `human_required` 状态**（非失败，防错误补丁
+  与探测式重测）。配置面：`TestProfileConfig.release_fields/sensitive` →
+  `CommandProfile`/`SandboxCommandProfile` → runner `release_rule()` →
+  回执过滤。计划 B 交付内容继承契约（投影诊断来自已过滤回执）。
+  测试：`tests/test_release_rules.py` 6 项。MCP 长度/适配器释放归
+  WP-C/MCP 面（docker manifest 与 MCP 适配器为后续切片，如实声明）。
+
+### R4 收口（实测计量，已实施）
+
+- 探针 `scripts/r4_metering_probe.py`（只读、8 请求、密钥仅环境变量、
+  https+公网+禁重定向校验）；实测 DeepSeek-V4-Flash：chars/token 区间
+  **2.911–4.628**（最差=工具 schema 密集）；安全换算下界 **2.5
+  chars/token**，现行预算（默认 64k / smoke 176k 字符）经验证在窗口内。
+  报告：`r4-measured-metering-report.md`（含局限：单模型/合成形状/一次
+  运行；换模型须复跑）。
+
+### R5/WP-C v1（已实施 + 真实生产证据）
+
+- **隔离测试工作区**（`sandbox/test_workspace.py`）：固定清单 → 临时
+  workspace（candidate 只读副本 + 私有 scratch，经 `KOAWA_TEST_SCRATCH`
+  寻址）；清单核验拒绝越界/绝对路径/符号链接/超限；清理失败隔离不复用；
+  仓库永不为 cwd、永不被写回。
+- **诊断适配器**：`extract_diagnostics` 有界结构化摘录（断言行 + 首个
+  栈头，≤10 行×200 字符）——仅隔离运行（合成输入已证）回执携带
+  `diagnostics_excerpt`；traceback 终止规则防止吞栈后噪音行。
+- **不静默放宽**：sensitive profile + host runner → 配置期
+  `sensitive_profile_requires_sandbox` 拒绝；Docker 不可用仍为既有显式
+  错误。
+- 测试：`tests/test_wp_c_workspace.py` + `test_wp_c_manifest_guard.py`
+  （隔离执行/仓库零写回/只读候选/scratch 可写/清理/回执摘录有界且无
+  未标记秘密/sensitive 拒 host/适配器界）。
+- **真实生产入口证据**（R5 验收"至少一条真实任务"）：生产 CLI + 真实
+  DeepSeek-V4-Flash 修复任务（外部夹具
+  `D:/A_Dev_Projects/koawa-smoke-review/r5-closure/`）——turn completed、
+  真实补丁（`left - right`→`left + right`）、测试绿、finalize 证据
+  digest；**计划 B 生产链同时实证**：1×`result.delivery-decided.v1`
+  （receipt，源/交付双摘要绑定）、1×`result.projection-published.v1`
+  （in-loop 与终态补发幂等共存）、重建上下文中的测试回执=已发布投影
+  （publication_status=published, metadata_only）、
+  `result_projections{published:1, failed:0, untrusted:0, unverified:0}`。
+
+### 仍开放（如实声明）
+
+- 首轮回执缓冲完全契约的"发布失败→占位符投递"在生产真实故障下的人造
+  注入验证（测试级已覆盖 W1–W3+3）；读取链当前权限检查与检索资源限额；
+  Docker manifest / MCP 适配器释放规则；敏感容器真实实验矩阵（合成
+  秘密覆盖 env/镜像/链接/网络编码）；per-profile 释放契约的实际部署值
+  （维护者输入）；WP-H 长任务参数报告。

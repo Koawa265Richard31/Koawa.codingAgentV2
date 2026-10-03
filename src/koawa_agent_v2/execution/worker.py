@@ -170,6 +170,15 @@ class TurnWorker:
                 raise ContextUnavailable()
             execution_facts = _read_execution(self._checkpoint_store, queued.turn_id)
             if execution_facts:
+                # Plan B (spec v4 SPEC-3): a committed test fact without a
+                # delivery decision is delivery_pending - backfill runs
+                # BEFORE any context is rebuilt, so the original receipt can
+                # never ride a recovered request.  Legacy-protocol facts,
+                # corrupt decisions and unresolvable lookups surface as
+                # distinct explicit states (never as quiet receipt replay).
+                refreshed = _backfill_delivery(self._checkpoint_store, queued)
+                if refreshed is not None:
+                    execution_facts = refreshed
                 # I4: forged second seeds, missing seeds and foreign-run facts
                 # must fail closed as ContextUnavailable before any provider
                 # call (contract §6.4).
@@ -557,6 +566,43 @@ def _expected_version(value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError("expected_version must be an integer >= 0")
     return value
+
+
+def _backfill_delivery(checkpoint_store: CheckpointStore, queued):
+    """Plan B SPEC-3: decide pending deliveries before context rebuild.
+
+    Returns the REFRESHED fact stream when decisions were written (the
+    caller's seed version and reconstruction must see them), None when
+    there was nothing pending.  Raises the delivery recovery errors
+    (paused / protocol mismatch / corruption) that the app maps to
+    explicit non-terminal outcomes - the turn stays recoverable.
+    """
+
+    from ..recovery.context import pending_delivery_calls
+    from ..recovery.delivery import backfill_delivery_decisions
+
+    events = _read_execution(checkpoint_store, queued.turn_id)
+    state = pending_delivery_calls(events)
+    if not state["pending"] and not state["legacy_test_facts"]:
+        return None
+    store = checkpoint_store.event_store
+    turn_page = store.read_stream(
+        StreamId("turn", queued.turn_id), after_version=-1, limit=500,
+    )
+    if not turn_page:
+        raise ContextUnavailable()
+    head = turn_page[-1]
+    backfill_delivery_decisions(
+        store,
+        turn_id=queued.turn_id,
+        thread_id=queued.thread_id,
+        run_id=queued.current_run_id,
+        events=events,
+        # Verify-before-write: an exact turn-head fence; the caller holds
+        # the recovery claim/lease that authorizes this transition.
+        turn_fence=(head.stream_version, head.event_type, None),
+    )
+    return _read_execution(checkpoint_store, queued.turn_id)
 
 
 def _read_execution(store: CheckpointStore, turn_id: UUID) -> tuple:

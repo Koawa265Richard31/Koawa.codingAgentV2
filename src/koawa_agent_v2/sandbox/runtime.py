@@ -1037,6 +1037,18 @@ class DockerCommandRunner:
         self._fault_hook = fault_hook
         self._reaper = ContainerReaper(self._store, executable)
 
+    def release_rule(self, profile_id: str):
+        """R3: this profile's receipt release contract, if configured."""
+
+        from ..verification.output_policy import ReleaseRule
+
+        profile = self._profiles.get(profile_id)
+        if profile is None:
+            return None
+        return ReleaseRule(
+            fields=profile.release_fields, sensitive=profile.sensitive,
+        )
+
     @property
     def profile_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._profiles))

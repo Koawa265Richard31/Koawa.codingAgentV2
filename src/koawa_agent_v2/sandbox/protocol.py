@@ -156,12 +156,21 @@ class SandboxCommandProfile:
     max_stdout_bytes: int = 256_000
     max_stderr_bytes: int = 256_000
     environment: tuple[tuple[str, str], ...] = ()
+    # R3: per-profile receipt release contract (mirrors CommandProfile).
+    release_fields: tuple[str, ...] | None = None
+    sensitive: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile_id, str) or not _PROFILE_ID.fullmatch(
             self.profile_id
         ):
             raise SandboxError("invalid_sandbox_profile")
+        from ..verification.output_policy import ReleaseRule
+
+        try:
+            ReleaseRule(fields=self.release_fields, sensitive=self.sensitive)
+        except (ValueError, TypeError):
+            raise SandboxError("invalid_release_contract") from None
         if not isinstance(self.argv, tuple) or not 1 <= len(self.argv) <= 128:
             raise SandboxError("invalid_sandbox_command")
         total_bytes = 0

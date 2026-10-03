@@ -66,6 +66,9 @@ SEED_PROTOCOL_VERSION = 1
 _MODEL_TURN_EVENT = "model.turn-completed.v1"
 _TOOL_RESULT_EVENT = "tool.result-recorded.v1"
 _PHASE_ADVANCE_EVENT = "run.phase-advanced.v1"
+# Plan B (delivery gate): the fact payload carries the trusted tool name so
+# the reducer can delivery-gate test receipts without ledger access.
+_TEST_TOOL_NAME = "run_test_profile"
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +559,9 @@ class DurableExecutionRecorder:
         self.thread_id, self.turn_id, self.run_id = thread_id, turn_id, run_id
         self.turn_version = turn_version
         self.context = [context_document(x) for x in initial_context]
+        # tool_started -> tool_name map of this run (per-call, popped on
+        # completion); drives the plan-B delivery-gated projection view.
+        self._tool_names: dict[str, str] = {}
         # Parallel to context: the run-execution stream version that produced
         # each item (seed items start at 0); compaction replaces by this range.
         self._source_versions = [0] * len(self.context)
@@ -637,6 +643,7 @@ class DurableExecutionRecorder:
         )
 
     def tool_started(self, call_id: str, tool_name: str) -> None:
+        self._tool_names[call_id] = tool_name
         self.phase = RunPhase.TOOL_IN_PROGRESS
         self._append_typed(
             _PHASE_ADVANCE_EVENT,
@@ -645,10 +652,18 @@ class DurableExecutionRecorder:
 
     def tool_completed(self, result: ToolResultMessage, tool_count: int) -> None:
         doc = context_document(result)
+        tool_name = self._tool_names.pop(result.call_ref.call_id, None)
         new_version = (
             self._stream_head_version(StreamId("run-execution", self.turn_id)) + 1
         )
-        self.context.append(doc)
+        # Plan B delivery gate: the durable FACT keeps the original receipt
+        # (operator-side truth), while the model-facing projection serves the
+        # fixed unavailable placeholder until the delivery decision lands -
+        # mirroring exactly what the canonical reducer derives from events.
+        projection_doc = doc
+        if tool_name == _TEST_TOOL_NAME:
+            projection_doc = self._placeholder_view(doc)
+        self.context.append(projection_doc)
         self._source_versions.append(new_version)
         self.tool_count = tool_count
         self.pending_calls = [
@@ -664,8 +679,99 @@ class DurableExecutionRecorder:
         )
         self._append_typed(
             _TOOL_RESULT_EVENT,
-            {"context_item": doc, "tool_count": tool_count},
+            {"context_item": doc, "tool_count": tool_count, "tool_name": tool_name},
         )
+
+    def delivery_decided(self, result_message, decision: dict) -> None:
+        """Plan B: persist the FIRST delivery decision for one test call.
+
+        The event rides the run-execution stream behind the live turn fence
+        with the SPEC-1 identity; after commit, the live projection mirrors
+        the reducer's transformation (delivered string replaces the
+        placeholder view).
+        """
+
+        from ..retrieval.projection import build_delivery_payload, decide_delivery
+
+        payload = build_delivery_payload(
+            call_id=decision["call_id"],
+            model_turn_id=decision["model_turn_id"],
+            delivery=decision["delivery"],
+            source_sha256=decision["source_content_sha256"],
+            delivered_content=decision["content"],
+            projection_ref=decision.get("projection_ref"),
+            error_code=decision.get("error_code"),
+        )
+        head_fence = self._turn_head_fence()
+        if head_fence is None:
+            raise EventStoreError("delivery turn fence: turn stream missing")
+        fence_version, head_type, head_run = head_fence
+        if (
+            head_type not in LIVE_RUN_TURN_EVENT_TYPES
+            or head_run != str(self.run_id)
+        ):
+            raise EventStoreError("delivery turn fence is no longer active")
+        decide_delivery(
+            self.store,
+            turn_id=self.turn_id,
+            thread_id=self.thread_id,
+            run_id=self.run_id,
+            call_id=decision["call_id"],
+            model_turn_id=decision["model_turn_id"],
+            payload=payload,
+            turn_fence=(
+                fence_version,
+                head_type,
+                {"run_id": str(self.run_id)},
+            ),
+        )
+        # Mirror the reducer: replace the placeholder view of this call.
+        for item in self.context:
+            if (
+                item.get("kind") == "tool_result"
+                and item.get("call_id") == decision["call_id"]
+                and item.get("model_turn_id") == decision["model_turn_id"]
+            ):
+                item["content"] = decision["content"]
+                item["is_error"] = False
+                break
+
+    def _placeholder_view(self, doc: dict) -> dict:
+        """Model-facing placeholder view of one test-receipt fact.
+
+        The canonical reducer derives the identical view from the durable
+        events, so the live projection and any replay stay byte-equal
+        (checkpoint verification depends on this).
+        """
+
+        import json as _json
+
+        from ..retrieval.projection import (
+            canonical_text,
+            source_digest,
+            unavailable_placeholder,
+        )
+        from ..verification.output_policy import POLICY_VERSION
+
+        content = doc.get("content")
+        try:
+            receipt = _json.loads(content) if isinstance(content, str) else None
+        except (TypeError, ValueError):
+            receipt = None
+        if not isinstance(receipt, dict):
+            return doc
+        if receipt.get("test_output_policy") != POLICY_VERSION:
+            return doc
+        placeholder = unavailable_placeholder(
+            turn_id=self.turn_id,
+            model_turn_id=doc.get("model_turn_id"),
+            call_id=doc.get("call_id"),
+            source_sha256=source_digest(receipt),
+        )
+        view = dict(doc)
+        view["content"] = canonical_text(placeholder)
+        view["is_error"] = False
+        return view
 
     def compact(
         self,

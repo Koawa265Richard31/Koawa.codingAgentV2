@@ -54,7 +54,10 @@ LIVE_RUN_TURN_EVENT_TYPES = frozenset(
 
 
 REDUCER_NAME = "run-execution"
-REDUCER_VERSION = 2
+# v3 (plan B delivery gate, 2026-09-25): the reducer serves delivery-derived
+# content for test receipts (placeholder until decided, delivered string
+# after result.delivery-decided.v1) instead of the execution-path receipt.
+REDUCER_VERSION = 3
 
 KOAWA_WIRE_NAMESPACE = uuid5(NAMESPACE_URL, "https://koawa-agent.dev/wire/v2")
 CHECKPOINT_ID_NAMESPACE = uuid5(KOAWA_WIRE_NAMESPACE, "checkpoint-id")

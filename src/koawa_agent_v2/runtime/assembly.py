@@ -751,6 +751,9 @@ def _docker_profile(item: TestProfileConfig) -> SandboxCommandProfile:
         max_stdout_bytes=item.max_stdout_bytes,
         max_stderr_bytes=item.max_stderr_bytes,
         environment=item.environment,
+        release_fields=item.release_fields,
+        sensitive=item.sensitive,
+        workspace_manifest=item.workspace_manifest,
     )
 
 
@@ -768,6 +771,9 @@ def _host_profile(item: TestProfileConfig) -> CommandProfile:
         max_stdout_bytes=item.max_stdout_bytes,
         max_stderr_bytes=item.max_stderr_bytes,
         environment=item.environment,
+        release_fields=item.release_fields,
+        sensitive=item.sensitive,
+        workspace_manifest=item.workspace_manifest,
     )
 
 

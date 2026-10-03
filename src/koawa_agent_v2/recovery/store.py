@@ -176,6 +176,8 @@ class CheckpointStore:
         document = projection_document(reduced)
         digest = projection_digest(reduced)
         checkpoint = Checkpoint.build(
+            reducer_name=REDUCER_NAME,
+            reducer_version=REDUCER_VERSION,
             source_category="run-execution",
             source_aggregate_id=turn_id,
             covered_stream_version=source_event.stream_version,

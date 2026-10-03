@@ -84,11 +84,15 @@ class _VerificationTools:
         git: GitFacade,
         verification: VerificationLedger,
         limits: D5ToolLimits,
+        release_rules=None,
     ) -> None:
         self._runner = runner
         self._git = git
         self._verification = verification
         self._limits = limits
+        # R3: resolves the per-profile receipt release contract; runners
+        # without the accessor (test doubles) keep the default full set.
+        self._release_rules = release_rules
 
     def run_test_profile(
         self,
@@ -172,6 +176,16 @@ class _VerificationTools:
         # Hardening 2026-09-19: the model-visible receipt carries fixed
         # structured diagnostics only - stdout/stderr bodies stay in the
         # durable record (operator side) and never enter the model service.
+        # R3: the per-profile release contract then filters these fields; a
+        # sensitive profile without a contract yields the fixed withheld
+        # state (distinct from failure, human handoff flagged).
+        if self._release_rules is not None:
+            rule = self._release_rules(result.profile_id)
+            if rule is not None and rule.withheld:
+                return _bounded_json(
+                    output_policy.withheld_receipt(result.profile_id),
+                    self._limits.max_tool_result_chars,
+                )
         payload: dict[str, Any] = {
             "allocation_id": (
                 str(result.allocation_id) if result.allocation_id is not None else None
@@ -192,7 +206,18 @@ class _VerificationTools:
             "timeout_seconds": result.timeout_seconds,
             "test_output_policy": output_policy.POLICY_VERSION,
             "test_output_visibility": output_policy.BODY_VISIBILITY,
+            "isolated_workspace": bool(result.isolated_workspace),
         }
+        if result.isolated_workspace:
+            # WP-C v1: bounded structured excerpt for isolated/synthetic
+            # runs - rich diagnostics by design, never a raw body dump.
+            from ..sandbox.test_workspace import extract_diagnostics
+
+            payload["diagnostics_excerpt"] = extract_diagnostics(result.stdout)
+        if self._release_rules is not None:
+            rule = self._release_rules(result.profile_id)
+            if rule is not None:
+                payload = output_policy.apply_release_rule(payload, rule)
         return _bounded_json(payload, self._limits.max_tool_result_chars)
 
     def _diff_json(self, diff: GitDiffSnapshot) -> str:
@@ -272,7 +297,15 @@ def build_verified_coding_tool_registry(
             protected_paths=git.protected_paths,
             observer=verification.record_patch,
         )
-        _register_verification_tools(registry, runner, git, verification, tool_limits)
+        release_rules = getattr(runner, "release_rule", None)
+        _register_verification_tools(
+            registry,
+            runner,
+            git,
+            verification,
+            tool_limits,
+            release_rules=release_rules,
+        )
         if plan_board is not None:
             register_plan_tool(registry, plan_board)
         register_repo_map_tool(registry, resolver)
@@ -293,8 +326,11 @@ def _register_verification_tools(
     git: GitFacade,
     verification: VerificationLedger,
     limits: D5ToolLimits,
+    release_rules=None,
 ) -> None:
-    tools = _VerificationTools(runner, git, verification, limits)
+    tools = _VerificationTools(
+        runner, git, verification, limits, release_rules=release_rules,
+    )
     empty_schema = {
         "type": "object",
         "properties": {},
