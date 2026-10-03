@@ -8,6 +8,8 @@ fixture 或用户明确确认可信的仓库。
 from __future__ import annotations
 
 import os
+
+import os
 import re
 import signal
 import subprocess
@@ -27,6 +29,9 @@ _SECRET_LIKE_ARGUMENT = re.compile(
 )
 _SAFE_ENV_NAMES = frozenset(
     {
+        # WP-C v1: the isolated workspace publishes its private scratch
+        # directory through this name (runtime-injected, never config).
+        "KOAWA_TEST_SCRATCH",
         "LANG",
         "LC_ALL",
         "PYTHONHASHSEED",
@@ -82,12 +87,34 @@ class CommandProfile:
     max_stdout_bytes: int = 256_000
     max_stderr_bytes: int = 256_000
     environment: tuple[tuple[str, str], ...] = ()
+    # R3: per-profile receipt release contract (deployment input); None =
+    # default safe-diagnostic set, sensitive without a contract = withheld.
+    release_fields: tuple[str, ...] | None = None
+    sensitive: bool = False
+    # WP-C v1: fixed input manifest - non-empty runs in an isolated
+    # ephemeral workspace (read-only candidate copies + private scratch).
+    workspace_manifest: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile_id, str) or not _PROFILE_ID.fullmatch(
             self.profile_id
         ):
             raise CommandRunnerError("invalid_command_profile")
+        for item in self.workspace_manifest:
+            if (
+                not isinstance(item, str)
+                or not item
+                or os.sep in item
+                or item.startswith("/")
+                or ".." in Path(item.replace("/", os.sep)).parts
+            ):
+                raise CommandRunnerError("invalid_workspace_manifest")
+        from .output_policy import ReleaseRule
+
+        try:
+            ReleaseRule(fields=self.release_fields, sensitive=self.sensitive)
+        except (ValueError, TypeError):
+            raise CommandRunnerError("invalid_release_contract") from None
         if (
             not isinstance(self.argv, tuple)
             or not self.argv
@@ -161,6 +188,7 @@ class CommandResult:
     profile_digest: str | None = None
     allocation_id: UUID | None = None
     container_id: str | None = None
+    isolated_workspace: bool = False
 
     @property
     def passed(self) -> bool:
@@ -243,6 +271,18 @@ class TrustedCommandRunner:
     def profile_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._profiles))
 
+    def release_rule(self, profile_id: str):
+        """R3: this profile's receipt release contract, if configured."""
+
+        from .output_policy import ReleaseRule
+
+        profile = self._profiles.get(profile_id)
+        if profile is None:
+            return None
+        return ReleaseRule(
+            fields=profile.release_fields, sensitive=profile.sensitive,
+        )
+
     def validate_profile(self, profile_id: str) -> None:
         """在占用测试预算前验证 trust gate 与固定配置是否存在。"""
         if self._trust is RepositoryTrust.UNTRUSTED:
@@ -260,15 +300,42 @@ class TrustedCommandRunner:
         del execution_id
         self.validate_profile(profile_id)
         profile = self._profiles[profile_id]
-        process = run_bounded_process(
-            self._root,
-            profile.argv,
-            timeout_seconds=profile.timeout_seconds,
-            max_stdout_bytes=profile.max_stdout_bytes,
-            max_stderr_bytes=profile.max_stderr_bytes,
-            environment=dict(profile.environment),
-            progress_guard=progress_guard,
-        )
+        isolated = False
+        if profile.workspace_manifest:
+            # WP-C v1: run inside the isolated ephemeral workspace (fixed
+            # manifest copies only + private scratch); the shared minimal
+            # environment contract still applies.
+            from ..sandbox.test_workspace import prepare_test_workspace
+
+            with prepare_test_workspace(
+                self._root,
+                profile.workspace_manifest,
+                label=profile.profile_id,
+            ) as workspace:
+                environment = dict(profile.environment)
+                # Scratch is addressed through this variable - the run never
+                # needs (or gets) a parent-relative path.
+                environment["KOAWA_TEST_SCRATCH"] = str(workspace.scratch_dir)
+                process = run_bounded_process(
+                    workspace.candidate_dir,
+                    profile.argv,
+                    timeout_seconds=profile.timeout_seconds,
+                    max_stdout_bytes=profile.max_stdout_bytes,
+                    max_stderr_bytes=profile.max_stderr_bytes,
+                    environment=environment,
+                    progress_guard=progress_guard,
+                )
+            isolated = True
+        else:
+            process = run_bounded_process(
+                self._root,
+                profile.argv,
+                timeout_seconds=profile.timeout_seconds,
+                max_stdout_bytes=profile.max_stdout_bytes,
+                max_stderr_bytes=profile.max_stderr_bytes,
+                environment=dict(profile.environment),
+                progress_guard=progress_guard,
+            )
         if process.start_failed:
             outcome = CommandOutcome.START_FAILED
         elif process.timed_out:
@@ -290,6 +357,7 @@ class TrustedCommandRunner:
             process.duration_ms,
             (Path(profile.argv[0]).name, *profile.argv[1:]),
             float(profile.timeout_seconds),
+            isolated_workspace=isolated,
         )
 
 

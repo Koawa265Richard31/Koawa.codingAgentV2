@@ -15,6 +15,7 @@
 
 ## open-active/ —— 待办与活文档（有未闭合项或持续使用）
 
+- `agent-security-community-roadmap-2026-09-30.md`：Agent 安全社区贡献与 KoawaAgent 学习的 8 周路线；首题为安全评测空转验证，含每周产物、证据标准和披露边界。仅规划，未启动外部贡献。
 - `psec-progress.md`：PSEC 进度账本（**唯一状态事实源**）——未闭合项：B-3 委派图接线、B-1 残余（remote-MCP OAuth/凭据代管）、Mimosa 13+14 findings 逐条分诊、takeover×sticky 交集未审计。
 - `rtj-progress.md`：RT/J 账本——sticky escalation×takeover 交集、变形/编码种子（declared 不检测）。
 - `agent-security-threat-model.md`：活治理文档（T1–T7，随代码演进更新哈希）。
@@ -23,7 +24,7 @@
 - `d12-i7-receipt-reuse-followup.md`：切片阅读问题台账——D12-I7-001/002 待动态复现与修复（D12+ owner）。
 - `d25-sandboxed-mcp-operations.md`、`d25-sandboxed-mcp-runbook.md`、`examples/`、`rtj-runbook.md`：持续使用的操作手册与配置样例。
 - `Koawa_Runtime_Security_Audit_Handoff.md`：外部安全审计交接文档（待外部审计执行）。
-- `hardening-memory-retrieval-2026-09-19/`：有界结果检索加固（2026-09-19 起）——设计（proposals/bounded-result-retrieval.md）、实施契约与工作包（implementation/）、WP-1/WP-D/R2-R4 进度记录。当前状态：WP-1 已提交；R1 完成待提交；R2/R3/R4 **部分完成**待提交（复验第二轮裁决：发布身份含 model_turn_id、当轮回执顺序与按引用读取链开放；r2r4-progress.md）；R5/WP-C、per-profile 释放契约开放。
+- `hardening-memory-retrieval-2026-09-19/`：有界结果检索加固（2026-09-19 起）——设计（proposals/bounded-result-retrieval.md）、实施契约与工作包（implementation/）、WP-1/WP-D/R2-R4 进度记录。当前状态：WP-1 已提交；R1 完成、R2（修正版 B 交付门 + 按引用读取）、R3（释放契约）、R4（实测计量）、R5/WP-C v1（隔离工作区 + 真实生产证据）已实施待提交（r2r4-progress.md）；开放：读取链当前权限/检索限额、Docker manifest、MCP 适配器、敏感容器实验矩阵、WP-H。
 - `implementation-closure-review-2026-09-25.md`：E 轨道实现闭环审查（基线 73270c2）+ R1 修复闭合记录、两轮复验修正与 R2-R4 部分完成裁决（文末追加节）。R5（WP-C 隔离诊断）开放。
 
 ## 相关目录

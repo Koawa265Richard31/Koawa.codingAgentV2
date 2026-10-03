@@ -33,6 +33,8 @@ LEGACY_SEED_EVENT_TYPE = "run.context-seeded.v1"
 
 _MODEL_TURN_EVENT = "model.turn-completed.v1"
 _TOOL_RESULT_EVENT = "tool.result-recorded.v1"
+_DELIVERY_DECIDED_EVENT = "result.delivery-decided.v1"
+_DELIVERY_TEST_TOOL = "run_test_profile"
 _PHASE_ADVANCE_EVENT = "run.phase-advanced.v1"
 
 # D23 §5.7 in-run compaction facts appended to the run-execution stream.
@@ -273,6 +275,140 @@ def _validate_context_items(items: Sequence[Any]) -> tuple[Mapping[str, Any], ..
     return tuple(_validate_context_item(item) for item in items)
 
 
+def delivery_content_digest_text(delivered: str) -> str:
+    """SPEC-2 补-3: SHA-256 over the delivered string's UTF-8 bytes."""
+
+    import hashlib
+
+    return hashlib.sha256(delivered.encode("utf-8")).hexdigest()
+
+
+def _delivery_placeholder_view(event, payload: Mapping, item: dict) -> dict:
+    """Model-facing view of one tool-result fact (plan B delivery gate).
+
+    Test receipts (trusted tool name from the recorder) serve the fixed
+    ``projection_unavailable`` placeholder until their delivery decision
+    lands; every other fact passes through unchanged.  The live recorder
+    derives the identical view, keeping checkpoint verification exact.
+    """
+
+    if payload.get("tool_name") != _DELIVERY_TEST_TOOL:
+        return item
+    import json as _json
+
+    from ..retrieval.projection import (
+        canonical_text,
+        source_digest,
+        unavailable_placeholder,
+    )
+    from ..verification.output_policy import POLICY_VERSION
+
+    content = item.get("content")
+    try:
+        receipt = _json.loads(content) if isinstance(content, str) else None
+    except (TypeError, ValueError):
+        receipt = None
+    if not isinstance(receipt, dict):
+        return item
+    if receipt.get("test_output_policy") != POLICY_VERSION:
+        return item
+    placeholder = unavailable_placeholder(
+        turn_id=event.stream_id.aggregate_id,
+        model_turn_id=item.get("model_turn_id"),
+        call_id=item.get("call_id"),
+        source_sha256=source_digest(receipt),
+    )
+    view = dict(item)
+    view["content"] = canonical_text(placeholder)
+    view["is_error"] = False
+    return view
+
+
+def pending_delivery_calls(events: Sequence[StoredEvent]) -> dict:
+    """Scan a run-execution segment for delivery state (plan B, SPEC-3).
+
+    Returns ``{"pending": [(model_turn_id, call_id, source_sha256)],
+    "decided": {(model_turn_id, call_id)}, "legacy_test_facts": count}``.
+    ``legacy_test_facts`` counts policy-marked receipts recorded WITHOUT a
+    trusted tool name (pre-delivery-protocol facts): those streams predate
+    this protocol and recovery must refuse them explicitly instead of
+    silently rebuilding original receipts into model context.
+    """
+
+    import json as _json
+
+    from ..verification.output_policy import POLICY_VERSION
+
+    decided: set[tuple[str, str]] = set()
+    pending: list[tuple[str, str, str, str]] = []
+    legacy = 0
+    for event in events:
+        if event.event_type == _DELIVERY_DECIDED_EVENT:
+            payload = dict(event.payload)
+            decided.add(
+                (str(payload.get("model_turn_id")), str(payload.get("call_id")))
+            )
+        elif event.event_type == _TOOL_RESULT_EVENT:
+            payload = dict(event.payload)
+            item = payload.get("context_item")
+            if isinstance(item, str):
+                try:
+                    item = _json.loads(item)
+                except (TypeError, ValueError):
+                    continue
+            if not isinstance(item, Mapping):
+                continue
+            if payload.get("tool_name") != _DELIVERY_TEST_TOOL:
+                if payload.get("tool_name") is None:
+                    content = item.get("content")
+                    try:
+                        receipt = (
+                            _json.loads(content)
+                            if isinstance(content, str)
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(receipt, dict) and (
+                        receipt.get("test_output_policy") == POLICY_VERSION
+                    ):
+                        legacy += 1
+                continue
+            from ..retrieval.projection import source_digest
+
+            content = item.get("content")
+            try:
+                receipt = (
+                    _json.loads(content) if isinstance(content, str) else None
+                )
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(receipt, dict):
+                continue
+            identity = (
+                str(item.get("model_turn_id")),
+                str(item.get("call_id")),
+            )
+            if identity in decided:
+                continue
+            pending.append(
+                (
+                    identity[0],
+                    identity[1],
+                    source_digest(receipt),
+                    str(payload.get("run_id") or ""),
+                )
+            )
+    # A decision may follow its fact later in the stream: post-filter.
+    return {
+        "pending": [
+            item for item in pending if (item[0], item[1]) not in decided
+        ],
+        "decided": decided,
+        "legacy_test_facts": legacy,
+    }
+
+
 
 # ---------------------------------------------------------------------------
 # canonical reducer
@@ -347,10 +483,14 @@ def reduce_execution(
         # D23 compaction state: latest closed epoch and its pending intended.
         compaction_epoch = 0
         intended: dict[str, Any] | None = None
+        # Plan B delivery gate: identities (model_turn_id, call_id) that
+        # already carry a first delivery decision.
+        decided_deliveries: set[tuple[str, str]] = set()
     else:
         version = initial.execution_version
         context = list(initial.context)
         source_ranges = _replay_ranges(len(initial.context), initial.execution_version)
+        decided_deliveries: set[tuple[str, str]] = set()
         model_round = initial.model_round
         tool_count = initial.tool_count
         output_chars = initial.output_chars
@@ -536,7 +676,10 @@ def reduce_execution(
                     raise ReconstructionError("tool_count must derive from results")
                 tool_count = declared_count
                 item = _validate_context_item(payload.get("context_item"))
-                context.append(item)
+                model_view = _delivery_placeholder_view(
+                    event, payload, item,
+                )
+                context.append(model_view)
                 source_ranges.append((version, version))
                 pending = [
                     existing
@@ -547,6 +690,35 @@ def reduce_execution(
                     )
                 ]
                 phase = RunPhase.READY_FOR_TOOL if pending else RunPhase.READY_FOR_MODEL
+            elif event.event_type == _DELIVERY_DECIDED_EVENT:
+                # Plan B (spec v4): the FIRST delivery decision for a test
+                # call fixes the model-facing content; a second decision for
+                # the same call or a digest mismatch is corruption.
+                call_id = str(payload.get("call_id"))
+                model_turn = str(payload.get("model_turn_id"))
+                delivered = payload.get("delivered_content")
+                if not isinstance(delivered, str):
+                    raise ReconstructionError("delivery content missing")
+                if (
+                    delivery_content_digest_text(delivered)
+                    != payload.get("delivery_content_sha256")
+                ):
+                    raise ReconstructionError("delivery digest mismatch")
+                identity = (model_turn, call_id)
+                if identity in decided_deliveries:
+                    raise ReconstructionError("duplicate delivery decision")
+                decided_deliveries.add(identity)
+                for doc in reversed(context):
+                    if (
+                        doc.get("kind") == "tool_result"
+                        and doc.get("call_id") == call_id
+                        and doc.get("model_turn_id") == model_turn
+                    ):
+                        doc["content"] = delivered
+                        doc["is_error"] = False
+                        break
+                else:
+                    raise ReconstructionError("delivery decision without fact")
             elif event.event_type == COMPACTION_INTENDED_EVENT:
                 if intended is not None:
                     raise ReconstructionError("duplicate compaction intent")

@@ -72,7 +72,7 @@ def _publish_projection_fixture(
         "stream": "run-execution",
         "turn_id": str(queued.turn_id),
         "model_turn_id": model_turn_id or str(uuid4()),
-        "content_sha256": digest,
+        "source_content_sha256": digest,
     }
     if failure:
         projections.register_publication_failure(
@@ -94,6 +94,28 @@ def _publish_projection_fixture(
         body_ref=body_ref,
     )
     return body_ref
+
+
+def _bind_recorder(store, runtime, thread, queued, running):
+    """Construct the per-run durable recorder for direct loop.run tests
+    (plan B: test-receipt delivery REQUIRES a durable sink - the loop fails
+    closed without one)."""
+
+    from koawa_agent_v2.model.protocol import UserMessage
+    from koawa_agent_v2.recovery.execution import DurableExecutionRecorder
+    from koawa_agent_v2.recovery.store import CheckpointStore
+
+    return DurableExecutionRecorder(
+        store,
+        CheckpointStore(store),
+        thread_id=thread.thread_id,
+        turn_id=queued.turn_id,
+        run_id=running.current_run_id,
+        turn_version=running.version,
+        initial_context=(UserMessage("u1", "run tests"),),
+        provider="test",
+        model="model",
+    )
 
 
 class InLoopPublicationOrderingTest(unittest.TestCase):
@@ -182,6 +204,7 @@ class InLoopPublicationOrderingTest(unittest.TestCase):
                 queued.version,
                 command_id=start_command,
             )
+            recorder = _bind_recorder(store, runtime, thread, queued, running)
             loop.run(
                 run_id=running.current_run_id,
                 turn_id=queued.turn_id,
@@ -191,6 +214,7 @@ class InLoopPublicationOrderingTest(unittest.TestCase):
                 ),
                 provider="test",
                 model="model",
+                durable_sink=recorder,
             )
             # The projection existed before the final round was produced.
             self.assertEqual(["c1"], probe_seen)
@@ -336,6 +360,7 @@ class CallIdentityAcrossModelTurnsTest(unittest.TestCase):
                 queued.version,
                 command_id=start_command,
             )
+            recorder = _bind_recorder(store, runtime, thread, queued, running)
             loop.run(
                 run_id=running.current_run_id,
                 turn_id=queued.turn_id,
@@ -345,6 +370,7 @@ class CallIdentityAcrossModelTurnsTest(unittest.TestCase):
                 ),
                 provider="test",
                 model="model",
+                durable_sink=recorder,
             )
             events = store.read_stream(
                 StreamId("result-projection", queued.turn_id),
@@ -370,10 +396,26 @@ class CallIdentityAcrossModelTurnsTest(unittest.TestCase):
             self.assertEqual(
                 1,
                 len({
-                    event.payload["body_ref"]["content_sha256"]
+                    event.payload["body_ref"]["source_content_sha256"]
                     for event in published
                 }),
             )
+            # Plan B: both deliveries durably decided, each once.
+            from koawa_agent_v2.retrieval.projection import (
+                DELIVERY_DECIDED_EVENT,
+            )
+
+            run_events = store.read_stream(
+                StreamId("run-execution", queued.turn_id),
+                after_version=-1,
+                limit=50,
+            )
+            decisions = [
+                event
+                for event in run_events
+                if event.event_type == DELIVERY_DECIDED_EVENT
+            ]
+            self.assertEqual(2, len(decisions))
 
 
 class UnverifiedSourceClassificationTest(unittest.TestCase):

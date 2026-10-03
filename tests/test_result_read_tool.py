@@ -71,7 +71,7 @@ class ResultReadToolTest(unittest.TestCase):
             payload = document["projection"]
             self.assertEqual("metadata_only", payload["visibility"])
             self.assertEqual("passed", payload["diagnostics"]["outcome"])
-            self.assertEqual(digest, payload["body_ref"]["content_sha256"])
+            self.assertEqual(digest, payload["body_ref"]["source_content_sha256"])
             self.assertNotIn("stdout", json.dumps(payload))
             self.assertNotIn("stderr", json.dumps(payload))
 
@@ -178,7 +178,7 @@ class ResultReadToolTest(unittest.TestCase):
             self.assertIsNone(shorthand["projection"])
             self.assertEqual(
                 {"a" * 64, "b" * 64},
-                {item["content_sha256"] for item in shorthand["matches"]},
+                {item["source_content_sha256"] for item in shorthand["matches"]},
             )
             self.assertEqual(
                 {"published", "projection_unavailable"},

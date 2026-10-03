@@ -307,10 +307,34 @@ class TestProfileConfig:
     max_stdout_bytes: int = 256_000
     max_stderr_bytes: int = 256_000
     environment: tuple[tuple[str, str], ...] = ()
+    # R3: per-profile receipt release contract (deployment input).
+    release_fields: tuple[str, ...] | None = None
+    sensitive: bool = False
+    # WP-C v1: fixed input manifest - non-empty runs in an isolated
+    # ephemeral workspace (read-only candidate copies + private scratch).
+    workspace_manifest: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not _PROFILE_ID.fullmatch(self.profile_id):
             raise RuntimeConfigError("invalid_test_profile")
+        from ..verification.output_policy import ReleaseRule
+
+        try:
+            ReleaseRule(fields=self.release_fields, sensitive=self.sensitive)
+        except (ValueError, TypeError):
+            raise RuntimeConfigError("invalid_release_contract") from None
+        import os as _os
+        from pathlib import Path as _Path
+
+        for item in self.workspace_manifest:
+            if (
+                not isinstance(item, str)
+                or not item
+                or _os.sep in item
+                or item.startswith("/")
+                or ".." in _Path(item.replace("/", _os.sep)).parts
+            ):
+                raise RuntimeConfigError("invalid_workspace_manifest")
         if not isinstance(self.argv, tuple) or not 1 <= len(self.argv) <= 128:
             raise RuntimeConfigError("invalid_test_profile")
         total_argv_bytes = 0
@@ -776,6 +800,13 @@ class RuntimeConfig:
             raise RuntimeConfigError("test_profiles_required")
         if len(self.test_profiles) > 64:
             raise RuntimeConfigError("invalid_test_profiles")
+        if (
+            self.sandbox.runner is SandboxRunner.HOST
+            and any(value.sensitive for value in self.test_profiles)
+        ):
+            # WP-C: sensitive profiles require the sandboxed runner; the
+            # host runner is never a silent fallback.
+            raise RuntimeConfigError("sensitive_profile_requires_sandbox")
         if any(not isinstance(value, TestProfileConfig) for value in self.test_profiles):
             raise RuntimeConfigError("invalid_test_profile")
         if len({value.profile_id for value in self.test_profiles}) != len(
@@ -1353,6 +1384,9 @@ def _parse_test_profiles(value: Any) -> tuple[TestProfileConfig, ...]:
             "max_stdout_bytes",
             "max_stderr_bytes",
             "environment",
+            "release_fields",
+            "sensitive",
+            "workspace_manifest",
         }
         _reject_unknown(item, allowed, "invalid_test_profile")
         try:
@@ -1366,6 +1400,15 @@ def _parse_test_profiles(value: Any) -> tuple[TestProfileConfig, ...]:
                     max_stdout_bytes=item.get("max_stdout_bytes", 256_000),
                     max_stderr_bytes=item.get("max_stderr_bytes", 256_000),
                     environment=environment,
+                    release_fields=(
+                        tuple(item["release_fields"])
+                        if item.get("release_fields") is not None
+                        else None
+                    ),
+                    sensitive=bool(item.get("sensitive", False)),
+                    workspace_manifest=tuple(
+                        item.get("workspace_manifest", ()),
+                    ),
                 )
             )
         except RuntimeConfigError:

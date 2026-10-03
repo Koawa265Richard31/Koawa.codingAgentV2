@@ -130,6 +130,20 @@ def _result(request: ModelRequest, call_id: str) -> tuple[dict[str, object], boo
     return json.loads(item.content), item.is_error
 
 
+def _result_outcome(document) -> str:
+    """Read the test outcome across receipt generations: the legacy receipt
+    carried a top-level outcome; the plan-B delivered projection carries it
+    under diagnostics."""
+    if isinstance(document.get("outcome"), str):
+        return document["outcome"]
+    diagnostics = document.get("diagnostics")
+    if isinstance(diagnostics, dict) and isinstance(
+        diagnostics.get("outcome"), str
+    ):
+        return diagnostics["outcome"]
+    return None
+
+
 class _RepairModel:
     def __init__(self) -> None:
         self.round = 0
@@ -145,7 +159,14 @@ class _RepairModel:
             )
         if self.round == 2:
             failed, is_error = _result(request, "test-before")
-            if is_error or failed["outcome"] != "failed":
+            # Plan B: a publication failure delivers the fixed unavailable
+            # placeholder instead of the receipt - both are accepted here;
+            # the repair narrative proceeds identically.
+            acceptable = (
+                _result_outcome(failed) == "failed"
+                or failed.get("availability") == "projection_unavailable"
+            )
+            if is_error or not acceptable:
                 raise AssertionError(failed)
             return _stream(
                 request,
@@ -199,7 +220,7 @@ class _RepairModel:
             )
         if self.round == 5:
             passed, is_error = _result(request, "test-after")
-            if is_error or passed["outcome"] != "passed":
+            if is_error or _result_outcome(passed) != "passed":
                 raise AssertionError(passed)
             return _stream(
                 request,

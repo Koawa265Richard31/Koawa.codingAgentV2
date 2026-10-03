@@ -574,6 +574,44 @@ class AgentLoop:
         if self._request_estimate(context, definitions) + reserve > hard:
             raise AgentLoopError("request_capacity_exceeded")
 
+    def _deliver_result(
+        self,
+        call,
+        result_message: ToolResultMessage,
+        execution_context,
+        durable_sink,
+    ) -> ToolResultMessage:
+        """Plan B delivery gate (spec v4).
+
+        The publisher publishes the projection and returns the delivery
+        decision; the decision is persisted durably (a write failure pauses
+        the run - never continue with an undecidable receipt), and the
+        context receives the delivered content derived from the published
+        projection.  A publisher crash fails closed the same way; non-test
+        tools keep their original message.
+        """
+
+        publisher = self._result_projection_publisher
+        if publisher is None:
+            return result_message
+        try:
+            decision = publisher(call.name, result_message, execution_context)
+        except Exception:
+            raise AgentLoopError("delivery_decision_failed") from None
+        if decision is None:
+            return result_message
+        if not callable(getattr(durable_sink, "delivery_decided", None)):
+            raise AgentLoopError("delivery_decision_failed")
+        try:
+            durable_sink.delivery_decided(result_message, decision)
+        except AgentLoopError:
+            raise
+        except Exception:
+            raise AgentLoopError("delivery_decision_failed") from None
+        return ToolResultMessage(
+            result_message.call_ref, decision["content"], False,
+        )
+
     def _pending_tool_calls(self) -> bool:
         sink = self._compaction_sink
         return bool(getattr(sink, "pending_calls", ()))
@@ -735,12 +773,13 @@ class AgentLoop:
             message = ToolResultMessage(echo.call_ref, result.content, result.is_error)
             if call.name == "apply_patch" and not message.is_error:
                 self._successful_writes = self._successful_writes | frozenset({"apply_patch"})
-            context.append(message); total_tool_calls += 1
+            total_tool_calls += 1
             if durable_sink is not None: durable_sink.tool_completed(message, total_tool_calls)
-            # WP-D/R2 ordering: the execution fact is durable above; publish
-            # the projection BEFORE the receipt reaches any later round.
-            if self._result_projection_publisher is not None:
-                self._result_projection_publisher(call.name, message, execution_context)
+            # WP-D/R2 + plan B: fact durable above, then publication and the
+            # durable delivery decision; the context below receives the
+            # delivered (projection-derived) content, never the raw receipt.
+            delivered = self._deliver_result(call, message, execution_context, durable_sink)
+            context.append(delivered)
 
         for model_round in range(initial_model_rounds + 1, self._limits.max_model_rounds + 1):
             token.raise_if_cancelled()
@@ -919,16 +958,17 @@ class AgentLoop:
                     )
                 if call.name == "apply_patch" and not result_message.is_error:
                     self._successful_writes = self._successful_writes | frozenset({"apply_patch"})
-                results.append(result_message)
                 total_tool_calls += 1
                 if durable_sink is not None:
                     durable_sink.tool_completed(result_message, total_tool_calls)
-                # WP-D/R2 ordering: publish while the durable fact is fresh;
-                # context.extend below is the first later-round visibility.
-                if self._result_projection_publisher is not None:
-                    self._result_projection_publisher(
-                        call.name, result_message, execution_context,
+                # WP-D/R2 + plan B: fact durable above, then publication and
+                # the durable delivery decision; context.extend below
+                # receives the delivered (projection-derived) content.
+                results.append(
+                    self._deliver_result(
+                        call, result_message, execution_context, durable_sink,
                     )
+                )
             context.extend(results)
 
         raise AgentLoopError("max_model_rounds_exceeded")

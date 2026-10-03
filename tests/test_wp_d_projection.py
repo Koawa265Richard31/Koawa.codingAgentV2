@@ -83,7 +83,7 @@ def _fact_kwargs(turn_id, thread_id, run_id, index: int):
             "stream": "run-execution",
             "turn_id": str(turn_id),
             "model_turn_id": f"00000000-0000-5000-9000-{index:012d}",
-            "content_sha256": f"{index:064d}",
+            "source_content_sha256": f"{index:064d}",
         },
     }
 
@@ -318,7 +318,7 @@ class WorkerTerminalScanTest(unittest.TestCase):
             self.assertIn("outcome", receipt)
             self.assertNotIn("stdout", receipt)
             self.assertNotIn("stderr", receipt)
-            self.assertEqual(64, len(scan.facts[0]["content_sha256"]))
+            self.assertEqual(64, len(scan.facts[0]["source_content_sha256"]))
 
 
 def _assembly_config(base: Path, root: Path):

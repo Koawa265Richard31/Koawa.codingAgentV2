@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 
 from ..agents.graph import AgentError
 from ..approval_service import ApprovalRecord, ApprovalStatus
+from ..control.event_store import StreamId
 from ..control.models import TERMINAL_TURN_STATUSES, TurnStatus
 from ..execution.loop import AgentLoopApprovalWaiting
 from ..execution.worker import TurnWorkerResult
@@ -42,6 +43,8 @@ from .config import (
 )
 from .session import SessionHistory, SessionHistoryError
 from .truth import RuntimeTruthVerifier
+
+from ..recovery.delivery import DeliveryRecoveryError
 
 EventSink = Callable[[object], None]
 
@@ -267,11 +270,16 @@ class AppRuntime:
             if current.status in TERMINAL_TURN_STATUSES:
                 # WP-D/R1 residual: a terminal turn may still carry pending
                 # projections (publication failed, possibly before a
-                # restart).  resume is the recovery entry: republish
-                # idempotently and expose the fresh status.
-                republished = self._publish_result_projections(current)
+                # restart).  resume is the recovery entry: backfill any
+                # pending delivery decisions, republish idempotently and
+                # expose the fresh status.
                 payload = _turn_document_from_state(current)
-                payload["result_projections"] = republished
+                payload["delivery_backfill"] = self._backfill_terminal_delivery(
+                    current,
+                )
+                payload["result_projections"] = self._publish_result_projections(
+                    current
+                )
                 return CommandOutcome(
                     True, "turn_already_terminal", payload,
                 )
@@ -289,10 +297,61 @@ class AppRuntime:
                 "mcp_process_activation_pending",
                 _activation_pending_payload(exc.plan),
             )
+        except DeliveryRecoveryError as exc:
+            # Plan B SPEC-3: the turn is NOT terminalized - paused/pending
+            # deliveries stay recoverable through this same entry.
+            return CommandOutcome(
+                False,
+                exc.code,
+                {"turn_id": str(turn_id), "detail": exc.detail},
+            )
         except (RuntimeConfigError, RuntimeAssemblyError, AgentError) as exc:
             return _failure(exc)
         except (ValueError, AttributeError):
             return CommandOutcome(False, "invalid_turn_id", {})
+
+    def _backfill_terminal_delivery(self, turn) -> dict:
+        """Best-effort delivery backfill for a terminal turn (recovery
+        entry); state is surfaced, never swallowed."""
+
+        try:
+            from ..recovery.context import pending_delivery_calls
+            from ..recovery.delivery import backfill_delivery_decisions
+
+            store = self.assembled.store
+            stream = StreamId("run-execution", turn.turn_id)
+            events = []
+            cursor = -1
+            while True:
+                page = store.read_stream(
+                    stream, after_version=cursor, limit=500,
+                )
+                if not page:
+                    break
+                events.extend(page)
+                cursor = page[-1].stream_version
+                if len(page) < 500:
+                    break
+            state = pending_delivery_calls(events)
+            if not state["pending"] and not state["legacy_test_facts"]:
+                return {"backfilled": 0, "pending": 0}
+            turn_page = store.read_stream(
+                StreamId("turn", turn.turn_id), after_version=-1, limit=500,
+            )
+            if not turn_page:
+                return {"backfilled": 0, "pending": len(state["pending"])}
+            head = turn_page[-1]
+            result = backfill_delivery_decisions(
+                store,
+                turn_id=turn.turn_id,
+                thread_id=turn.thread_id,
+                run_id=turn.current_run_id,
+                events=events,
+                turn_fence=(head.stream_version, head.event_type, None),
+            )
+            return result
+        except DeliveryRecoveryError as exc:
+            return {"error": exc.code, "reason": exc.reason, **exc.detail}
 
     def cancel(self, turn_id: str | UUID) -> CommandOutcome:
         try:
@@ -566,7 +625,7 @@ class AppRuntime:
                         "stream": "run-execution",
                         "turn_id": str(turn.turn_id),
                         "model_turn_id": fact["model_turn_id"],
-                        "content_sha256": fact["content_sha256"],
+                        "source_content_sha256": fact["source_content_sha256"],
                     },
                 )
                 status["published"] += 1
@@ -581,7 +640,7 @@ class AppRuntime:
                         "stream": "run-execution",
                         "turn_id": str(turn.turn_id),
                         "model_turn_id": fact.get("model_turn_id"),
-                        "content_sha256": fact.get("content_sha256"),
+                        "source_content_sha256": fact.get("source_content_sha256"),
                     },
                     error_code=type(exc).__name__,
                     status=status,

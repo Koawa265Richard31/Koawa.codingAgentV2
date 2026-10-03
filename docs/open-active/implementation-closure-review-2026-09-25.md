@@ -277,3 +277,33 @@ model_turn_id，publish、失败登记、scan、状态归并全链同一规则�
 ### 仍然开放（未动）
 
 R2（发布时序、读取来源接投影流、1000 条翻页与不完整标记、来源身份绑定）、R3（字段释放规则与 withheld/human_required 语义）、R4（最终请求门去压缩依赖）、R5（WP-C 隔离诊断能力链）全部保持原状，按本报告“建议修复顺序”继续。
+
+## 目标轮收口记录（2026-10-03，/goal 完整闭环 R1–R5）
+
+审查→实施→验收→测试全链完成，映射与证据见
+`hardening-memory-retrieval-2026-09-19/implementation/r2r4-progress.md`
+第三轮切片节。摘要：
+
+- **R2 切片(a) 修正版 B 实施**（规格 v4 全约束）：`result.delivery-
+  decided.v1`（SPEC-1 键不含内容维度；冲突=拒绝；恢复重放原决策）、
+  SPEC-2 三摘要与四字段不可变投影引用（`source_content_sha256`/
+  `stream_version` 更名，遇既有数据版本拒绝）、SPEC-3 `delivery_pending`
+  状态机（生成点禁原回执、先验后写 backfill、paused/protocol/
+  corruption 三态分离、W1–W3 + 查询故障/并发重放/分歧 digest 崩溃矩阵
+  全过）。**顺带修复隐性缺陷**：checkpoint wire 曾默认 reducer_version=2
+  （record 与身份不一致），REDUCER_VERSION→3 后由 stability 故障矩阵
+  暴露并修复（wire 现盖真实版本）。
+- **R3**：ReleaseRule 释放契约 + sensitive 无契约固定 withheld/
+  human_required；回执与计划 B 交付继承契约。
+- **R4**：实测计量探针 + 报告（DeepSeek-V4-Flash，2.911–4.628
+  chars/token，安全下界 2.5；局限如实）。
+- **R5/WP-C v1**：隔离清单工作区（只读候选+私有 scratch+清理隔离+越界/
+  符号链接拒绝）、有界诊断适配器（仅隔离运行）、sensitive 拒 host
+  （配置期）；**真实生产证据**：生产 CLI + 真实 DeepSeek 修复任务完成
+  （真实补丁、测试绿、finalize 证据），计划 B 交付链现场实证（1 决策
+  事件 + 1 发布投影 + 重建上下文=投影派生回执 + 状态全绿）。
+- 验证：全量回归两轮（1120/0/0/32 覆盖 planB+R3；最终轮覆盖全部改动，
+  数字见提交信息）；新增测试 delivery_gate(9) + release_rules(6) +
+  wp_c_workspace/manifest_guard(11)。
+- 开放项不变：读取链当前权限/检索限额、Docker manifest、MCP 适配器
+  释放、敏感容器真实实验矩阵、per-profile 部署值、WP-H。
