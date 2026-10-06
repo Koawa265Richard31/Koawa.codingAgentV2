@@ -122,4 +122,5 @@
 - 脚本 gist（公开）：https://gist.github.com/Koawa265Richard31/6e82460e7561e607535222dcf13d598a（experiment_blackhole.py + experiment_2x2.py）。
 - 定稿文件：`agentdojo-lab/draft-issue.md`（英文，已发布版）；中文审读本 `draft-issue-zh.md`；PR 评论版留档 `draft-pr207-comment.md`。
 - 用户决策记录：gist 公开 ✅、Disclosure 措辞 ✅、独立 issue 形态（否决 PR 评论首发）、中文审读后全段验收通过。
+- **第 7 周映射完成（2026-10-06）**：用户口述定稿证据层规则 → [test-evidence-layer-rule.md](test-evidence-layer-rule.md)；第 8 周复盘 → [community-contribution-retrospective.md](community-contribution-retrospective.md)。**8 周验收四格全绿**（5 分钟叙事/可复现案例包/贡献包/可迁移规则）。
 - **状态：进入"待响应期"**——按计划纪律，维护者无响应≠拒绝（仓库沉寂为已知背景）；不催、不重复提交。可选后续（均需另行授权）：在 #207 下留一行指向 #218 的短评（混合方案）；响应到达后按第 7 周流程处理反馈。
