@@ -594,6 +594,7 @@ class AppRuntime:
             "scan_error": None,
             "untrusted": 0,
             "unverified": 0,
+            "revoked": 0,
         }
         self._projection_publications[turn.turn_id] = status
         try:
@@ -612,7 +613,16 @@ class AppRuntime:
             return status
         status["untrusted"] = scan.untrusted
         status["unverified"] = scan.unverified
+        # Closure-review gap fill: facts whose projection was REVOKED (or
+        # scheduled to expire) are terminal read verdicts - never
+        # re-published, never counted as pending work.
+        revoked = _revoked_fact_keys(self.assembled.store, turn.turn_id)
+        status["revoked"] = len(revoked)
         for fact in scan.facts:
+            if (
+                f"{fact['model_turn_id']}:{fact['call_id']}" in revoked
+            ):
+                continue
             try:
                 projection_store.publish(
                     turn_id=turn.turn_id,
@@ -723,6 +733,7 @@ class AppRuntime:
                 "scan_error": None,
                 "untrusted": 0,
                 "unverified": 0,
+                "revoked": 0,
             },
         })
         return CommandOutcome(
@@ -865,6 +876,40 @@ def _thread_id_events(store) -> list[UUID]:
         for event in _all_events(store)
         if event.event_type == "thread.created.v1"
     ]
+
+
+def _revoked_fact_keys(store, turn_id) -> set[str]:
+    """Fact identities carrying a revocation/expiry verdict (gap fill)."""
+
+    from ..retrieval.projection import (
+        PROJECTION_EXPIRED_EVENT,
+        PROJECTION_REVOKED_EVENT,
+    )
+
+    keys: set[str] = set()
+    cursor = -1
+    while True:
+        page = store.read_stream(
+            StreamId("result-projection", turn_id),
+            after_version=cursor,
+            limit=500,
+        )
+        if not page:
+            return keys
+        for event in page:
+            if event.event_type in (
+                PROJECTION_REVOKED_EVENT,
+                PROJECTION_EXPIRED_EVENT,
+            ):
+                payload = dict(event.payload)
+                keys.add(
+                    str(payload.get("model_turn_id"))
+                    + ":"
+                    + str(payload.get("call_id"))
+                )
+        cursor = page[-1].stream_version
+        if len(page) < 500:
+            return keys
 
 
 def _turn_id_events(store) -> list[UUID]:
