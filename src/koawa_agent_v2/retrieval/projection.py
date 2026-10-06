@@ -71,10 +71,11 @@ PLACEHOLDER_MESSAGE = (
     "不要仅因结果不可用重试原工具；请使用结果引用查询，或等待恢复处理。"
 )
 
-# Read-chain limits (closure review R2/WP-E: quotas bound scan WORK, and a
-# quota hit is reported as truncated - never a silent partial answer).
+# Read-chain limit (closure review R2/WP-E: the quota bounds scan WORK, and
+# a quota hit is reported as truncated - never a silent partial answer).
+# Wire-level stream caps were considered and dropped: the event quota is the
+# enforced scan-work bound (a dead constant would misstate the guarantee).
 READ_SCAN_EVENT_QUOTA = 2000
-READ_SCAN_STREAM_QUOTA = 4
 
 # read_stream serves ascending pages from an exclusive cursor; walking to a
 # short page is the protocol-level way to observe the true head (R2: scans
