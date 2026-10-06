@@ -89,7 +89,7 @@ WP-C 增补验收：目录新文件与链接不能绕过清单；准备后输入
 
 ### WP-E：元数据搜索与投影读取
 
-状态（2026-09-25）：`ResultProjectionStore.read`/`read_publication_status` 已翻页读取投影流（R2），但 recall 工具仍未接到投影流读取（仍查会话历史）——本工作包主体未实施。
+状态（2026-10-03 核验定档，基线 4cabb7c）：**部分完成**。按引用读取已实施且测试齐备（`read_result_projection`：三态可用性 + 撤销/过期/`policy_superseded`/歧义消歧/`scan_truncated` 配额标志——见 `implementation/wp-e-audit.md` 定档表）；**recall 接投影流仍未实现**（仍查会话历史 SessionMemory，账本原判保持）；游标续读/水位、响应/总读取/存储三路配额与跨 turn 累计计数未实现（只记账）；投影 payload 白名单构造与"正文不进索引"为构造级保证。
 
 当前线程和工作区作用域从 execution context 取。索引由已发布事件增量重建，正文不可索引时不提取关键词。旧事件仅允许已审核的身份/状态字段；现有脱敏记录不自动获准全文。
 

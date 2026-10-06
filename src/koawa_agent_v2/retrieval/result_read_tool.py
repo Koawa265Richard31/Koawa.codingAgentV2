@@ -41,7 +41,9 @@ def result_read_tool_spec() -> ToolSpec[ResultReadArguments]:
         "with the candidate list - re-query with the full reference.  "
         "Availability is published / projection_unavailable / not_found; "
         "structured diagnostics and a body reference, never raw command "
-        "output.  Same thread only.",
+        "output.  scan_truncated true means the projection scan hit its "
+        "event quota - a not_found under it is NOT a full answer, re-query "
+        "with the full reference.  Same thread only.",
         ResultReadArguments,
         {
             "type": "object",
@@ -111,6 +113,7 @@ def register_result_read_tool(
                     "model_turn_id": result.get("model_turn_id"),
                     "projection": result["projection"],
                     "matches": result.get("matches"),
+                    "scan_truncated": bool(result.get("scan_truncated")),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
