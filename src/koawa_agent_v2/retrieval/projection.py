@@ -56,6 +56,8 @@ from ..verification.output_policy import BODY_VISIBILITY, POLICY_VERSION
 
 PROJECTION_PUBLISHED_EVENT = "result.projection-published.v1"
 PROJECTION_UNAVAILABLE_EVENT = "result.projection-unavailable.v1"
+PROJECTION_REVOKED_EVENT = "result.projection-revoked.v1"
+PROJECTION_EXPIRED_EVENT = "result.projection-expired.v1"
 DELIVERY_DECIDED_EVENT = "result.delivery-decided.v1"
 PROJECTION_STREAM_CATEGORY = "result-projection"
 TEST_SOURCE_KIND = "test"
@@ -68,6 +70,11 @@ PLACEHOLDER_MESSAGE = (
     "本次调用的可读结果暂不可用。此状态不表示工具执行失败，也不表示未执行。"
     "不要仅因结果不可用重试原工具；请使用结果引用查询，或等待恢复处理。"
 )
+
+# Read-chain limits (closure review R2/WP-E: quotas bound scan WORK, and a
+# quota hit is reported as truncated - never a silent partial answer).
+READ_SCAN_EVENT_QUOTA = 2000
+READ_SCAN_STREAM_QUOTA = 4
 
 # read_stream serves ascending pages from an exclusive cursor; walking to a
 # short page is the protocol-level way to observe the true head (R2: scans
@@ -293,6 +300,81 @@ class ResultProjectionStore:
         )
         return fingerprint
 
+    def revoke(
+        self,
+        *,
+        turn_id: UUID,
+        thread_id: UUID,
+        run_id,
+        call_id: str,
+        model_turn_id,
+        reason: str,
+    ) -> str:
+        """Withdraw one fact's projection (design event family member).
+
+        After revocation the read chain refuses the fact (availability
+        ``revoked``), the terminal catch-up never re-publishes it, and the
+        publication status reports it durably.  Identity = the fact identity
+        plus reason, so re-revoking with the same reason is idempotent while
+        different reasons stay auditable.  ``reason`` is a safe code; free
+        text never enters the event.
+        """
+
+        payload = {
+            "visibility": BODY_VISIBILITY,
+            "policy_version": POLICY_VERSION,
+            "call_id": call_id,
+            "model_turn_id": str(model_turn_id),
+            "revocation": "revoked",
+            "reason": reason,
+        }
+        identity = f"{turn_id}:{model_turn_id}:{call_id}:revoke:{reason}"
+        return self._append_event(
+            turn_id=turn_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type=PROJECTION_REVOKED_EVENT,
+            payload=payload,
+            identity=identity,
+        )
+
+    def expire(
+        self,
+        *,
+        turn_id: UUID,
+        thread_id: UUID,
+        run_id,
+        call_id: str,
+        model_turn_id,
+        expires_at: datetime,
+    ) -> str:
+        """Schedule one fact's read expiry (design event family member).
+
+        The projection stays readable until ``expires_at`` (store-authoritative
+        comparison at read time), then the read chain refuses it with
+        ``projection_expired`` - the same refusal path as revocation.
+        """
+
+        if expires_at.tzinfo is None or expires_at.utcoffset() is None:
+            raise EventStoreError("expiry_deadline_must_be_aware")
+        payload = {
+            "visibility": BODY_VISIBILITY,
+            "policy_version": POLICY_VERSION,
+            "call_id": call_id,
+            "model_turn_id": str(model_turn_id),
+            "revocation": "expired",
+            "expires_at": expires_at.astimezone(timezone.utc).isoformat(),
+        }
+        identity = f"{turn_id}:{model_turn_id}:{call_id}:expire"
+        return self._append_event(
+            turn_id=turn_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type=PROJECTION_EXPIRED_EVENT,
+            payload=payload,
+            identity=identity,
+        )
+
     def publish(
         self,
         *,
@@ -424,8 +506,18 @@ def read_publication_status(store, turn_id: UUID) -> dict:
 
     published: set[tuple[str, str, str]] = set()
     failures: dict[tuple[str, str, str], dict] = {}
+    revoked: set[str] = set()
     for event in _projection_events(store, turn_id):
         payload = dict(event.payload)
+        if event.event_type in (PROJECTION_REVOKED_EVENT, PROJECTION_EXPIRED_EVENT):
+            # Revocation is a terminal read verdict: the fact stops counting
+            # as publishable-pending (and terminal catch-up skips it).
+            revoked.add(
+                str(payload.get("model_turn_id"))
+                + ":"
+                + str(payload.get("call_id"))
+            )
+            continue
         ref = payload.get("body_ref") or {}
         key = (
             str(ref.get("model_turn_id")),
@@ -462,6 +554,10 @@ def read_publication_status(store, turn_id: UUID) -> dict:
     for key in sorted(expected | set(failures)):
         if key in published:
             continue
+        if f"{key[0]}:{key[1]}" in revoked:
+            # Revoked/expired facts are terminal read verdicts, not pending
+            # work: they are counted separately and never republished.
+            continue
         info = failures.get(key)
         pending.append(
             {
@@ -474,6 +570,7 @@ def read_publication_status(store, turn_id: UUID) -> dict:
         "published": len(published),
         "failed": len(pending),
         "pending": pending,
+        "revoked": len(revoked),
         "scan_error": scan_error,
         "untrusted": untrusted,
         "unverified": unverified,
@@ -581,6 +678,8 @@ def lookup_projection(
     turn_id: UUID,
     call_id: str,
     model_turn_id: str | None = None,
+    *,
+    now: datetime | None = None,
 ) -> dict:
     """Read one call's published projection by reference (R2 slice b).
 
@@ -591,12 +690,40 @@ def lookup_projection(
     ``ambiguous_reference`` with the candidate list, never a guess.  On
     ``published`` the immutable projection reference (SPEC-2 补-1) is
     returned for delivery binding.
+
+    Closure-review gap fills: revocation/expiry events (``revoked`` /
+    ``projection_expired`` refusals - a revoked fact is never served again),
+    the CURRENT policy check (a projection stamped with an older
+    ``policy_version`` is refused as ``policy_superseded`` - historical
+    delivery does not grant current read permission), and a bounded scan
+    quota reported as ``truncated`` rather than silently cut.
     """
 
     per_reference: dict[tuple[str, str], dict] = {}
     latest_event = {}
+    revoked: set[str] = set()
+    expired_at: dict[str, datetime] = {}
+    scanned = 0
+    truncated = False
     for event in _projection_events(store, turn_id):
+        scanned += 1
+        if scanned > READ_SCAN_EVENT_QUOTA:
+            truncated = True
+            break
         payload = dict(event.payload)
+        if event.event_type in (PROJECTION_REVOKED_EVENT, PROJECTION_EXPIRED_EVENT):
+            key = str(payload.get("model_turn_id")), str(payload.get("call_id"))
+            if event.event_type == PROJECTION_REVOKED_EVENT:
+                revoked.add(key[0] + ":" + key[1])
+            else:
+                deadline = payload.get("expires_at")
+                try:
+                    expired_at[key[0] + ":" + key[1]] = datetime.fromisoformat(
+                        deadline,
+                    )
+                except (TypeError, ValueError):
+                    pass
+            continue
         if str(payload.get("call_id")) != str(call_id):
             continue
         ref = payload.get("body_ref") or {}
@@ -613,6 +740,21 @@ def lookup_projection(
         elif event.event_type == PROJECTION_UNAVAILABLE_EVENT:
             bucket["unavailable"] = payload
 
+    read_now = now or datetime.now(timezone.utc)
+
+    def _refused(identity_key) -> str | None:
+        """Revocation/expiry verdict for one fact identity."""
+
+        if f"{identity_key[0]}:{call_id}" in revoked:
+            return "revoked"
+        deadline = expired_at.get(f"{identity_key[0]}:{call_id}")
+        if deadline is not None and read_now >= deadline:
+            return "projection_expired"
+        return None
+
+    def _policy_ok(published_payload) -> bool:
+        return published_payload.get("policy_version") == POLICY_VERSION
+
     if model_turn_id is not None:
         selected = {
             key: bucket
@@ -623,7 +765,23 @@ def lookup_projection(
         selected = per_reference
 
     def _resolve(key, bucket):
+        refusal = _refused(key)
+        if refusal is not None:
+            return {
+                "availability": DELIVERY_UNAVAILABLE,
+                "projection": None,
+                "error_code": refusal,
+                "projection_ref": None,
+            }
         if bucket["published"] is not None:
+            if not _policy_ok(bucket["published"]):
+                # Historical delivery never grants current read permission.
+                return {
+                    "availability": DELIVERY_UNAVAILABLE,
+                    "projection": None,
+                    "error_code": "policy_superseded",
+                    "projection_ref": None,
+                }
             event = latest_event[key]
             projection_ref = {
                 "stream": event.stream_id.category,
@@ -654,15 +812,16 @@ def lookup_projection(
             "projection_ref": None,
         }
 
+    result: dict
     if not selected:
-        return {
+        result = {
             "availability": "not_found",
             "projection": None,
             "error_code": None,
             "projection_ref": None,
         }
-    if len(selected) > 1:
-        return {
+    elif len(selected) > 1:
+        result = {
             "availability": "ambiguous_reference",
             "projection": None,
             "error_code": None,
@@ -675,10 +834,12 @@ def lookup_projection(
                 for key, bucket in sorted(selected.items())
             ],
         }
-    key, bucket = next(iter(selected.items()))
-    resolved = _resolve(key, bucket)
-    resolved["model_turn_id"] = key[0]
-    return resolved
+    else:
+        key, bucket = next(iter(selected.items()))
+        result = _resolve(key, bucket)
+        result["model_turn_id"] = key[0]
+    result["scan_truncated"] = truncated
+    return result
 
 
 # ---------------------------------------------------------------------------

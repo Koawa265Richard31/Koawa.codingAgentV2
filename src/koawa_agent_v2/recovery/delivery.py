@@ -125,17 +125,20 @@ def backfill_delivery_decisions(
                 call_id=call_id,
                 source_sha256=source_sha256,
             )
+            error_code = looked.get("error_code") or "not_published"
+            if looked.get("scan_truncated"):
+                # Quota hit during backfill: paused beats a wrong verdict.
+                raise DeliveryRecoveryPaused(
+                    "projection_scan_quota_exceeded",
+                    {"call_id": call_id},
+                )
             payload = build_delivery_payload(
                 call_id=call_id,
                 model_turn_id=model_turn_id,
                 delivery=DELIVERY_UNAVAILABLE,
                 source_sha256=source_sha256,
                 delivered_content=canonical_text(placeholder),
-                error_code=(
-                    looked.get("error_code")
-                    if looked.get("availability") == DELIVERY_UNAVAILABLE
-                    else "not_published"
-                ),
+                error_code=error_code,
             )
         try:
             decide_delivery(
