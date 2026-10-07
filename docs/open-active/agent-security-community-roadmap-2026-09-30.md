@@ -213,7 +213,7 @@
 
 **谱系线（B+D）：四篇博文供应链**——每篇 = PortSwigger 实验 + 分类学锚（OWASP LLM Top 10 / CSA / Unit 42 / MITRE ATLAS）+ 自家案例（R3/#168/claim-gate）+ 发布渠道（自站 canonical → **安全客/先知投稿**——先知为阿里系社区，与 AgentScope/撬壳同生态视野）。题目定稿：注入族谱 / 工具投毒=供应链 / 记忆投毒=存储型 XSS / agent 权限的祖宗=authz。
 
-**红队线（C+J）：三级靶**——0 级：**阿里大模型安全撬壳计划**（付费+纯实力榜，PyRIT/Garak 练习对真实目标打）；1 级：KoawaAgent 自家红队（防御方战报）；2 级：agentdojo defense PR / garak probe PR（社区工件）。J/RT v0.1 为靶书，W2 评审出 v0.2。
+**红队线（C+J）：三级靶（2026-10-07 修订：撬壳 2025 季已闭赛、2026 季未证实开放）**——0 级（常开付费靶）：**HackerOne/Bugcrowd LLM 专项 + 补天/火线 AI 类目标**（无赛季随到随打，PyRIT/Garak 练习对真实目标）；0.5 级（观察）：撬壳计划/XGuard 揭榜赛——开季公告出现再进；1 级：KoawaAgent 自家红队（防御方战报）；2 级：agentdojo defense PR / garak probe PR（社区工件）。J/RT v0.1 为靶书，W2 评审出 v0.2。
 
 **双语工件线（每周 1-2h）**：README EN → #218 记 EN → 谱系系列同步 EN。国际门（OpenAI Red Teaming Network / Anthropic Researcher Access / Haize 类岗）全部英文门。
 
@@ -221,9 +221,9 @@
 
 **固定件**：面试弹药库（JD 池→证据映射→60 秒答词，双周录音自答）；简历 10 月中 v1（JD 映射表驱动）、AgentScope PR 合并后 v2。
 
-### 本周实排（2026-10-07~12）
+### 本周实排（2026-10-07~12；10-07 修订：撬壳关闭）
 
-周三前休息；周三 OWASP Slack+入门 issue（2h）；周四 撬壳报名+规则侦察（1h）+ #2488 带读起；周五 aivillage 注册（30min）；周末 README 英文化（2-3h）。
+周三前休息；周三 OWASP Slack+入门 issue（2h）；周四 HackerOne/Bugcrowd LLM 专项 + 补天 AI 类目标入口侦察（1h）+ #2488 带读起；周五 aivillage 注册（30min）；周末 README 英文化（2-3h）。OWASP/aivillage 站点实测在线（200）；具体入口若再遇关闭，现场换替代。
 
 ### 门与复审（全部自动）
 
