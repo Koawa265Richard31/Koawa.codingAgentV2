@@ -217,7 +217,7 @@
 
 **双语工件线（每周 1-2h）**：README EN → #218 记 EN → 谱系系列同步 EN。国际门（OpenAI Red Teaming Network / Anthropic Researcher Access / Haize 类岗）全部英文门。
 
-**社区双渠道**：OWASP GenAI（Slack + LLM Top 10/Agentic 仓库，每 2-4 周一条可见参与）+ AI Village 志愿（aivillage.org，正在招募）。
+**社区渠道（v6.3，2026-10-07 入口实勘后收敛）**：主渠道 = **OWASP GenAI**（站 200，Slack + LLM Top 10 仓库，每 2-4 周一条可见参与）；次渠道 = AI Village——**站上挂的 Discord 邀请实测已失效**（API 判 Unknown Invite；站面/GitHub 均未给出新链），兜底路径 = 走站内 Volunteer Application 表单或等其修链，优先级降于 OWASP；CNCC 大模型安全漏洞库——**两轮独立查证无公开入口**（大概率内部共建制），归档为"CNCC2026 议程出现再评估"，移出活跃渠道。入口带验证日期，逢用过期即换即记。
 
 **固定件**：面试弹药库（JD 池→证据映射→60 秒答词，双周录音自答）；简历 10 月中 v1（JD 映射表驱动）、AgentScope PR 合并后 v2。
 
