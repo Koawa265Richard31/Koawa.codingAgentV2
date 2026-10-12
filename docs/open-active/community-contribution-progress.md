@@ -160,3 +160,11 @@
 - **新 bug issue #3277 提交**：[Bug]: DaytonaWorkspace never configures the SDK idle-stop lease——完全按 bug_report.yml 模板（Prerequisites 复选/Background/Error Messages/Steps to Reproduce/Environment 五字段全填）。
 - Daytona 缺陷独立成案的理由：矩阵中最硬的一格（docstring 自认 TTL 未暴露 + SDK 默认 15min autostop + 无逃生阀 + 修复方向 = 暴露配置/调 set_autostop_interval）。
 - 待观察：#3277 的 triage 走向（bug 模板 + confirmed 先例 #3061 = 通过概率高）。
+
+### #3277 被认领（2026-10-12 17:07，用户"等一天"决策的窗口实测）
+
+- **yang0228 认领并在 28 分钟内提交 PR #3283**（含文档 PR #83 到 agentscope/docs）——认领→实现→PR 全流程 28 分钟，速度战的窗口实测=小时级。
+- #3283 内容：暴露 auto_stop_interval（None=provider 默认/0=禁用/正数=配置），workspace+manager 双层转发，创建与重挂载均应用——**与我们的方案 X 完全同构**（含"不添加后台续约、不改默认策略"的边界声明）。
+- 用户"等一天再认领"的决策代价=该 PR 归属；**收益=获得同格参考实现**（#3283 diff 可作我们后续贡献的模板）。
+- 剩余空位（实证）:①set_ttl 未被 #3283 覆盖；②其余五后端生命周期格全空；③契约统一（M3）无人提——泛化提案论据+1（"#3283 修了 Daytona，证明各家都需要，契约层仍未统一"）。
+- 策略修正：确认型 issue 的认领窗口=小时级非天级。后续要么立刻认领，要么明确放弃。
