@@ -145,3 +145,11 @@
 - HsbcJone 出 PR → **review + 把 AB 复现适配为其测试补件**（第一个 review 贡献；AB 覆盖图已被其 17 测试吸收，复现引擎仍是独立价值）。
 - #3208 合入 → **立刻启动泛化 PR**（E2B set_timeout / Daytona set_autostop_interval+recover 接线——POC 已备，证据矩阵 v3 已定）。
 - 规则 v1.1 补充三（存在性断言须 grep 实证）源于本轮查证实践，已推送（654562b 前后）。
+
+### Meta-issue #3276 已提交（2026-10-12，用户授权）
+
+- **issue #3276**：https://github.com/agentscope-ai/agentscope/issues/3276（[Feature]: unify sandbox lifecycle semantics across backends——七后端生命周期语义不一致全景 + 统一契约提案）
+- 状态：open，初始无标签（triage 流水线待跑，#3208 当时也是提交后一段时间才打标）
+- 提交前重复项终检 ✅：lifecycle contract 零命中、E2B set_timeout 接线零命中、#1162 深查无冲突、48 条全景扫描无统一契约提案
+- **AI 披露社区惯例核验 ✅**：#2724（"prepared with AI assistance and manually verified"）、#3145（"Prepared with AI assistance. The author remains responsible"）、#3147（我们格式的范本）——一行式 + 人工验证/责任句是本仓惯例，#3276 的披露完全在带宽内
+- 后续链：HsbcJone 的 #3274（轮内搭便车，open）合入后 → PR-1（E2B set_timeout 接线，基座 prepare_for_reuse 已由 #3274 铺好）→ PR-2（Daytona autostop/ttl 暴露）→ PR-3（K8s init 失败清理）→ 主 PR（契约统一）
