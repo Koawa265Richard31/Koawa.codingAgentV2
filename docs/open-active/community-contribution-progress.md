@@ -153,3 +153,10 @@
 - 提交前重复项终检 ✅：lifecycle contract 零命中、E2B set_timeout 接线零命中、#1162 深查无冲突、48 条全景扫描无统一契约提案
 - **AI 披露社区惯例核验 ✅**：#2724（"prepared with AI assistance and manually verified"）、#3145（"Prepared with AI assistance. The author remains responsible"）、#3147（我们格式的范本）——一行式 + 人工验证/责任句是本仓惯例，#3276 的披露完全在带宽内
 - 后续链：HsbcJone 的 #3274（轮内搭便车，open）合入后 → PR-1（E2B set_timeout 接线，基座 prepare_for_reuse 已由 #3274 铺好）→ PR-2（Daytona autostop/ttl 暴露）→ PR-3（K8s init 失败清理）→ 主 PR（契约统一）
+
+### #3276 → #3277 重构（2026-10-12，用户确认"close后转bug issue再重提"）
+
+- **#3276 已自行关闭**（附收尾评论：按 triage 指引拆分，缺陷部分重走 bug 模板）。
+- **新 bug issue #3277 提交**：[Bug]: DaytonaWorkspace never configures the SDK idle-stop lease——完全按 bug_report.yml 模板（Prerequisites 复选/Background/Error Messages/Steps to Reproduce/Environment 五字段全填）。
+- Daytona 缺陷独立成案的理由：矩阵中最硬的一格（docstring 自认 TTL 未暴露 + SDK 默认 15min autostop + 无逃生阀 + 修复方向 = 暴露配置/调 set_autostop_interval）。
+- 待观察：#3277 的 triage 走向（bug 模板 + confirmed 先例 #3061 = 通过概率高）。
