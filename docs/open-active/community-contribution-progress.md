@@ -175,3 +175,11 @@
 - **推论：抽象泄漏级缺陷是框架级缺陷而非功能缺失**——SandboxedWorkspaceBase 承诺后端可换但生命周期语义差一个数量级且零文档。meta-issue 论据从"长任务趋势"升级为"抽象泄漏"（最低成本修复=文档化差异+暴露配置，高阶统一行为作为开放讨论）。
 - **单轮 vs 多轮的行业口径**：主流 coding agent（Claude Code/Codex）产品形态 = 单轮跑到底，轮长由任务决定、被上下文预算约束、不被时钟约束——与云沙箱时间型租约（300s~1800s）结构性错配。证据等级：产品行为观察（本人使用+社区共识），非官方文档承诺。
 - **审查者角色升级**：HsbcJone 认领 #3208 后，我们的席位从实现者转为 review + 测试贡献者；draft-3208-handoff.md（递工具+申请席位）待其 PR 出现后发。
+
+### 主攻区域定案（2026-10-12 晚，用户决定：继续深耕 workspace 区）
+
+- 用户基于维护者画像（90% 合并率、workspace 属开放区、review 教学式闭环、#2488 大 PR 被认真对待）决定：**后续贡献继续深耕 workspace 子系统**，不改投 permission/model 区。
+- **深耕的Evidence基础已备**：七后端生命周期矩阵（每格 file:line）、OpenSandbox 源码级、Daytona/E2B 双层在读、Bubblewrap cleanup 最佳实践、#2488/#3283 两个参考实现对照。
+- **workspace 区的已知空位清单（按 meta-issue #3276 矩阵）**：①Daytona ttl_minutes/autostop 暴露（PR-B 已写好在 feat/daytona-lease-config，等 #3283 合入后避免冲突再提）②E2B 续约接线（PR-A 已写好在 feat/e2b-lease-renewal，5 测试绿，随时可发——与 #3274 只在 OpenSandbox 侧不冲突）③K8s init 失败清理（Pod+PVC+namespace 泄漏，计费资源）④E2B/K8s/Daytona 的 prepare_for_reuse 契约正式化（等 #3274 合入）⑤teardown 失败显式状态化（全后端）。
+- **深耕策略**：每 PR 独立可合并、互相引用 #3276 矩阵、以 #2488/#3283 为模式范本、提交前三自查（不碰核心把控区/无死代码/测试放对文件）。
+- ** 深耕的复利**：workspace 全后端接线的贡献序列 = "在 32.8k 星框架修复 7 后端生命周期语义不一致"的叙事 = 简历核心句子。
