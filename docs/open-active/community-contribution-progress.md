@@ -124,3 +124,24 @@
 - 用户决策记录：gist 公开 ✅、Disclosure 措辞 ✅、独立 issue 形态（否决 PR 评论首发）、中文审读后全段验收通过。
 - **第 7 周映射完成（2026-10-06）**：用户口述定稿证据层规则 → [test-evidence-layer-rule.md](test-evidence-layer-rule.md)；第 8 周复盘 → [community-contribution-retrospective.md](community-contribution-retrospective.md)。**8 周验收四格全绿**（5 分钟叙事/可复现案例包/贡献包/可迁移规则）。
 - **状态：进入"待响应期"**——按计划纪律，维护者无响应≠拒绝（仓库沉寂为已知背景）；不催、不重复提交。可选后续（均需另行授权）：在 #207 下留一行指向 #218 的短评（混合方案）；响应到达后按第 7 周流程处理反馈。
+
+## AgentScope 阶段补充记录（2026-10-12）
+
+### #3208 受理动态（重要）
+
+- **维护者 HsbcJone `/assign` 认领 #3208**（2026-10-12 10:05，bot 确认，认领限时 2026-10-26）。
+- 身份核实：HsbcJone = **core team 成员**（GitHub name mengxiaopeng，git log 中多个 squash 合并记录出自其手——含 #3216 等近期修复的合并者）。
+- **无方向说明**（搭便车/心跳/接受现状三选一未答），只认领。
+
+### 用户三连问的实证回答（2026-10-12 巡检）
+
+1. **"别人会不说话直接接手我的 issue 吗"**：会——已观察到 #3061 被报告人自行认领修复合入（lihongyuan99 模式）；但 #3208 因三重防护（confirmed + 复现 gist + happy to implement 声明）被 core 直接认领而非外部抢注。
+2. **"其他人是怎么接 issue 的"**：三模式——A 自己报自己修（主流 ~70%，lihongyuan99 五连合并为实证）；B 维护者亲自修（#2113→#3193）；C bot 认领制（help wanted + `/assign` + 限时）。
+3. **"不等方向直接认领+PR 可行吗"**：路径存在（lihongyuan99 实证），但 #3208 上已被 core 认领——**转为 review + 测试贡献位**。
+
+### 修正后的路径（HsbcJone 认领后）
+
+- 现在：不发东西，等 HsbcJone 的 PR 或动静。
+- HsbcJone 出 PR → **review + 把 AB 复现适配为其测试补件**（第一个 review 贡献；AB 覆盖图已被其 17 测试吸收，复现引擎仍是独立价值）。
+- #3208 合入 → **立刻启动泛化 PR**（E2B set_timeout / Daytona set_autostop_interval+recover 接线——POC 已备，证据矩阵 v3 已定）。
+- 规则 v1.1 补充三（存在性断言须 grep 实证）源于本轮查证实践，已推送（654562b 前后）。
