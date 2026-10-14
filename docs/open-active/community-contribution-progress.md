@@ -183,3 +183,11 @@
 - **workspace 区的已知空位清单（按 meta-issue #3276 矩阵）**：①Daytona ttl_minutes/autostop 暴露（PR-B 已写好在 feat/daytona-lease-config，等 #3283 合入后避免冲突再提）②E2B 续约接线（PR-A 已写好在 feat/e2b-lease-renewal，5 测试绿，随时可发——与 #3274 只在 OpenSandbox 侧不冲突）③K8s init 失败清理（Pod+PVC+namespace 泄漏，计费资源）④E2B/K8s/Daytona 的 prepare_for_reuse 契约正式化（等 #3274 合入）⑤teardown 失败显式状态化（全后端）。
 - **深耕策略**：每 PR 独立可合并、互相引用 #3276 矩阵、以 #2488/#3283 为模式范本、提交前三自查（不碰核心把控区/无死代码/测试放对文件）。
 - ** 深耕的复利**：workspace 全后端接线的贡献序列 = "在 32.8k 星框架修复 7 后端生命周期语义不一致"的叙事 = 简历核心句子。
+
+### 安全研究者 ybyu-ieu 三连报告（2026-10-13/14 出现，重磅动态）
+
+- ybyu-ieu（安全研究者，同一人）连续提交 3 个安全 issue：#3314（无认证 X-User-ID 伪造，CWE-306 CVSS 9.8）、#3312（MCP stdio 未认证任意进程执行，CWE-78 CVSS 9.8）、#3313（tee 误判只读）。**全部 triage/confirmed**。
+- **关键背景**：#3312/#3314 声明曾于 2026-07-08 走私密披露（GHSA advisory），8-30 仍 Triage 无维护者回应 → 转公开。**私密 advisory 两个 GSHA 在公开 API 均不可见**（advisory 管道停滞的实锤）。
+- **与你的 meta-issue 的战略交集**：ybyu-ieu 的三个报告验证了 #3276 审计的核心判断——AgentScope 的生命周期/权限/身份层存在系统性安全债。**外部安全研究者公开施压（3 连 confirmed）可能加速维护者对整个生命周期/权限区的投入**——你的泛化 PR 时机可能因此提前。
+- **对你的PR-A（E2B 续约）无冲突**：ybyu-ieu 报的是 service 层认证缺失（X-User-ID/MCP stdio），非 workspace 生命周期层。
+- **观察点**：HsbcJone/yang0228 两个 core 对这三个 confirmed 的反应速度；ybyu-ieu 是否继续披露（他的 advisory 主页链接在 #3312 正文）。
