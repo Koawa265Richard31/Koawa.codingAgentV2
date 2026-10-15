@@ -198,3 +198,11 @@
 - 内容：calc.exe 进程表实证 + whoami 文件写入 + 完整攻击链 + Impact refinement（#3274 中间件和 #3283 续约均不解决根因）
 - **#3314 归属决策**：3314（无认证）是 3312（RCE）的前置条件——**我们接手 #3314 的修复 PR**（认证中间件），3312 归 ybyu-ieu/维护者
 - ybyu-ieu 三连（3314/3312/3313）+ 我们两工件（#3276 审计 + 3312 复现）= 该仓库安全审计区最活跃的外部贡献者对
+
+### #3314 进度评论已发布（2026-10-15，用户审稿后授权）
+
+- 评论链接：https://github.com/agentscope-ai/agentscope/issues/3314#issuecomment-6182331473
+- 内容：状态更新（中间件本地实现完成、7 测试绿、PR 准备中）+ 范围重申（网关门≠完整身份验证）+ 引 `deps.py:38` JWT 自白原文（"Temporary header-based identity; will be replaced by JWT auth."）——即使 A 方案不被 merged 也留下有价值的痕迹
+- 发布前实测：7/7 测试绿（`uv run pytest tests/test_api_key_auth.py`）；#1061 引用核实为真（identity auth feature 提案，open）；deps.py:38 原文逐字核验
+- **A 方案代码审查发现（待用户审后修复）**：①接线缺失——设计称"环境变量启用"但 create_app 无任何读取/引用，`_build_auth_middleware` 零调用者（PR 需补 ~5 行自动接线，或改述为手动 `Middleware(...)` 用法）；②`import typing` 缺失（`typing.Callable` 注解靠 `from __future__ import annotations` 才未报错）；③豁免判断 `startswith("/health")` 过杀（放行 /healthcheck 等），建议 `== "/health" or startswith("/health/")`
+- 稿件存档：`agentscope/draft-3314-status-comment.md`；暂存区两文件（design-3314-auth.md、workspace_daytona_lease_test.py）归属未确认，保持未动
