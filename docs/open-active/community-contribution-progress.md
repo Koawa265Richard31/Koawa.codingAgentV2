@@ -191,3 +191,10 @@
 - **与你的 meta-issue 的战略交集**：ybyu-ieu 的三个报告验证了 #3276 审计的核心判断——AgentScope 的生命周期/权限/身份层存在系统性安全债。**外部安全研究者公开施压（3 连 confirmed）可能加速维护者对整个生命周期/权限区的投入**——你的泛化 PR 时机可能因此提前。
 - **对你的PR-A（E2B 续约）无冲突**：ybyu-ieu 报的是 service 层认证缺失（X-User-ID/MCP stdio），非 workspace 生命周期层。
 - **观察点**：HsbcJone/yang0228 两个 core 对这三个 confirmed 的反应速度；ybyu-ieu 是否继续披露（他的 advisory 主页链接在 #3312 正文）。
+
+### #3312 独立复现已发布（2026-10-13，用户授权"3312贴"）
+
+- **评论链接**：https://github.com/agentscope-ai/agentscope/issues/3312#issuecomment-6181289258
+- 内容：calc.exe 进程表实证 + whoami 文件写入 + 完整攻击链 + Impact refinement（#3274 中间件和 #3283 续约均不解决根因）
+- **#3314 归属决策**：3314（无认证）是 3312（RCE）的前置条件——**我们接手 #3314 的修复 PR**（认证中间件），3312 归 ybyu-ieu/维护者
+- ybyu-ieu 三连（3314/3312/3313）+ 我们两工件（#3276 审计 + 3312 复现）= 该仓库安全审计区最活跃的外部贡献者对
