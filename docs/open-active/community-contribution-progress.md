@@ -222,3 +222,10 @@
 - **branch @ 68c26c43**：7/7 ticks OK，alive at t+140s = 2.34x 原租约 → SURVIVED
 - 方法注记：脚本直驱 E2BBackend.exec_shell（生产原语）+ 跳过 gateway bootstrap（与租约语义正交）；bootstrap 目录由脚本 mkdir 补齐；E2B 直连可用（无需代理）
 - 评论稿已备（中英对照）待用户审后发到 PR #3285
+
+### #3285 运行时证据评论已发布（2026-10-15，用户审稿后授权，目标 PR 非issue——用户裁定）
+
+- 评论链接：https://github.com/agentscope-ai/agentscope/pull/3285#issuecomment-6183277475
+- 内容：双 checkout 对照实测（main LOST at 1x lease，SDK 报错点名 .set_timeout；branch SURVIVED 2.34x），方法注记（直驱生产原语、跳过 bootstrap）、复现脚本提供意愿
+- 稿件存档：`agentscope/draft-3285-runtime-evidence.md`；编号勘误记录：用户先前口误说"issue3285对接PR"，实际 issue=#3286 / PR=#3285，所有记录已按正确编号
+- 待办延续：auth 三发现待用户审 → 新分支从 main 切；#3285 等 review（现带运行时证据）；v2 ledger 本地未推（34925fd、11f657e、本条）
