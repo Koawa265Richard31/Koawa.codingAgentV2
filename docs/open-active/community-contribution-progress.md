@@ -237,3 +237,14 @@
 - 验证：10/10 auth 测试 + 23 个现有 app 测试回归（health_router/config_grouping/lifespan/sop_router）全过；ruff check 两新文件全清 + format 已应用；_app.py 存量 lint 问题（UP009/I001/UP006×7）未碰免污染 diff
 - 审查产物：`agentscope/auth-full.diff`（vs origin/main 完整形态 290 行：_app.py +9 / 中间件 75 / 测试 206）；暂存区三文件 = 恰好 PR 全部内容；上游 6 新 commit 零触碰本区
 - 提交时（等用户一次性审完）：fetch 最新 main → 切新分支 → 提交三文件 → push fork → PR（`Addresses #3314` + 范围声明 + deps.py JWT 自白）
+
+### Auth 方案 A PR 已发布（2026-10-15，用户一次性审完完整形态后授权）
+
+- **PR #3329**：https://github.com/agentscope-ai/agentscope/pull/3329（`feat(app): add opt-in API-key authentication middleware`）
+- 独立分支 `feat/api-key-auth` 从**当时最新** main（36a05718）切出——三线分离维持（E2B/Daytona/auth 互不叠加）；提交 `48bf4b81`（3 文件 +291）
+- 提交前安全检：staged diff vs 最新 main 恰好=我们的改动（上游零漂移）；checkout 不冲突证明上游未碰这些文件
+- **决策偏差（已亮牌）**：设计笔记原定 `Addresses #3314`，因 #3285 实测 pr-guard bot 会拦"无关闭引用的 PR"（只认 Fixes/Closes 语法），改用 **`Fixes #3314`**（语义成立：报告"无认证"、本 PR 加认证即解决；不合并则 issue 原样保留）
+- PR 正文：What/NOT-Scope（stopgap 非身份验证 + deps.py:38 JWT 自白原文 + #1061）/测试计划（10+23+ruff）/与其他 issue 关系（#3312 根因不同/#1061）/AI 披露行（用户本轮真实完成了全文审阅，该声明成立）
+- 认领评论更新：issuecomment-6189888912（PR 上线通知，刷新认领时限）
+- 稿件存档：`draft-3314-pr-body.md`、`draft-3314-pr-comment.md`；带读产物 `auth-review.diff`/`auth-full.diff`
+- 待观察：#3329 的 pr-guard/CI/triage 动向；#3285 review；#3314 bot 是否确认
