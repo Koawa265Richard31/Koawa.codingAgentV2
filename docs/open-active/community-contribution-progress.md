@@ -214,3 +214,11 @@
 - **推送前三线分离保证（用户要求）**：E2B 分支纯度✅（3 文件全 E2B）；Daytona 分支纯度✅（2 文件全 Daytona，上游零触碰）；两者同基线 34457377。上游 main 前进 6 commits（9b94a634），唯一触碰 E2B 文件处为 333 行 docstring 单行，GitHub 实测 MERGEABLE 零冲突 → 不 rebase（避免无意义 force-push）。**auth 止血 A 方案从未提交进 E2B 分支**，将来开新分支从当前 main 切——三线彻底分离
 - 已推送 fork（9d74d5e2..68c26c43），PR #3285 现 3 commits，CI 重跑中
 - 后续：真 E2B 运行时对照证据（等用户注册 E2B 拿 key，E2B_API_KEY 环境变量模式）
+
+### #3285 真服务运行时对照证据拿到（2026-10-15，E2B key 到位后实测）
+
+- 脚本：`agentscope/verify-3285-runtime.py`（untracked）——同一脚本跑两个 checkout（分支 / origin/main worktree + meta_path 影子加载），60s 短租约，每 20s 一跳共 140s（2.34x 租约），e2b SDK 2.52.1
+- **main @ 9b94a634**：t+20/40 OK，t+60 起 DEAD，SDK 原文报错 "sandbox was not found ... likely due to sandbox timeout ... or calling '.set_timeout'"（**报错自己点名了 PR 接的那个 API**）→ LOST
+- **branch @ 68c26c43**：7/7 ticks OK，alive at t+140s = 2.34x 原租约 → SURVIVED
+- 方法注记：脚本直驱 E2BBackend.exec_shell（生产原语）+ 跳过 gateway bootstrap（与租约语义正交）；bootstrap 目录由脚本 mkdir 补齐；E2B 直连可用（无需代理）
+- 评论稿已备（中英对照）待用户审后发到 PR #3285
