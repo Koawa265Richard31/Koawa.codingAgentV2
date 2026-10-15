@@ -229,3 +229,11 @@
 - 内容：双 checkout 对照实测（main LOST at 1x lease，SDK 报错点名 .set_timeout；branch SURVIVED 2.34x），方法注记（直驱生产原语、跳过 bootstrap）、复现脚本提供意愿
 - 稿件存档：`agentscope/draft-3285-runtime-evidence.md`；编号勘误记录：用户先前口误说"issue3285对接PR"，实际 issue=#3286 / PR=#3285，所有记录已按正确编号
 - 待办延续：auth 三发现待用户审 → 新分支从 main 切；#3285 等 review（现带运行时证据）；v2 ledger 本地未推（34925fd、11f657e、本条）
+
+### Auth 方案 A 六处修复全部落地（2026-10-15，用户裁定"先修，提交时一次性审完整形态"）
+
+- 带读新发现**发现 4（实测确认）**：`compare_digest` str 模式拒绝非 ASCII——ASGI 层喂原始字节 `caf\xe9` → 未捕获 TypeError → 生产 500；raw socket 可行（TestClient 的 httpx2 客户端侧会拒发，测不出）。修法 = 两边 encode 成 bytes
+- 六处修复：A 接线（create_app 读 env → add_middleware，置于 extra_middlewares 后 = 最外层门）；B 删孤儿工厂（设计明令不要）；C typing（collections.abc + 注解写全）；C4 bytes 比较 + 专属回归测试；D 豁免收紧 `== "/health" or startswith("/health/")` 删冗余常量；E 接线反脱落测试 ×2（fakeredis 假后端复用 health_router_test 夹具模式）
+- 验证：10/10 auth 测试 + 23 个现有 app 测试回归（health_router/config_grouping/lifespan/sop_router）全过；ruff check 两新文件全清 + format 已应用；_app.py 存量 lint 问题（UP009/I001/UP006×7）未碰免污染 diff
+- 审查产物：`agentscope/auth-full.diff`（vs origin/main 完整形态 290 行：_app.py +9 / 中间件 75 / 测试 206）；暂存区三文件 = 恰好 PR 全部内容；上游 6 新 commit 零触碰本区
+- 提交时（等用户一次性审完）：fetch 最新 main → 切新分支 → 提交三文件 → push fork → PR（`Addresses #3314` + 范围声明 + deps.py JWT 自白）
