@@ -206,3 +206,11 @@
 - 发布前实测：7/7 测试绿（`uv run pytest tests/test_api_key_auth.py`）；#1061 引用核实为真（identity auth feature 提案，open）；deps.py:38 原文逐字核验
 - **A 方案代码审查发现（待用户审后修复）**：①接线缺失——设计称"环境变量启用"但 create_app 无任何读取/引用，`_build_auth_middleware` 零调用者（PR 需补 ~5 行自动接线，或改述为手动 `Middleware(...)` 用法）；②`import typing` 缺失（`typing.Callable` 注解靠 `from __future__ import annotations` 才未报错）；③豁免判断 `startswith("/health")` 过杀（放行 /healthcheck 等），建议 `== "/health" or startswith("/health/")`
 - 稿件存档：`agentscope/draft-3314-status-comment.md`；暂存区两文件（design-3314-auth.md、workspace_daytona_lease_test.py）归属未确认，保持未动
+
+### E2B PR #3285 接线缺口发现与修复（2026-10-15）
+
+- **发现**：`prepare_for_reuse()` 定义后全仓零调用点——feat commit（9df2635a）只改 workspace(+81)+测试(+141)，`_e2b_backend.py` 从未动过；PR 正文"backend invokes the hook"当时为假。机制vs接线病首次长在自己身上；单元测试直接调 hook，全绿掩盖了缺口。本来要搭的运行时验证脚本还没跑就先立功
+- **修复 68c26c43**：backend 挂 `renew_hook` 参数（默认 None 向后兼容）+ 三原语入口各一行调用 + fail-fast（False→RuntimeError，不打死沙箱）+ `_provision_backend` 绑定 `prepare_for_reuse`；新增 3 个接线测试（原语触发/fail-fast/绑定防脱落），8/8 绿，ruff 增量干净（存量 UP009 未动）
+- **推送前三线分离保证（用户要求）**：E2B 分支纯度✅（3 文件全 E2B）；Daytona 分支纯度✅（2 文件全 Daytona，上游零触碰）；两者同基线 34457377。上游 main 前进 6 commits（9b94a634），唯一触碰 E2B 文件处为 333 行 docstring 单行，GitHub 实测 MERGEABLE 零冲突 → 不 rebase（避免无意义 force-push）。**auth 止血 A 方案从未提交进 E2B 分支**，将来开新分支从当前 main 切——三线彻底分离
+- 已推送 fork（9d74d5e2..68c26c43），PR #3285 现 3 commits，CI 重跑中
+- 后续：真 E2B 运行时对照证据（等用户注册 E2B 拿 key，E2B_API_KEY 环境变量模式）
