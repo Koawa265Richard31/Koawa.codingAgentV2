@@ -1,569 +1,186 @@
 # KoawaAgent V2
 
-KoawaAgent V2 is an independent, production-oriented local Coding Agent runtime. It lives in the same Git repository as the legacy Java project, but it does not import from or modify that implementation.
+An auditable, event-sourced local **coding-agent runtime** — built as a sequence
+of executable slices, hardened through a five-round externally-reviewed security
+program, and documented well enough to be reconstructed from its own event log.
 
-The project started as 15 executable slices and now includes D16–D25, stabilization,
-and RT/J + PSEC security work. A slice is complete only when its production code,
-failure-path tests, runnable demonstration, and design notes agree.
+> 中文简介见文末 [简体中文](#简体中文)。
 
-## Agent handoff snapshot (2026-09-07)
+---
 
-This snapshot covers local commits through `f3d2664`; the latest implementation
-commit is `6367a16`. Recheck Git before using this snapshot as current status:
+## What this is
 
-```powershell
-git status --porcelain
-git log origin/main..HEAD --oneline
-git log -1 --format='%h %s' origin/main
+A local coding agent that **never trusts a model claim without a durable fact**.
+Every state change is a typed event appended to a single SQLite event store
+under an exact expected stream version; agent turns are replayed from that log,
+not from memory. The model operates behind layered boundaries: a tool-execution
+ledger, an output policy that keeps raw command bodies out of the model
+service, per-profile release contracts, a durable delivery gate that serves the
+model only **published, revocable projections** of test results, and an
+isolated-workspace mode for synthetic test inputs.
+
+It is a **security-engineering artifact**: the value is the evidence trail —
+design docs, externally-reviewed verdicts, fault-injection tests, and a full
+regression baseline — not a claim of being production-safe.
+
+## Architecture (baseline `a051b65`)
+
+```mermaid
+flowchart TB
+    subgraph Entry["Entry layer"]
+        CLI["runtime/cli"] --> APP["AppRuntime<br/>run / chat / resume / status / cancel / doctor"]
+    end
+    subgraph Control["Control plane (no model, no MCP)"]
+        RT["ThreadRuntime — turn state machine"]
+        POL["policy + durable approvals (D9)"]
+    end
+    subgraph Exec["Execution plane (lazily assembled)"]
+        ASM["assembly — verified registry + MCP wiring"] --> TW["TurnWorker<br/>run lease / fencing / terminalization"]
+        TW --> LOOP["AgentLoop<br/>model rounds + D23 compaction<br/>+ three completion gates"]
+        LOOP --> EXE["LedgerExecutor (D7)<br/>claim → execute → commit"]
+        EXE --> REG["Verified tool registry<br/>D3 read/search · D4 patch · D5 test/git/finalize<br/>+ recall_history · read_result_projection"]
+        ASM --> MCP["MCP connection manager<br/>whitelist + metadata-only gate"]
+    end
+    subgraph Gate["Bounded-result retrieval + plan-B delivery gate"]
+        PUB["projection.publish<br/>metadata-only projections"] --> REL["R3 release contract filter"]
+        DEC["delivery-decided<br/>(SPEC-1 identity + three digests)"]
+        RDR["resume backfill<br/>(verify-before-write)"]
+    end
+    subgraph Store["Single source of truth (append-only SQLite, WAL)"]
+        EST["EventStore — streams:<br/>thread · turn · run-execution ·<br/>tool-execution · result-projection"]
+    end
+    subgraph Rec["Recovery plane"]
+        REC["DurableExecutionRecorder<br/>canonical facts + live projection"]
+        COORD["RecoveryCoordinator<br/>list / claim / reconstruct"]
+        RED["reducer v3<br/>placeholder → delivered content"]
+    end
+    APP --> ASM
+    APP --> RT
+    RT --> EST
+    TW --> REC --> EST
+    REG --> PUB
+    LOOP --> DEC --> EST
+    COORD --> RED --> EST
+    COORD --> RDR --> EST
+    EST -.->|"replay = state"| Control
 ```
 
-`origin/main` is a cached remote-tracking ref, not a live remote check. At this
-snapshot, five local commits (`ba6b85d` through `f3d2664`) follow cached
-`origin/main` at `e213580`. Existing untracked scratch/evidence files belong to
-other sessions until ownership is established; do not include them in commits
-by default. Follow [AGENTS.md](AGENTS.md) for workspace and ownership rules.
+Full annotated map (package-by-package, delivery lifecycle sequence, read-chain
+channels, invariants): [docs/open-active/repo-map-and-architecture.md](docs/open-active/repo-map-and-architecture.md).
 
-Read these maintained records before choosing the next task:
+## Core guarantees (implemented, tested)
 
-| Area | Entry point | Status and next work |
+| Guarantee | Mechanism | Evidence |
 |---|---|---|
-| Runtime slices | [Roadmap](docs/15-day-coding-agent-roadmap.md), [D25](docs/day-25-third-party-mcp-security-governance.md) | D1–D25 implementation history; platform and real-service evidence have explicit scope. |
-| RT/J security evaluation | [Progress](docs/rtj-progress.md), [threat model](docs/agent-security-threat-model.md) | `e213580` records engineering gate closure for the evaluated scenarios; this is not a general security certification. |
-| PSEC platform-security work | [Plan](docs/agent-security-platform-track-plan.md), [progress ledger](docs/psec-progress.md) | S0–S5 research/audit work plus later implementation; use the ledger's later updates and open blockers when older design text differs. |
-| Delegation follow-up | [Semantics-C design](docs/psec/s5-semantics-c-design.md) | B-3 remains open: delegation graph must supply `ancestor_turn_ids` to child loops; takeover × sticky escalation remains unaudited. |
-| Release qualification | [I9 progress](docs/stability/i9-progress.md) | Internal engineering loop closed; production release qualification was not executed. |
+| Every state change is auditable | typed events + exact expected stream version + idempotency keys; replay = state | `control/`, contract §7.5 verified checkpoints |
+| Tools are claimed, executed once, and durably recorded | D7 ledger with recovery profiles; unknown outcomes stay `uncertain` | `ledger/`, D6/D7 suites |
+| Model-visible test receipts are metadata-only by default | output gate (fixed structured diagnostics; bodies stay operator-side) | `verification/output_policy.py`, output-policy suite |
+| Per-profile field release | `ReleaseRule` contracts (config → runner → receipt → delivery); sensitive-without-contract returns a fixed `result_withheld` + `human_required` state — never a failure | `tests/test_release_rules.py` |
+| Model sees only **published** result projections | plan-B delivery gate: `result.delivery-decided.v1` (SPEC-1 identity without content, conflicting decisions rejected, restore replays the original decision); reducer v3 serves placeholder→delivered content identically on live and replayed paths | `tests/test_delivery_gate.py` (9 cases incl. W1–W3 crash windows), [spec v4](docs/open-active/hardening-memory-retrieval-2026-09-19/implementation/r2-delivery-gate-proposal.md) |
+| Revocation / expiry / policy change honored on read | `result.projection-revoked/-expired.v1`; read chain refuses (`revoked`, `projection_expired`, `policy_superseded`); terminal catch-up never re-publishes | `tests/test_revocation.py` |
+| Reads are bounded and honest | page-walked streams, 2000-event scan quota reported as `scan_truncated`, `ambiguous_reference` instead of guessing, cross-thread denied | `tests/test_result_read_tool.py` (7), [WP-E audit](docs/open-active/hardening-memory-retrieval-2026-09-19/implementation/wp-e-audit.md) |
+| Final requests are capacity-checked independently | pre-send gate on final messages + the same pinned tool snapshot (tool name/description/schema + conservative protocol allowance + output reserve), unaffected by compaction toggles | `tests/test_request_metering_gate.py`, [measured band report](docs/open-active/hardening-memory-retrieval-2026-09-19/implementation/r4-measured-metering-report.md) |
+| Synthetic test inputs run isolated | fixed-manifest ephemeral workspaces (read-only candidate copies + private scratch via `KOAWA_TEST_SCRATCH`); traversal/symlink guards; quarantine on cleanup failure; sensitive profiles refuse the host runner at config time | `tests/test_wp_c_workspace.py`, `tests/test_wp_c_manifest_guard.py` |
+| Crashes recover without receipt backflow | `delivery_pending` state machine (paused / protocol-mismatch / corruption separated); recovery backfill never re-executes tools | `tests/test_delivery_gate.py`, D6/D23 recovery suites |
+| MCP tools are whitelisted, metadata-gated | connection manager + activation governance (D10/D24/D25) | `mcp/`, D25 suites |
+| Prompt-injection canary (scoped) | J2 exact-match gate with env-sourced key; ancestor-token scan implemented, child-agent coverage blocked by open B-3 wiring | [RT/J ledger](docs/open-active/rtj-progress.md) |
 
-Recent local changes:
+## Honest status (open items, on the record)
 
-- `ba6b85d`: PSEC framework mapping, MCP identity/secret and tool-surface audits,
-  PDP/PEP and scoped-taint studies, delegation-security analysis.
-- `a9d8896` / `54c6680`: T7 threat-model entry, boundary tests, audit snapshot,
-  schema-normalization ruling and semantics-C design. Later implementation
-  supersedes their pending activation and B-2 descriptions.
-- `6367a16`: J2 has a production construction/injection path. Configure
-  `RuntimeConfig.canary_key_env` with an environment-variable **name** to enable
-  it; key material comes from the environment. Default configuration leaves the
-  gate disabled; configured missing/invalid keys fail closed. Ancestor-token
-  scanning is implemented in gate/context/loop/executor, but B-3 prevents claiming
-  end-to-end child-agent coverage. Encoded/transformed tokens remain outside this
-  exact-match mechanism. B-2 was resolved by aligning D10 tests and documentation
-  with the existing `additionalProperties: false` coercion.
-- `f3d2664`: records a sealed Mimosa scan of the pre-`6367a16` tree: 13 candidate
-  findings, `coverage=partial`, `runStatus=inconclusive`. Findings still require
-  per-location triage; neither confirmed vulnerabilities nor false positives
-  should be inferred from the scanner labels alone.
+- `recall_history` still reads session history; wiring it to the projection
+  stream (indexes, watermarks, resume cursors) is **recorded, not implemented**
+  ([WP-E audit](docs/open-active/hardening-memory-retrieval-2026-09-19/implementation/wp-e-audit.md)).
+- Summary references / protected groups (WP-F), fixed-artifact egress (WP-G),
+  and the long-task parameter report (WP-H) are not implemented.
+- WP-C remainder (Docker manifests, MCP adapter release rules, sensitive-
+  container experiment matrix) and per-profile release-contract values are
+  environment- / maintainer-input constrained.
+- Read chain closure still requires current-**audience** checks and
+  production-entry read verification.
+- Delegation B-3 wiring (child-agent canary coverage) is open.
+- Mimosa deep audit: commit/push scans returned inconclusive (`scanner_enobufs`);
+  a full scan is pending. This repo does **not** claim to be vulnerability-free.
 
-Verification provenance: the PSEC ledger reports a Python 3.13 regression run
-for `6367a16` with 1,016 discovered tests, zero failures/errors and 32 skips
-(2026-09-06). Skips are not executed passes. Raw reports are referenced under
-`.dsh_tmp/psec-lanes/` and may not exist in a fresh clone. This README update did
-not rerun that suite. Use an explicit supported interpreter, e.g.
-`py -3.13 -B -m unittest discover -s tests -v` with `PYTHONPATH=src`; bare `python`
-has resolved to unsupported Python 3.11 in previous sessions.
-
-Recovery boundary for implementers: D6/D7 recovery is wired into runtime resume,
-and completed tool results can be reused. Built-in `apply_patch` is currently
-registered as `IDEMPOTENT_WRITE_PROFILE` / `RETRY` in
-[`runtime/assembly.py`](src/koawa_agent_v2/runtime/assembly.py). An orphaned claim
-may therefore be retried through the normal gates and file preconditions. D4's
-stage/backup/rollback is an in-process transaction, not a durable multi-file
-crash-recovery journal. Do not describe retry as automatic restoration or proof
-of the original operation's success. Worktree-specific reconciliation is a
-separate implementation in
-[`workspace/worktree.py`](src/koawa_agent_v2/workspace/worktree.py).
-
-## Final execution path
+## Repository map
 
 ```text
-durable Thread / Turn
-  -> model stream and native tool calls
-  -> repository context
-  -> policy and approval
-  -> built-in or MCP tool
-  -> isolated worktree and Docker sandbox
-  -> patch, test, diff and deterministic finalization
-  -> checkpoint, crash recovery and trace
-  -> optional isolated subagents
+src/koawa_agent_v2/
+├─ control/      event-sourcing core: EventStore contract + SQLite, ThreadRuntime   ~6.7k
+├─ runtime/      AppRuntime, assembly, config, memory(D23), session(D19), cli       ~8.5k
+├─ execution/    AgentLoop (rounds, compaction, three gates), TurnWorker            ~2.0k
+├─ model/        provider typed-stream protocol                                     ~2.4k
+├─ ledger/       D7 tool-execution ledger + J2 gate wiring                          ~2.0k
+├─ verification/ D5 verification registry, runner, output policy + release rules    ~1.9k
+├─ retrieval/    bounded-result retrieval: projections, delivery, recall, by-ref    ~1.4k
+├─ recovery/     recorder, reducer v3, checkpoint cache, coordinator, backfill      ~3.6k
+├─ sandbox/      Docker runner + allocations + WP-C v1 isolated workspaces          ~2.8k
+├─ mcp/          D10/D24/D25 connection manager, activation, adapters               ~5.9k
+├─ agents/       delegation graph (D12+, B-3 open)                                  ~5.1k
+├─ tools/ editing/ workspace/ plan/ security/ context/ telemetry/
+tests/           133 modules — day-slice suites + hardening suites + fixtures
+docs/            closed-archive (D1–D25 history) · open-active (living ledgers)
+scripts/ audits/ stable-scenario + metering-probe / platform audit archives
 ```
 
-## Fifteen-day route
+Day-slice design history (D1–D25) lives in
+[docs/closed-archive/](docs/closed-archive/) — the day tables in previous
+README versions pointed to pre-reorganization paths. Living documents
+([docs index](docs/README.md)):
 
-| Day | Deliverable |
-|---|---|
-| D1 | Thread, Turn, append-only Event Store |
-| D2 | Typed model streaming protocol and Agent Loop |
-| D3 | Tool Registry plus bounded Read/Search |
-| D4 | Atomic Apply Patch |
-| D5 | Test/Git/Diff finalization loop |
-| D6 | Checkpoint and state reconstruction |
-| D7 | Tool ledger, crash windows and idempotent recovery |
-| D8 | Docker Sandbox |
-| D9 | Approval plus resource/network restrictions |
-| D10 | MCP lifecycle and secure tool calls |
-| D11 | Multi-Agent control plane |
-| D12 | Worktree and per-agent container isolation |
-| D13 | Repository context and compaction |
-| D14 | Trace, evaluation and failure injection |
-| D15 | End-to-end acceptance and interview package |
+- [Closure review 2026-09-25](docs/open-active/implementation-closure-review-2026-09-25.md)
+  — five external review rounds, verdicts archived.
+- [R1–R5 self-audit table](docs/open-active/hardening-memory-retrieval-2026-09-19/implementation/r1r5-self-audit.md)
+  — acceptance-clause-by-clause mapping with honest grades.
+- [Delivery-gate spec v4](docs/open-active/hardening-memory-retrieval-2026-09-19/implementation/r2-delivery-gate-proposal.md)
+  · [WP-E audit](docs/open-active/hardening-memory-retrieval-2026-09-19/implementation/wp-e-audit.md)
+  · [R4 metering report](docs/open-active/hardening-memory-retrieval-2026-09-19/implementation/r4-measured-metering-report.md)
+- [Threat model](docs/open-active/agent-security-threat-model.md) ·
+  [PSEC ledger](docs/open-active/psec-progress.md) ·
+  [RT/J ledger](docs/open-active/rtj-progress.md)
 
-## Executable roadmap and new-session handoff
+## Running and testing
 
-The complete implementation contract is
-[`docs/15-day-coding-agent-roadmap.md`](docs/15-day-coding-agent-roadmap.md).
-It records the current status, dependency graph, per-day interfaces, failure matrices,
-acceptance gates, prohibited shortcuts, and the exact startup procedure for a new
-conversation. Read it before starting the next slice; this README is only the index.
-
-## Runtime slice overview: D1–D25
-
-D1–D15 are detailed below. D16 (interactive sessions), D17–D20 (robustness
-and repair), D21 (agent-security authenticity package), D22 (hardening),
-D23 (long-task memory closure), D24 (capability parity), and D25 (sandboxed MCP) are summarized in
-the sections after the provider instructions; design docs live under
-`docs/day-*.md` and `docs/stability/`.
-
-D1 remains the durable control plane: append-only Thread/Turn streams, exact-version
-writes, semantic command receipts, and per-attempt `run_id` fencing. D2 adds the
-trusted model-execution boundary on top:
-
-- Provider-neutral typed requests, context items, output items, and stream events.
-- A strict assembler that rejects sequence gaps, identity changes, invalid item
-  lifecycles, delta/snapshot mismatches, missing terminals, and oversized streams.
-- A bounded Agent Loop that validates the whole model response before any tool
-  side effect, feeds typed tool results into the next model round, and requires a
-  non-empty final answer.
-- A real standard-library OpenAI-compatible `/chat/completions` SSE adapter.
-- A `TurnWorker` that starts a fenced D1 Run and commits COMPLETED, FAILED, or
-  CANCELLED without allowing a stale worker to overwrite newer state.
-
-D3 supplies the production read-only implementation behind that port:
-
-- A sealed `ToolRegistry` whose provider definitions, runtime validation, and frozen
-  typed arguments all come from one `ToolSpec`.
-- A workspace resolver that rejects cross-platform path escapes and descendant
-  symlink/junction/reparse points, and reads through verified OS handles.
-- Deterministic, separately bounded `read_file`, `list_files`, and `search_text`
-  tools with stable JSON failures and truncation metadata.
-- A real temporary-repository walkthrough that performs search → read → final and
-  then replays the completed D1 Turn from SQLite.
-
-D4 now adds the first real write path:
-
-- A versioned structured Patch protocol for exact Add/Update/Delete operations.
-- Mandatory base SHA-256 for Update/Delete and exact, non-fuzzy line hunks.
-- UTF-8 BOM, LF/CRLF and final-newline preservation rules with hard file/line budgets.
-- A same-workspace mutation lock, full preflight, same-directory staging, per-target
-  hash/identity revalidation, backup/replace and reverse rollback.
-- Stable `workspace_outcome_unknown` when rollback cannot be proven, rather than a
-  false atomic-success claim.
-- One combined sealed Registry and a real read → multi-file patch → reread/list →
-  final walkthrough.
-
-D5 now turns those tools into an evidence-backed coding vertical slice:
-
-- The model can only select immutable, pre-registered test profiles; it cannot provide
-  argv, cwd, environment variables, or shell syntax.
-- The dev-only host runner has a trust gate, minimal environment, bounded stdout/stderr,
-  total timeout, cooperative cancellation, and process-tree termination.
-- A fixed read-only Git facade separates the user's dirty baseline from Agent changes
-  and disables hooks, fsmonitor, pager, external diff, and textconv executors.
-- Each successful Patch advances a verification generation. Tests, status, and diff
-  must all describe the current generation before `finalize_task` can issue a report.
-- `AgentLoop` has a completion gate, so a model final answer cannot bypass the report.
-
-D6 now persists complete canonical ModelTurns, ToolResults, phase transitions, and
-context in a fenced run-execution stream. Verified checkpoints support tail replay;
-database-clock leases and a recoverable index let a new process discover and requeue
-stale RUNNING turns with a fresh run ID. Completed finals and remaining tool calls can
-continue without replaying completed work. A tool that may have executed without a
-durable result is explicitly handed to D7 recovery rather than blindly replayed.
-
-D7 adds a write-ahead Tool Ledger around every durable tool call:
-
-- A logical execution ID survives process, attempt, and run changes; physical claims
-  use separate run ID, epoch, and token fences.
-- PREPARED and CLAIMED are appended under the active Turn's exact-version/current-run
-  precondition before a handler may run.
-- Read-only, idempotent, queryable non-idempotent, and manual recovery profiles make
-  replay policy a trusted Runtime declaration rather than a model choice.
-- Definite results, terminal negative queries, and OUTCOME_UNKNOWN can converge under
-  exact ledger-version and claim-token checks.
-- Durable Workers reject a raw Registry/executor bypass, and recovered redacted
-  credentials are never executed as literal placeholders.
-- Real child-process kills cover the five physical ledger boundaries; cancel-versus-
-  claim is decided by the shared Turn CAS.
-
-D8 moves untrusted test execution into a real Docker container:
-
-- Runtime accepts only a complete immutable image ID and uses pull=never.
-- Every allocation persists an intent before create, then binds a complete container
-  ID; restart recovery uses exact labels, a 256-bit nonce, and a deterministic name.
-- Containers run non-root with a read-only rootfs/workspace, network none, no added
-  capabilities or privilege escalation, bounded PID/CPU/memory/time/output, and a
-  bounded tmpfs.
-- Create-before-bind process death is recovered from SQLite without a leaked
-  container; unknown, cloned, or label-tampered containers are refused.
-- D5 final evidence records Docker backend, image, profile, allocation, and container
-  identities. The host runner remains bootstrap/test only.
-
-D9 adds one policy and durable-approval boundary in front of every durable handler:
-
-- Built-in, future MCP, and future Agent-spawn actions share local
-  ALLOW / DENY / ASK decisions with deny-by-default and scope intersection.
-- A canonical action digest binds arguments, resolved resource identities, side-effect
-  class, sandbox profile, network/credential scope, budget, policy version, and
-  authenticated principal.
-- Registry schema validation happens before policy. ASK persists an approval request
-  and D1 wait in one commit, while legacy boolean resume never creates authority.
-- Grant/deny recovery is durable. Before execution the action is resolved again; drift
-  asks again instead of carrying an old grant to a new resource.
-- Single-use grant consumption, durable budget reservation, D7 claim, and active-Run
-  fencing share one SQLite transaction.
-- HTTPS/DNS/redirect/proxy rules are fail-closed pure policy in D9. D8 containers remain
-  network=none; no real egress is opened by this slice.
-- Network enablement requires a configured origin allowlist and a mandatory proxy;
-  MCP credentials bind to trusted server identity.
-- Process-local authorized tickets are single-use and tamper-evident; every exit
-  path discards the prepared invocation, and terminal results are re-authorized
-  against durable claim evidence before being released.
-
-D10 connects real MCP servers as dynamic tool sources on the same chain:
-
-- stdio JSON-RPC 2.0 transport with Content-Length framing, initialize/initialized,
-  tools/list pagination, tools/call concurrency, and list_changed refresh.
-- Every binding fixes `(server_id, session_generation, tool_name, schema_hash)`;
-  the tuple enters the D9 action digest and the D7 logical execution identity,
-  so refresh invalidates old approvals and old in-flight bindings.
-- Server schemas are strictly validated before Registry binding; descriptions,
-  annotations, and results are untrusted and fail closed / redacted.
-- Timeouts, wrong response ids, EOF, and malformed frames map to
-  OUTCOME_UNKNOWN for non-idempotent profiles instead of blind retries.
-- A real fixture MCP server runs as a subprocess for tests and the walkthrough;
-  no direct bypass around Registry/Policy/Ledger exists.
-
-D11 adds the durable multi-agent control plane:
-
-- Event-sourced parent/child graph with CREATED/RUNNING/WAITING/COMPLETED/FAILED/
-  CANCELLED/ORPHANED states, per-attempt run ids, leases, and exact-version
-  fences; stale runs can never commit messages or terminal results.
-- Durable mailboxes with per-agent sequences and semantic idempotency keys;
-  depth/concurrency/total-agent budgets are reserved and released atomically.
-- Orphan discovery and takeover restart from a new process; cancel propagates
-  through typed messages; failure of one worker never blocks its siblings.
-- D11 workers are hard-limited to the read-only tool allowlist and model
-  inference; writes, patch, tests, host commands, network, and MCP are refused.
-
-D12 isolates every writing agent in its own Git worktree and gates delivery:
-
-- Durable per-agent workspace inventory under a managed root with a safe reaper;
-  write agents refuse a dirty user baseline by default.
-- Artifacts carry run fence, base/head hashes, diff, test evidence, and image
-  digest; integration applies them serially, retests in a container runner,
-  and delivers to the user workspace only when HEAD still matches the base.
-- Same-line edits raise an explicit conflict; no partial or per-artifact writes
-  to the main workspace ever happen.
-- `DockerContainerRunner` is wired to the D8 `DockerCommandRunner`, running each
-  worktree's tests in a read-only-mounted Linux container (0-skip with Docker up).
-
-D13 adds bounded repository context and lossless compaction:
-
-- Git-ignored, binary, oversized, and over-budget files are excluded before
-  retrieval; every result carries path, SHA-256, line range, source, and score.
-- Stale hashes are re-validated so changed files never reach the model.
-- Compaction keeps system/developer instructions verbatim, marks summaries as
-  untrusted, and rebuilds goals/constraints/approval/unknown outcomes/children/
-  budgets from typed projections; open tool calls block compaction.
-
-D14 adds trace, deterministic failure injection, and a 20-task eval harness:
-
-- Traces use stream/field allowlists and pre-persist redaction; raw secrets or
-  full bodies never touch SQLite.
-- Twelve named failure points replay deterministically and classify failures
-  into timeout/concurrency/policy/uncertainty/contract buckets.
-- `evals/run_eval.py` grades fresh-repo tasks with an oracle plus test command
-  and emits a failure-classification report.
-- Trace is wired into the model (AgentLoop), tool/ledger (LedgerExecutor), and
-  MCP (McpSession) production paths via optional `trace_store`/`correlation_id`.
-
-D15 ships the durable CLI, the real provider assembly, and the interview package:
-
-- The deterministic `run / resume / status / cancel / doctor` commands remain
-  offline-testable; `--config` mode wires a real OpenAI-compatible provider into
-  Registry → Policy/Approval → Ledger → patch → test/git/diff → evidence final,
-  and `approvals / approve / deny` close the durable approval loop.
-- The dispatch-contract tests prove the built-in and MCP entries refuse raw
-  execution once policy-bound (subagent entry refused via D11 write allowlist);
-  D6/D7/D8 kill fixtures cover real subprocess crash windows.
-
-## Run the real P0 provider chain (optional, network + key required)
-
-The P0 assembly connects a real OpenAI-compatible provider to the same durable
-chain: verified coding registry -> policy/approval -> ledger -> patch/test/git/
-finalize -> checkpoint/resume. Config template:
-[`examples/p0_config.example.json`](examples/p0_config.example.json).
-
-Install the CLI once (Python 3.12+), then the `koawa-agent-v2` entry point is
-available in any shell:
+Requirements: Python 3.13+ (standard library only; no third-party runtime
+dependencies). Provider API keys are read from environment-variable **names**
+in the config — never stored in the repo.
 
 ```powershell
-py -3.14 -m pip install -e .
-koawa-agent-v2 --help
+# full regression (baseline: 1,137 tests · 0 failures · 0 errors · 32 skips)
+$env:PYTHONPATH="src"; py -3.13 -B -m unittest discover -s tests -v
+
+# run an agent task through the production CLI
+py -3.13 -B -m koawa_agent_v2.runtime.cli run --config cfg.json --task "..."
+py -3.13 -B -m koawa_agent_v2.runtime.cli resume --config cfg.json --turn-id <uuid>
 ```
 
-```powershell
-# SiliconFlow example; the key is read from the environment only.
-$env:SF_CodingAgentTestKey = [Environment]::GetEnvironmentVariable(
-    'SF_CodingAgentTestKey', 'User')
+A minimal `cfg.json` declares the repo, a state DB **outside** the repo, the
+provider (base URL + `api_key_env` name + model), the sandbox runner, and
+trusted test profiles (fixed argv, optional `release_fields` / `sensitive` /
+`workspace_manifest`). See
+[the MCP runbook](docs/open-active/d25-sandboxed-mcp-runbook.md) and
+[config examples](docs/open-active/examples/). Docker is optional; sensitive
+test profiles refuse the host runner by configuration instead of relaxing.
 
-# Real repository run through the configured provider.
-koawa-agent-v2 run --config examples/p0_config.example.json `
-  --task "Fix the failing tests, run them, inspect git status/diff, finalize."
+Workspace and collaboration rules: [AGENTS.md](AGENTS.md) — typed events only,
+JSON persistence only, slice-scoped commits, evidence discipline (skipped
+tests are not passes; audit conclusions are graded 实测确认 / 代码推断 / 待验证).
 
-# Status / durable approvals / resume.
-koawa-agent-v2 status --config examples/p0_config.example.json
-koawa-agent-v2 approvals --config examples/p0_config.example.json
-koawa-agent-v2 approve --config examples/p0_config.example.json --request-id <id>
-```
+---
 
-Reasoning intensity is a user-facing knob, translated per provider/model family
-(see [docs/day-15-real-model-runtime.md](docs/day-15-real-model-runtime.md)):
+## 简体中文
 
-```json
-{ "provider": { "model": "Qwen/Qwen3.5-35B-A3B", "reasoning_effort": "off" } }
-```
+KoawaAgent V2 是一个可审计、事件溯源的本地编码代理运行时。状态变更一律是
+带精确流版本的 typed event，代理回合从事件日志重放而非内存恢复。模型侧有
+分层边界：D7 工具账本、元数据-only 输出门、按 profile 的字段释放契约、
+计划 B 交付门（模型只能读到**已发布且可撤销**的测试结果投影，原回执从不
+进入模型上下文）、合成输入的隔离清单工作区。
 
-For agentic tool loops `off` is the measured recommendation: the same repair
-task finishes in ~25s with reasoning disabled, while Qwen3.5 with thinking on
-answers entirely inside `reasoning_content` (empty final answer) and Qwen3-8B
-spends minutes per round on reasoning alone. Raw provider-specific body fields
-remain reachable via `provider.provider_options` (wins over the knob).
+- 架构：控制面/执行面双平面懒装配，SQLite 单一事实源（thread/turn/
+  run-execution/tool-execution/result-projection 五类流），恢复走
+  delivery_pending 状态机（paused/protocol/corruption 三态分离）。
+- 验证基线：全量 1,137 项 / 0 失败 / 0 错误 / 32 跳过（Python 3.13）。
+- 安全定位：这是安全工程产物——价值在设计文档、外部复验裁决、故障注入
+  测试与证据链；**不是**"无漏洞"声明，开放边界全部在案（见上方 Honest
+  status 与 [自审表](docs/open-active/hardening-memory-retrieval-2026-09-19/implementation/r1r5-self-audit.md)）。
 
-The end-to-end smoke is verified against SiliconFlow:
-
-```powershell
-$env:KOAWA_SF_MODEL = 'Qwen/Qwen3.5-35B-A3B'
-py -3.14 -B examples/day15_real_model_smoke.py   # ok:true, ~7-9 model rounds
-```
-
-## Interactive session (D16)
-
-Conversational mode over one repository: every message is a new turn on the
-same thread, and prior turns are projected into the model context under a
-bounded whitelist (user input + final answer only), with truncation and
-optional compaction. Choose any working directory with `--repo` (e.g. `.`).
-
-```powershell
-$env:SF_CodingAgentTestKey = [Environment]::GetEnvironmentVariable(
-    'SF_CodingAgentTestKey', 'User')
-
-koawa-agent-v2 interactive --config examples/p0_config.example.json --repo .
-
-# in the session: type messages, or
-#   /status  /approvals  /approve <id>  /deny <id>  /resume <turn-id>
-#   /history /thread <uuid> /help /exit
-```
-
-Offline deterministic walkthrough (no network, no key):
-
-```powershell
-py -3.14 -B examples/day16_interactive_session.py
-```
-
-Session design and tradeoffs: [docs/day-16-interactive-session.md](docs/day-16-interactive-session.md).
-
-## D17–D24: robustness, memory closure, capability parity
-
-- **D17–D22** hardened the real-model loop: configurable budgets with
-  repairable tool errors (detail/expected/example), exception/thinking
-  handling, stream retry, completion gates, baseline fingerprints, and the
-  I1–I9 stabilization track (durable JSON hard bounds, mailbox/spawn atomic
-  transactions, schema manager v2, unified run truth, fault-injection
-  matrix with 77 named kill points).
-- **D23** closed the long-task memory loop: authoritative per-turn
-  `TurnConclusion` rebuilt from typed facts, turn-memory stream persistence,
-  grouped compaction with untrusted summaries, conclusion-block dedup, and
-  real-provider verification (opt-in evidence in
-  `docs/day-23-memory-layer-upgrade.md`).
-- **D24** aligned core capabilities with mainstream harnesses while keeping
-  the threat model (`docs/day-24-capability-parity.md`):
-  - `update_plan` tool — durable task decomposition as `memory.plan-updated.v1`
-    on a thread-keyed CAS stream, projected into every context build as the
-    authoritative `session:plan` item; the plan confers no authority.
-  - Repo-root `AGENTS.md` loads as bounded, redacted, **untrusted project
-    data** (a marked user-level message, never the instruction tier).
-  - `repo_map` tool — bounded directory tree plus Python symbol outline;
-    metadata only, resolver-enforced, control paths skipped.
-  - Memory-layer authority-contract regressions: poisoned summaries stay
-    behind the untrusted marker, poisoned final answers reflow only at
-    assistant level, and the session projection whitelist has no
-    tool-output channel.
-  - Eval extended with 8 multi-file/multi-step tasks (t21–t28): 8/8 pass,
-    numbers archived with provenance in `evals/report-d24-summary.json`
-    (offline deterministic harness; real-provider behavior is covered by the
-    I9 provider evidence, 4 scenarios 10/10).
-- **D25** turned the `sandboxed` MCP profile into a real container execution
-  plane (`docs/day-25-third-party-mcp-security-governance.md`): third-party
-  stdio MCP servers run inside Docker with an exact image digest, network=none,
-  zero mounts, zero secrets, read-only rootfs, non-root, cap-drop ALL,
-  no-new-privileges and bounded cpu/mem/pids/tmpfs — created only after the
-  activation ticket is consumed, verified by an exact `docker inspect`
-  contract, and dual-bound to the MCP and sandbox allocation ledgers with
-  crash-window reconciliation. Reference integration: the pinned upstream
-  `server-filesystem` (version/tarball/image digest in
-  `tests/fixtures/d25_mcp_server/provenance.json`); adversarial fixtures
-  (frame flood, stderr flood, PID pressure) prove bounded cleanup. There is
-  no host fallback; `host_trusted` remains an explicit ASK escape hatch.
-  Sandboxed servers speak the official newline-delimited MCP stdio framing,
-  bind an admin-declared `tool_allowlist` subset, and ship with a worked
-  config + doctor/run/cleanup guide
-  (`examples/d25_sandboxed_mcp.example.json`,
-  `docs/d25-sandboxed-mcp-operations.md`).
-- **I9 status**: closed as an *internal engineering loop* (Windows full
-  regression, a real Linux lane on WSL2-ext4, outside-repo fresh-install
-  smoke, credential canary scan, real provider 10/10, independent audit with
-  no P0/P1). Production release qualification was deliberately **not**
-  executed — see `docs/stability/i9-progress.md` §0 for the exact scope.
-
-## Run the test suite and lanes
-
-```powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B -m unittest discover -s tests -v          # full suite (Python 3.12+)
-python -B -m unittest tests.test_d24_plan_tool tests.test_d24_plan_wiring tests.test_d24_project_note tests.test_d24_repo_map tests.test_d24_authority_contract -v
-py -3.14 -B scripts/stability_gate.py --lane pr-fast --report out.json   # I9 lane runner
-```
-
-## Run D1 through D15 tests
-
-PowerShell:
-
-```powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B -m unittest discover -s tests -v
-```
-
-Run the D5 offline failure → repair → test → diff → finalization walkthrough:
-
-```powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B examples/day05_coding_vertical_slice.py
-```
-
-Run the D6 destroy → discover → resume walkthrough:
-
-```powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B examples/day06_checkpoint_restart_resume.py
-```
-
-Run the D7 claim → crash/restart → result reuse/unknown walkthrough:
-
-```powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B examples/day07_tool_ledger_recovery.py
-```
-
-Run the D8 real-container security probe and create-before-bind recovery walkthrough:
-
-~~~powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B examples/day08_docker_sandbox.py
-~~~
-
-Run the D9 ASK → restart → grant/consume walkthrough and offline network-policy probes:
-
-~~~powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B examples/day09_durable_approval.py
-~~~
-
-Run the D10 real MCP fixture roundtrip and ledger uncertainty walkthrough:
-
-~~~powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B examples/day10_mcp_roundtrip.py
-~~~
-
-Run the D11 durable multi-agent read-only walkthrough:
-
-~~~powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B examples/day11_multi_agent_readonly.py
-~~~
-
-Run the D12 isolated writing-agents walkthrough:
-
-~~~powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B examples/day12_isolated_writing_agents.py
-~~~
-
-Run the D13 indexed-context and compaction walkthrough:
-
-~~~powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B examples/day13_context_compaction.py
-~~~
-
-Run the D14 trace/failure-replay walkthrough and the 20-task eval:
-
-~~~powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -B examples/day14_trace_failure_replay.py
-python -B evals/run_eval.py evals/tasks evals/report.json
-~~~
-
-Run the D15 CLI and E2E contract tests:
-
-~~~powershell
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='src'
-python -W error::ResourceWarning -B -m unittest tests.test_d15_e2e -v
-~~~
-
-The D5 trust boundary, verification generations, Git hardening, failure matrix, and
-interview explanation are in
-[`docs/day-05-test-git-finalization.md`](docs/day-05-test-git-finalization.md).
-The D6 checkpoint, lease, tail-replay, and side-effect boundaries are in
-[`docs/day-06-checkpoint-reconstruction.md`](docs/day-06-checkpoint-reconstruction.md).
-The D7 logical identity, claim fencing, recovery classes, and six crash windows are in
-[`docs/day-07-tool-ledger-crash-windows.md`](docs/day-07-tool-ledger-crash-windows.md).
-The D8 container boundary, allocation ledger, exact reaper, and attack matrix are in
-[docs/day-08-docker-sandbox-threat-model.md](docs/day-08-docker-sandbox-threat-model.md).
-The D9 action identity, durable approval transaction, network policy, and budget
-boundaries are in
-[docs/day-09-policy-approval-network.md](docs/day-09-policy-approval-network.md).
-The D10 MCP lifecycle, binding identity, failure matrix, and error codes are in
-[docs/day-10-mcp-lifecycle-security.md](docs/day-10-mcp-lifecycle-security.md).
-The D11 agent graph, mailbox, budget, fences, and orphan recovery are in
-[docs/day-11-multi-agent-control-plane.md](docs/day-11-multi-agent-control-plane.md).
-The D12 worktree/container isolation and gated delivery are in
-[docs/day-12-worktree-container-isolation.md](docs/day-12-worktree-container-isolation.md).
-The D13 context budget, staleness, and compaction are in
-[docs/day-13-repository-context-compaction.md](docs/day-13-repository-context-compaction.md).
-The D14 trace, eval, and failure injection are in
-[docs/day-14-trace-eval-failure-injection.md](docs/day-14-trace-eval-failure-injection.md).
-The D15 CLI, E2E matrix, and interview package are in
-[docs/day-15-interview-package.md](docs/day-15-interview-package.md).
-The real provider assembly, approval commands, and MCP config are in
-[docs/day-15-real-model-runtime.md](docs/day-15-real-model-runtime.md).
-The D4 transaction phases and crash boundaries remain in
-[`docs/day-04-atomic-apply-patch.md`](docs/day-04-atomic-apply-patch.md).
-The D3 read-only implementation rationale remains in
-[`docs/day-03-tool-registry-read-search.md`](docs/day-03-tool-registry-read-search.md).
-The D2 model boundary remains documented in
-[`docs/day-02-model-stream-agent-loop.md`](docs/day-02-model-stream-agent-loop.md).
-The D1 persistence notes remain in
-[`docs/day-01-durable-control-plane.md`](docs/day-01-durable-control-plane.md).
+协作与提交纪律见 [AGENTS.md](AGENTS.md)。
