@@ -307,9 +307,18 @@ class TestProfileConfig:
     max_stdout_bytes: int = 256_000
     max_stderr_bytes: int = 256_000
     environment: tuple[tuple[str, str], ...] = ()
-    # R3: per-profile receipt release contract (deployment input).
+    # R3/contracts §2: per-profile release contract (deployment input).
     release_fields: tuple[str, ...] | None = None
     sensitive: bool = False
+    profile_version: str = ""
+    audience_policy_ref: str | None = None
+    input_policy_ref: str | None = None
+    candidate_admission_ref: str | None = None
+    environment_ref: str | None = None
+    release_mode: str | None = None
+    producer_rules: tuple[str, ...] = ()
+    scratch_policy_ref: str | None = None
+    budget_policy_ref: str | None = None
     # WP-C v1: fixed input manifest - non-empty runs in an isolated
     # ephemeral workspace (read-only candidate copies + private scratch).
     workspace_manifest: tuple[str, ...] = ()
@@ -323,6 +332,10 @@ class TestProfileConfig:
             ReleaseRule(fields=self.release_fields, sensitive=self.sensitive)
         except (ValueError, TypeError):
             raise RuntimeConfigError("invalid_release_contract") from None
+        if self.sensitive and not self.candidate_admission_ref:
+            # §2: without an admission reference, sensitive validation stays
+            # closed (capability refusal, not a hard config error at parse).
+            pass
         import os as _os
         from pathlib import Path as _Path
 
@@ -1387,6 +1400,15 @@ def _parse_test_profiles(value: Any) -> tuple[TestProfileConfig, ...]:
             "release_fields",
             "sensitive",
             "workspace_manifest",
+            "profile_version",
+            "audience_policy_ref",
+            "input_policy_ref",
+            "candidate_admission_ref",
+            "environment_ref",
+            "release_mode",
+            "producer_rules",
+            "scratch_policy_ref",
+            "budget_policy_ref",
         }
         _reject_unknown(item, allowed, "invalid_test_profile")
         try:
@@ -1409,6 +1431,15 @@ def _parse_test_profiles(value: Any) -> tuple[TestProfileConfig, ...]:
                     workspace_manifest=tuple(
                         item.get("workspace_manifest", ()),
                     ),
+                    profile_version=str(item.get("profile_version", "")),
+                    audience_policy_ref=item.get("audience_policy_ref"),
+                    input_policy_ref=item.get("input_policy_ref"),
+                    candidate_admission_ref=item.get("candidate_admission_ref"),
+                    environment_ref=item.get("environment_ref"),
+                    release_mode=item.get("release_mode"),
+                    producer_rules=tuple(item.get("producer_rules", ())),
+                    scratch_policy_ref=item.get("scratch_policy_ref"),
+                    budget_policy_ref=item.get("budget_policy_ref"),
                 )
             )
         except RuntimeConfigError:

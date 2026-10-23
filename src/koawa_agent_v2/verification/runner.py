@@ -87,10 +87,18 @@ class CommandProfile:
     max_stdout_bytes: int = 256_000
     max_stderr_bytes: int = 256_000
     environment: tuple[tuple[str, str], ...] = ()
-    # R3: per-profile receipt release contract (deployment input); None =
-    # default safe-diagnostic set, sensitive without a contract = withheld.
+    # R3/contracts §2: per-profile release contract (deployment input).
     release_fields: tuple[str, ...] | None = None
     sensitive: bool = False
+    profile_version: str = ""
+    audience_policy_ref: str | None = None
+    input_policy_ref: str | None = None
+    candidate_admission_ref: str | None = None
+    environment_ref: str | None = None
+    release_mode: str | None = None
+    producer_rules: tuple[str, ...] = ()
+    scratch_policy_ref: str | None = None
+    budget_policy_ref: str | None = None
     # WP-C v1: fixed input manifest - non-empty runs in an isolated
     # ephemeral workspace (read-only candidate copies + private scratch).
     workspace_manifest: tuple[str, ...] = ()
@@ -283,6 +291,41 @@ class TrustedCommandRunner:
             fields=profile.release_fields, sensitive=profile.sensitive,
         )
 
+    def release_contract(self, profile_id: str):
+        """contracts.md §2: the profile's release contract instance.
+
+        Raises ``CommandRunnerError("profile_identity_required")`` when the
+        fixed identity (profile_version) is missing — the profile refuses to
+        execute rather than running under an unversioned contract.
+        """
+
+        from .release_contracts import (
+            ProfileContractError,
+            ProfileReleaseContract,
+            ReleaseMode,
+        )
+
+        profile = self._profiles.get(profile_id)
+        if profile is None:
+            return None
+        try:
+            return ProfileReleaseContract(
+                profile_id=profile.profile_id,
+                profile_version=profile.profile_version,
+                audience_policy_ref=profile.audience_policy_ref,
+                input_policy_ref=profile.input_policy_ref,
+                candidate_admission_ref=profile.candidate_admission_ref,
+                environment_ref=profile.environment_ref,
+                release_mode=ReleaseMode(profile.release_mode or "local_only"),
+                release_fields=profile.release_fields,
+                producer_rules=profile.producer_rules,
+                scratch_policy_ref=profile.scratch_policy_ref,
+                budget_policy_ref=profile.budget_policy_ref,
+                sensitive=profile.sensitive,
+            )
+        except ProfileContractError as error:
+            raise CommandRunnerError(error.code) from None
+
     def validate_profile(self, profile_id: str) -> None:
         """在占用测试预算前验证 trust gate 与固定配置是否存在。"""
         if self._trust is RepositoryTrust.UNTRUSTED:
@@ -301,6 +344,10 @@ class TrustedCommandRunner:
         self.validate_profile(profile_id)
         profile = self._profiles[profile_id]
         isolated = False
+        if profile.workspace_manifest and not profile.scratch_policy_ref:
+            # §2 scratch_policy_ref missing -> scratch-requiring runs do not
+            # start (the isolated workspace's private scratch is exactly that).
+            raise CommandRunnerError("scratch_policy_required")
         if profile.workspace_manifest:
             # WP-C v1: run inside the isolated ephemeral workspace (fixed
             # manifest copies only + private scratch); the shared minimal

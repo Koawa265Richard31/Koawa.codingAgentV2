@@ -754,6 +754,15 @@ def _docker_profile(item: TestProfileConfig) -> SandboxCommandProfile:
         release_fields=item.release_fields,
         sensitive=item.sensitive,
         workspace_manifest=item.workspace_manifest,
+        profile_version=item.profile_version,
+        audience_policy_ref=item.audience_policy_ref,
+        input_policy_ref=item.input_policy_ref,
+        candidate_admission_ref=item.candidate_admission_ref,
+        environment_ref=item.environment_ref,
+        release_mode=item.release_mode,
+        producer_rules=item.producer_rules,
+        scratch_policy_ref=item.scratch_policy_ref,
+        budget_policy_ref=item.budget_policy_ref,
     )
 
 
@@ -774,6 +783,15 @@ def _host_profile(item: TestProfileConfig) -> CommandProfile:
         release_fields=item.release_fields,
         sensitive=item.sensitive,
         workspace_manifest=item.workspace_manifest,
+        profile_version=item.profile_version,
+        audience_policy_ref=item.audience_policy_ref,
+        input_policy_ref=item.input_policy_ref,
+        candidate_admission_ref=item.candidate_admission_ref,
+        environment_ref=item.environment_ref,
+        release_mode=item.release_mode,
+        producer_rules=item.producer_rules,
+        scratch_policy_ref=item.scratch_policy_ref,
+        budget_policy_ref=item.budget_policy_ref,
     )
 
 

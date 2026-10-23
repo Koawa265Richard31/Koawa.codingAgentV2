@@ -388,7 +388,7 @@ class G4AssemblyLifecycleTest(unittest.TestCase):
                     host_trust=RepositoryTrustMode.BUILTIN_FIXTURE,
                 ),
                 test_profiles=(
-                    TestProfileConfig("unit", (str(Path(sys.executable).resolve()), "-B")),
+                    TestProfileConfig("unit", (str(Path(sys.executable).resolve()), "-B"), profile_version="v1"),
                 ),
                 policy=PolicyConfig(),
                 system_prompt="G4 assembly fixture.",

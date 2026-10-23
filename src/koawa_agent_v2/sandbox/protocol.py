@@ -156,9 +156,18 @@ class SandboxCommandProfile:
     max_stdout_bytes: int = 256_000
     max_stderr_bytes: int = 256_000
     environment: tuple[tuple[str, str], ...] = ()
-    # R3: per-profile receipt release contract (mirrors CommandProfile).
+    # R3/contracts §2: per-profile release contract (mirrors CommandProfile).
     release_fields: tuple[str, ...] | None = None
     sensitive: bool = False
+    profile_version: str = ""
+    audience_policy_ref: str | None = None
+    input_policy_ref: str | None = None
+    candidate_admission_ref: str | None = None
+    environment_ref: str | None = None
+    release_mode: str | None = None
+    producer_rules: tuple[str, ...] = ()
+    scratch_policy_ref: str | None = None
+    budget_policy_ref: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile_id, str) or not _PROFILE_ID.fullmatch(

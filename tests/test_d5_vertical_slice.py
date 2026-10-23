@@ -78,6 +78,10 @@ def _profile(*, timeout: float = 30.0, max_stdout: int = 100_000) -> CommandProf
             "tests",
             "-v",
         ),
+        profile_version="v1",
+        release_mode="detailed",
+        audience_policy_ref="audience/d5-fixture",
+        environment_ref="env/d5-fixture",
         timeout_seconds=timeout,
         max_stdout_bytes=max_stdout,
         max_stderr_bytes=100_000,
@@ -154,6 +158,17 @@ def _result(request: ModelRequest, call_id: str) -> tuple[dict[str, object], boo
     return json.loads(item.content), item.is_error
 
 
+def _receipt_verdict(document) -> str:
+    """Verdict across receipt generations (§4 verdict vs legacy outcome)."""
+
+    if isinstance(document.get("verdict"), str):
+        return document["verdict"]
+    diagnostic = document.get("diagnostic") or document.get("diagnostics") or {}
+    if isinstance(diagnostic, dict) and isinstance(diagnostic.get("outcome"), str):
+        return diagnostic["outcome"]
+    return document.get("outcome")
+
+
 class _VerticalModel:
     def __init__(self) -> None:
         self.round = 0
@@ -173,7 +188,7 @@ class _VerticalModel:
         if self.round == 2:
             failed, is_error = _result(request, "test-before")
             self.last_observation = ("test-before", failed, is_error)
-            if is_error or failed["outcome"] != "failed":
+            if is_error or _receipt_verdict(failed) != "failed":
                 raise AssertionError(failed)
             return _stream(
                 request,
@@ -230,7 +245,7 @@ class _VerticalModel:
         if self.round == 5:
             passed, is_error = _result(request, "test-after")
             self.last_observation = ("test-after", passed, is_error)
-            if is_error or passed["outcome"] != "passed":
+            if is_error or _receipt_verdict(passed) != "passed":
                 raise AssertionError(passed)
             return _stream(
                 request,
@@ -410,6 +425,10 @@ class D5VerticalSliceTest(unittest.TestCase):
                 "-c",
                 "import sys;sys.stdout.write('x'*10000)",
             ),
+            profile_version="v1",
+            release_mode="detailed",
+            audience_policy_ref="audience/d5-fixture",
+            environment_ref="env/d5-fixture",
             timeout_seconds=10,
             max_stdout_bytes=128,
             max_stderr_bytes=128,
@@ -431,6 +450,10 @@ class D5VerticalSliceTest(unittest.TestCase):
         profile = CommandProfile(
             "slow",
             (str(Path(sys.executable).resolve()), "-c", "import time;time.sleep(5)"),
+            profile_version="v1",
+            release_mode="detailed",
+            audience_policy_ref="audience/d5-fixture",
+            environment_ref="env/d5-fixture",
             timeout_seconds=0.1,
             max_stdout_bytes=128,
             max_stderr_bytes=128,
@@ -530,7 +553,7 @@ class D5VerticalSliceTest(unittest.TestCase):
                 context=context,
             )
         self.assertFalse(first.is_error)
-        self.assertEqual("failed", json.loads(first.content)["outcome"])
+        self.assertEqual("failed", _receipt_verdict(json.loads(first.content)))
         self.assertEqual(
             "test_run_budget_exceeded",
             json.loads(second.content)["error"]["code"],

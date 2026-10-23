@@ -202,6 +202,30 @@ profile 的详细诊断适配器、合成秘密覆盖 env/文件/镜像/链接/�
   测试：`tests/test_release_rules.py` 6 项。MCP 长度/适配器释放归
   WP-C/MCP 面（docker manifest 与 MCP 适配器为后续切片，如实声明）。
 
+
+
+### R3 契约面收口（2026-10-03，按 contracts.md §2/§4 实施）
+
+- **§2 配置装载面**：`ProfileReleaseContract`（九字段：profile_id/
+  profile_version/audience/input/candidate_admission/environment/
+  release_mode/release_fields+producer_rules/scratch/budget）+ 各字段
+  缺失处理按契约表逐一落实（identity 缺失→拒绝执行；audience 缺失→
+  无模型可读正文；scratch 缺失→隔离运行拒绝启动；release_mode 缺失→
+  local_only 不推断）。config → CommandProfile/SandboxCommandProfile →
+  runner `release_contract()` 全链。模型只引用已存在 ID（K01）。
+- **§4 Receipt 语义**：`build_receipt` 生成协议化回执（schema_version/
+  receipt_ref/execution_status/verdict/diagnostic_status/diagnostic/
+  applicability/completeness/next_action），四态 release_mode 矩阵
+  （local_only 全 withheld+human_required；aggregate 仅结论；limited
+  按 release_fields 裁剪；detailed 需 audience+environment 证明，否则
+  降级 limited）。关键组合逐条测试（K03 completed+failed、K04
+  withheld+withheld+human_required、K05 not_completed+not_evaluated、
+  completed 不蕴含 passed、uncertain→recover_first）。
+- 测试：`tests/test_release_contracts.py` 12 项（合成 profile 验收，
+  真实维护者配置绑定待部署值）。`tests/test_release_rules.py` 收缩为
+  纯单元（registry 路径由 release_contracts 覆盖）。
+- 交付链继承：计划 B 交付内容=已发布投影（内嵌契约过滤后的 §4
+  receipt），释放契约自动作用于交付。
 ### R4 收口（实测计量，已实施）
 
 - 探针 `scripts/r4_metering_probe.py`（只读、8 请求、密钥仅环境变量、
