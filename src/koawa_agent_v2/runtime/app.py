@@ -600,8 +600,8 @@ class AppRuntime:
         try:
             from ..retrieval.projection import (
                 ResultProjectionStore,
+                publish_test_fact,
                 scan_test_results,
-                test_diagnostics,
             )
 
             projection_store = ResultProjectionStore(self.assembled.store)
@@ -623,20 +623,14 @@ class AppRuntime:
                 f"{fact['model_turn_id']}:{fact['call_id']}" in revoked
             ):
                 continue
+            fact["turn_id"] = str(turn.turn_id)
             try:
-                projection_store.publish(
+                publish_test_fact(
+                    self.assembled.store,
                     turn_id=turn.turn_id,
                     thread_id=turn.thread_id,
                     run_id=turn.current_run_id,
-                    call_id=fact["call_id"],
-                    source_kind="test",
-                    diagnostics=test_diagnostics(fact["receipt"]),
-                    body_ref={
-                        "stream": "run-execution",
-                        "turn_id": str(turn.turn_id),
-                        "model_turn_id": fact["model_turn_id"],
-                        "source_content_sha256": fact["source_content_sha256"],
-                    },
+                    fact=fact,
                 )
                 status["published"] += 1
             except Exception as exc:
