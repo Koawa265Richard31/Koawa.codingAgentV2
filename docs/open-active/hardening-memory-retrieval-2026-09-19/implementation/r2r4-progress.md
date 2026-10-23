@@ -227,6 +227,10 @@ profile 的详细诊断适配器、合成秘密覆盖 env/文件/镜像/链接/�
   纯单元（registry 路径由 release_contracts 覆盖）。
 - 交付链继承：计划 B 交付内容=已发布投影（内嵌契约过滤后的 §4
   receipt），释放契约自动作用于交付。
+- **裁决（2026-10-03）**：本切片定性为**框架**，已完成——per-profile 具体
+  配置属任务时配置，由维护者在 cfg.json 直接修改参数（改 release_mode/
+  release_fields/producer_rules 即刻生效，profile_version 自增即废旧契约）；
+  不存在"等待部署值"的挂起项，后续有具体任务场景时按本模板现配。
 ### R4 收口（实测计量，已实施）
 
 - 探针 `scripts/r4_metering_probe.py`（只读、8 请求、密钥仅环境变量、

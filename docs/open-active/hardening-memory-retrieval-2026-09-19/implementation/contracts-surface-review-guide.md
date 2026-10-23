@@ -75,10 +75,10 @@
 
 ## 未实现（如实清单，全部在案）
 
-1. **真实 profile 绑定**：按维护者裁决（2026-10-03），真实 profile 留为
-   **cfg.json 中维护者可直接修改的配置参数**——改 release_mode/release_fields/
-   producer_rules 等字段即刻生效（下一次 profile 运行按新契约出回执），无
-   注册表机器、无需实现侧参与；profile_version 自增即可让旧契约失效。
+1. **真实 profile 绑定**：✅ 按裁决（2026-10-03）**框架已完整闭合**——真实
+   profile 就是 cfg.json 里维护者直接修改的配置参数，改字段即刻生效
+   （profile_version 自增即废旧契约）；**没有具体任务就没有具体配置**，
+   部署值按任务场景现配，不再作为挂起项跟踪。
 2. **audience 注册表**：audience_policy_ref 现在只作为 detailed 档的证明门
    （有 ref 才允许详细诊断）；"换接收方后按新规则重判"已由 policy_superseded
    覆盖一半，完整的按接收方可见性规则表未建。
