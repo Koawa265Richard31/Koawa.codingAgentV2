@@ -84,15 +84,16 @@ class _VerificationTools:
         git: GitFacade,
         verification: VerificationLedger,
         limits: D5ToolLimits,
-        release_rules=None,
+        release_contracts=None,
     ) -> None:
         self._runner = runner
         self._git = git
         self._verification = verification
         self._limits = limits
-        # R3: resolves the per-profile receipt release contract; runners
-        # without the accessor (test doubles) keep the default full set.
-        self._release_rules = release_rules
+        # contracts.md §2/§4: resolves the per-profile release contract;
+        # runners without the accessor (non-contract test doubles) keep the
+        # legacy safe-diagnostic receipt shape.
+        self._release_contracts = release_contracts
 
     def run_test_profile(
         self,
@@ -179,13 +180,8 @@ class _VerificationTools:
         # R3: the per-profile release contract then filters these fields; a
         # sensitive profile without a contract yields the fixed withheld
         # state (distinct from failure, human handoff flagged).
-        if self._release_rules is not None:
-            rule = self._release_rules(result.profile_id)
-            if rule is not None and rule.withheld:
-                return _bounded_json(
-                    output_policy.withheld_receipt(result.profile_id),
-                    self._limits.max_tool_result_chars,
-                )
+        if self._release_contracts is not None:
+            return self._contract_receipt(result)
         payload: dict[str, Any] = {
             "allocation_id": (
                 str(result.allocation_id) if result.allocation_id is not None else None
@@ -214,11 +210,85 @@ class _VerificationTools:
             from ..sandbox.test_workspace import extract_diagnostics
 
             payload["diagnostics_excerpt"] = extract_diagnostics(result.stdout)
-        if self._release_rules is not None:
-            rule = self._release_rules(result.profile_id)
-            if rule is not None:
-                payload = output_policy.apply_release_rule(payload, rule)
         return _bounded_json(payload, self._limits.max_tool_result_chars)
+
+    def _contract_receipt(self, result: CommandResult) -> str:
+        """contracts.md §4: receipt generated FROM the release contract.
+
+        execution_status / verdict map from trusted process facts; the
+        diagnostic body only appears in the modes and fields the contract
+        allows.  The legacy legacy meta fields (test_output_visibility /
+        isolated_workspace / diagnostics_excerpt) ride the diagnostic body
+        under limited/detailed so isolation provenance survives contracts.
+        """
+
+        from .release_contracts import build_receipt
+        from .runner import CommandOutcome
+
+        contract = self._release_contracts(result.profile_id)
+        if contract is None:
+            # Unregistered profile: runner validation already refuses; the
+            # receipt path fails closed as well.
+            return _bounded_json(
+                output_policy.withheld_receipt(result.profile_id),
+                self._limits.max_tool_result_chars,
+            )
+
+        if result.outcome is CommandOutcome.PASSED:
+            execution_status, verdict = "completed", "passed"
+        elif result.outcome is CommandOutcome.FAILED:
+            execution_status, verdict = "completed", "failed"
+        elif result.outcome is CommandOutcome.START_FAILED:
+            # K05: tests never ran - never write failed.
+            execution_status, verdict = "not_completed", "not_evaluated"
+        else:  # TIMED_OUT / cancelled: result unknown.
+            execution_status, verdict = "uncertain", "unknown"
+
+        mode_allows_body = contract.release_mode.value in {
+            "limited", "detailed",
+        } and contract.effective_mode_allows_body()
+        diagnostic: dict = {}
+        if mode_allows_body:
+            diagnostic = output_policy.safe_diagnostics(result)
+            # Execution identity fields are releasable structured provenance
+            # (D8 governance reads them); never secrets.
+            for key in (
+                "backend",
+                "immutable_image_id",
+                "profile_digest",
+                "allocation_id",
+                "container_id",
+            ):
+                value = getattr(result, key, None)
+                if value is not None:
+                    diagnostic[key] = (
+                        str(value) if not isinstance(value, str) else value
+                    )
+            diagnostic["isolated_workspace"] = bool(
+                result.isolated_workspace
+            )
+            if contract.release_fields is not None:
+                diagnostic = {
+                    key: value
+                    for key, value in diagnostic.items()
+                    if key in contract.release_fields
+                }
+            if result.isolated_workspace:
+                from ..sandbox.test_workspace import extract_diagnostics
+
+                diagnostic["diagnostics_excerpt"] = extract_diagnostics(
+                    result.stdout,
+                )
+        receipt = build_receipt(
+            contract,
+            execution_status=execution_status,
+            verdict=verdict,
+            diagnostic=diagnostic,
+            capture_truncated=bool(
+                result.stdout_truncated or result.stderr_truncated
+            ),
+        )
+        return _bounded_json(receipt, self._limits.max_tool_result_chars)
 
     def _diff_json(self, diff: GitDiffSnapshot) -> str:
         return _bounded_json(
@@ -297,14 +367,13 @@ def build_verified_coding_tool_registry(
             protected_paths=git.protected_paths,
             observer=verification.record_patch,
         )
-        release_rules = getattr(runner, "release_rule", None)
         _register_verification_tools(
             registry,
             runner,
             git,
             verification,
             tool_limits,
-            release_rules=release_rules,
+            release_contracts=getattr(runner, "release_contract", None),
         )
         if plan_board is not None:
             register_plan_tool(registry, plan_board)
@@ -326,10 +395,10 @@ def _register_verification_tools(
     git: GitFacade,
     verification: VerificationLedger,
     limits: D5ToolLimits,
-    release_rules=None,
+    release_contracts=None,
 ) -> None:
     tools = _VerificationTools(
-        runner, git, verification, limits, release_rules=release_rules,
+        runner, git, verification, limits, release_contracts=release_contracts,
     )
     empty_schema = {
         "type": "object",

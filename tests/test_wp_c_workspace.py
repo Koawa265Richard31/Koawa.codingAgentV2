@@ -83,14 +83,33 @@ class IsolatedExecutionTest(unittest.TestCase):
                 "iso",
                 _python_argv(code),
                 workspace_manifest=("a.py",),
+                scratch_policy_ref="wpc-scratch-v1",
             )
-            from koawa_agent_v2.verification.runner import RepositoryTrust
+            from koawa_agent_v2.verification.runner import (
+                CommandRunnerError,
+                RepositoryTrust,
+            )
 
             runner = TrustedCommandRunner(
                 root, (profile,), trust=RepositoryTrust.USER_CONFIRMED,
             )
             result = runner.run("iso")
             self.assertTrue(result.isolated_workspace)
+            # §2 scratch_policy_ref missing -> a scratch-requiring isolated
+            # run never starts (refusal, not silent relaxation).
+            no_scratch = CommandProfile(
+                "iso-noscratch",
+                _python_argv(code),
+                workspace_manifest=("a.py",),
+            )
+            refusing = TrustedCommandRunner(
+                root, (no_scratch,), trust=RepositoryTrust.USER_CONFIRMED,
+            )
+            with self.assertRaises(CommandRunnerError) as raised:
+                refusing.run("iso-noscratch")
+            self.assertEqual(
+                "scratch_policy_required", raised.exception.code,
+            )
             self.assertEqual(0, result.exit_code, result.stdout)
             self.assertIn("scratch-set True", result.stdout)
             # The repository is untouched by the run.
@@ -237,8 +256,7 @@ class NoSilentRelaxationTest(unittest.TestCase):
             TestProfileConfig(
                 "unit",
                 (str(Path(sys.executable).resolve()), "-B", "-c", "pass"),
-                sensitive=True,
-            ),
+                sensitive=True, profile_version="v1"),
         )
         with tempfile.TemporaryDirectory(prefix="wpc-cfg-") as tmp:
             state = Path(tmp, "state")

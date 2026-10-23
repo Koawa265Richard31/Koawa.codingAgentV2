@@ -131,12 +131,24 @@ def _result(request: ModelRequest, call_id: str) -> tuple[dict[str, object], boo
 
 
 def _result_outcome(document) -> str:
-    """Read the test outcome across receipt generations: the legacy receipt
-    carried a top-level outcome; the plan-B delivered projection carries it
-    under diagnostics."""
+    """Read the test verdict across receipt generations: the legacy receipt
+    carried a top-level outcome; the contracts §4 receipt carries `verdict`;
+    the plan-B delivered projection carries it under diagnostics."""
+    if isinstance(document.get("verdict"), str):
+        return document["verdict"]
+    embedded = document.get("receipt")
+    if isinstance(embedded, dict) and isinstance(embedded.get("verdict"), str):
+        return embedded["verdict"]
+    diag = document.get("diagnostics") or document.get("diagnostic")
+    if isinstance(diag, dict):
+        embedded2 = diag.get("receipt")
+        if isinstance(embedded2, dict) and isinstance(
+            embedded2.get("verdict"), str
+        ):
+            return embedded2["verdict"]
     if isinstance(document.get("outcome"), str):
         return document["outcome"]
-    diagnostics = document.get("diagnostics")
+    diagnostics = document.get("diagnostics") or document.get("diagnostic")
     if isinstance(diagnostics, dict) and isinstance(
         diagnostics.get("outcome"), str
     ):
@@ -296,7 +308,7 @@ class RuntimeAssemblyTest(unittest.TestCase):
                 test_profiles=(
                     TestProfileConfig(
                         "unit",
-                        (
+                        argv=(
                             str(Path(sys.executable).resolve()),
                             "-B",
                             "-m",
@@ -305,6 +317,11 @@ class RuntimeAssemblyTest(unittest.TestCase):
                             "-s",
                             "tests",
                         ),
+                        profile_version="v1",
+                        release_mode="detailed",
+                        audience_policy_ref="audience/fixture",
+                        environment_ref="env/fixture-host",
+                        scratch_policy_ref="scratch/fixture",
                         timeout_seconds=30,
                     ),
                 ),
@@ -345,7 +362,8 @@ class RuntimeAssemblyTest(unittest.TestCase):
                 test_profiles=(
                     TestProfileConfig(
                         "unit",
-                        (str(Path(sys.executable).resolve()), "-B"),
+                        argv=(str(Path(sys.executable).resolve()), "-B"),
+                        profile_version="v1",
                         timeout_seconds=30,
                     ),
                 ),

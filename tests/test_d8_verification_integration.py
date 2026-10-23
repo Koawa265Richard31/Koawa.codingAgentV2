@@ -186,6 +186,10 @@ class D8VerificationIntegrationTest(unittest.TestCase):
         profile = CommandProfile(
             "unit",
             (str(Path(sys.executable).resolve()), "-c", "raise SystemExit(0)"),
+            profile_version="v1",
+            release_mode="detailed",
+            audience_policy_ref="audience/d8-fixture",
+            environment_ref="env/d8-fixture",
             timeout_seconds=10,
             max_stdout_bytes=1024,
             max_stderr_bytes=1024,
@@ -197,7 +201,11 @@ class D8VerificationIntegrationTest(unittest.TestCase):
         ) as registry:
             command, report = self._complete_verification(registry, EXECUTION_ID)
 
-        self.assertEqual("host", command["backend"])
+        self.assertEqual(
+            "host",
+            (command.get("backend")
+             or command.get("diagnostic", {}).get("backend")),
+        )
         self.assertEqual("host", report["test"]["backend"])
         self.assertEqual(
             "host_runner_dev_only_until_d8_container_sandbox",

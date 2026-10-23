@@ -233,8 +233,7 @@ def _runtime_config(
             TestProfileConfig(
                 "unit",
                 (str(Path(sys.executable).resolve()), "-B", "-m", "unittest"),
-                timeout_seconds=30,
-            ),
+                timeout_seconds=30, profile_version="v1"),
         ),
         policy=PolicyConfig(patch_decision=patch_decision),
         system_prompt="You are KoawaAgent V2 in an interactive session.",

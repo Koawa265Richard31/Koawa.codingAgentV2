@@ -100,8 +100,7 @@ def _base_config(
             TestProfileConfig(
                 "unit",
                 (str(Path(sys.executable).resolve()), "-B"),
-                timeout_seconds=30,
-            ),
+                timeout_seconds=30, profile_version="v1"),
         ),
         policy=policy or PolicyConfig(
             principal_scopes=(

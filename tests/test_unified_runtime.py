@@ -78,8 +78,7 @@ def _runtime_config(
             TestProfileConfig(
                 "unit",
                 (str(Path(sys.executable).resolve()), "-B", "-m", "unittest"),
-                timeout_seconds=30,
-            ),
+                timeout_seconds=30, profile_version="v1"),
         ),
         policy=PolicyConfig(),
         system_prompt="I1 ownership-chain fixture.",

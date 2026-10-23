@@ -1,6 +1,6 @@
 # 首版实施契约：安全测试、回执、检索与外发
 
-更新：2026-09-23。状态：设计已选，契约待实现。配套[完整设计](../proposals/bounded-result-retrieval.md)与[工作包及验收](bounded-capture.md)。本文规定可以直接转成测试的行为，不规定 Python 类名。出现表述差异时，先按本文的明确行为核对完整设计，不能选择较宽松解释静默实施。
+更新：2026-09-23；2026-10-03 §2 配置装载面与 §4 Receipt 语义已按合成 profile 完成实现与验收（tests/test_release_contracts.py；发布/交付继承见 retrieval/ 与 recovery/delivery.py），仍待真实维护者配置绑定（§2 明文：部署值不由实现侧授权）。配套[完整设计](../proposals/bounded-result-retrieval.md)与[工作包及验收](bounded-capture.md)。本文规定可以直接转成测试的行为，不规定 Python 类名。出现表述差异时，先按本文的明确行为核对完整设计，不能选择较宽松解释静默实施。
 
 ## 1. 当前事实与实施边界
 
