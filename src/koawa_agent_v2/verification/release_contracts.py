@@ -41,6 +41,80 @@ from .output_policy import POLICY_VERSION
 
 RECEIPT_SCHEMA_VERSION = "result-receipt-v1"
 
+# producer_rules (contracts.md §2): entries of the form
+#   "field@producer"                      -> release field as produced
+#   "field@producer->transform"           -> release after transform
+# A diagnostic field is shown only when a rule names it AND names the trusted
+# producer that actually generated it; unlisted fields are never shown.
+TRUSTED_PRODUCERS = {
+    "runtime.safe_diagnostics": "structured execution diagnostics",
+    "runtime.workspace_excerpt": "bounded isolated-run excerpt",
+}
+KNOWN_PRODUCER_FIELDS = {
+    "runtime.safe_diagnostics": tuple(
+        "exit_code outcome duration_ms stderr_bytes stderr_truncated "
+        "stdout_bytes stdout_truncated timeout_seconds backend "
+        "immutable_image_id profile_digest allocation_id container_id "
+        "isolated_workspace".split()
+    ),
+    "runtime.workspace_excerpt": ("diagnostics_excerpt",),
+}
+KNOWN_TRANSFORMS = ("verbatim", "bounded")
+
+
+def parse_producer_rules(entries) -> tuple:
+    """Parse/validate §2 producer_rules entries; raise on unknown fields,
+    unknown producers or unknown transforms (fail-closed at LOAD time)."""
+
+    if entries is None:
+        return ()
+    if isinstance(entries, str) or not hasattr(entries, "__iter__"):
+        raise ProfileContractError("invalid_producer_rules")
+    parsed = []
+    for entry in entries:
+        if not isinstance(entry, str) or "@" not in entry:
+            raise ProfileContractError("invalid_producer_rules")
+        field, _, rest = entry.partition("@")
+        producer, _, transform = rest.partition("->")
+        field = field.strip()
+        producer = producer.strip()
+        transform = (transform or "verbatim").strip()
+        if not field or producer not in TRUSTED_PRODUCERS:
+            raise ProfileContractError("invalid_producer_rules")
+        if field not in KNOWN_PRODUCER_FIELDS.get(producer, ()):
+            raise ProfileContractError("invalid_producer_rules")
+        if transform not in KNOWN_TRANSFORMS:
+            raise ProfileContractError("invalid_producer_rules")
+        parsed.append((field, producer, transform))
+    if len({(f, p) for f, p, _ in parsed}) != len(parsed):
+        raise ProfileContractError("invalid_producer_rules")
+    return tuple(parsed)
+
+
+def apply_producer_rules(diagnostic_body: dict, rules) -> dict:
+    """§2 execution point: keep only fields whose rule names the trusted
+    producer that actually generated them; apply the rule's transform."""
+
+    if not rules:
+        return diagnostic_body
+    released = {}
+    for field, producer, transform in rules:
+        if field not in diagnostic_body:
+            continue
+        if producer not in KNOWN_PRODUCER_FIELDS or field not in (
+            KNOWN_PRODUCER_FIELDS[producer]
+        ):
+            continue
+        value = diagnostic_body[field]
+        if transform == "bounded" and isinstance(value, dict):
+            value = {
+                key: value[key]
+                for key in sorted(value)
+                if isinstance(value[key], (str, int, float, bool))
+            }
+        released[field] = value
+    return released
+
 
 class ReleaseMode(StrEnum):
     LOCAL_ONLY = "local_only"
@@ -93,10 +167,13 @@ class ProfileReleaseContract:
                 or any(not isinstance(item, str) or not item for item in self.release_fields)
             ):
                 raise ProfileContractError("invalid_release_fields")
-        if self.producer_rules is not None and not isinstance(
-            self.producer_rules, tuple
-        ):
-            raise ProfileContractError("invalid_producer_rules")
+        try:
+            parsed_rules = parse_producer_rules(self.producer_rules)
+        except ProfileContractError:
+            raise
+        except (TypeError, ValueError):
+            raise ProfileContractError("invalid_producer_rules") from None
+        object.__setattr__(self, "producer_rules", parsed_rules)
         if not isinstance(self.sensitive, bool):
             raise TypeError("sensitive must be bool")
 

@@ -272,5 +272,88 @@ class ReceiptSemanticsTest(unittest.TestCase):
         self.assertEqual("unknown", receipt["completeness"]["availability"])
 
 
+class ProducerRulesTest(unittest.TestCase):
+    """§2 producer_rules execution point: a field is shown only when a rule
+    names it AND names the trusted producer that generated it; unlisted
+    fields are never shown; malformed rules fail at load time."""
+
+    def test_rules_grant_exactly_the_named_fields(self) -> None:
+        receipt = _execute_receipt(
+            _contract(
+                release_mode=ReleaseMode.LIMITED,
+                producer_rules=(
+                    "exit_code@runtime.safe_diagnostics",
+                ),
+            )
+        )
+        self.assertEqual("restricted", receipt["diagnostic_status"])
+        self.assertEqual(["exit_code"], sorted(receipt["diagnostic"]))
+        self.assertNotIn("duration_ms", receipt["diagnostic"])
+
+    def test_excerpt_rule_grants_the_bounded_excerpt(self) -> None:
+        receipt = _execute_receipt(
+            _contract(
+                release_mode=ReleaseMode.LIMITED,
+                producer_rules=(
+                    "exit_code@runtime.safe_diagnostics",
+                    "diagnostics_excerpt@runtime.workspace_excerpt->bounded",
+                ),
+            )
+        )
+        self.assertIn(
+            "diagnostics_excerpt", receipt["diagnostic"], receipt["diagnostic"]
+        )
+
+    def test_wrong_producer_pairing_fails_at_load(self) -> None:
+        # A producer named for a field it never generates is rejected at
+        # LOAD time (fail-closed), stricter than a runtime hide.
+        with self.assertRaises(ProfileContractError):
+            _contract(
+                release_mode=ReleaseMode.LIMITED,
+                producer_rules=(
+                    "exit_code@runtime.workspace_excerpt",
+                ),
+            )
+
+    def test_runtime_filter_hides_unruled_fields(self) -> None:
+        # Runtime case: the excerpt exists in the body but has no rule, so
+        # it is hidden while the ruled field is shown.
+        receipt = _execute_receipt(
+            _contract(
+                release_mode=ReleaseMode.LIMITED,
+                producer_rules=("exit_code@runtime.safe_diagnostics",),
+            )
+        )
+        self.assertEqual(["exit_code"], sorted(receipt["diagnostic"]))
+        self.assertNotIn("diagnostics_excerpt", receipt["diagnostic"])
+
+    def test_no_rules_falls_back_to_release_fields(self) -> None:
+        receipt = _execute_receipt(
+            _contract(
+                release_mode=ReleaseMode.LIMITED,
+                release_fields=("exit_code",),
+            )
+        )
+        self.assertEqual(["exit_code"], sorted(receipt["diagnostic"]))
+
+    def test_malformed_rules_fail_at_load(self) -> None:
+        with self.assertRaises(ProfileContractError):
+            _contract(
+                release_mode=ReleaseMode.LIMITED,
+                producer_rules=("secret@runtime.safe_diagnostics",),
+            )
+        with self.assertRaises(ProfileContractError):
+            _contract(
+                release_mode=ReleaseMode.LIMITED,
+                producer_rules=("exit_code@someone-else",),
+            )
+        with self.assertRaises(ProfileContractError):
+            _contract(
+                release_mode=ReleaseMode.LIMITED,
+                producer_rules=("exit_code@runtime.safe_diagnostics->encrypt",),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
+
