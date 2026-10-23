@@ -267,18 +267,27 @@ class _VerificationTools:
             diagnostic["isolated_workspace"] = bool(
                 result.isolated_workspace
             )
-            if contract.release_fields is not None:
-                diagnostic = {
-                    key: value
-                    for key, value in diagnostic.items()
-                    if key in contract.release_fields
-                }
             if result.isolated_workspace:
                 from ..sandbox.test_workspace import extract_diagnostics
 
                 diagnostic["diagnostics_excerpt"] = extract_diagnostics(
                     result.stdout,
                 )
+            # §2 release_fields: unlisted fields are not shown.
+            if contract.release_fields is not None:
+                diagnostic = {
+                    key: value
+                    for key, value in diagnostic.items()
+                    if key in contract.release_fields
+                }
+            # §2 producer_rules execution point: when rules are configured,
+            # a field is shown only if a rule names it AND names the trusted
+            # producer that generated it; unlisted fields are never shown.
+            from .release_contracts import apply_producer_rules
+
+            diagnostic = apply_producer_rules(
+                diagnostic, contract.producer_rules,
+            )
         receipt = build_receipt(
             contract,
             execution_status=execution_status,

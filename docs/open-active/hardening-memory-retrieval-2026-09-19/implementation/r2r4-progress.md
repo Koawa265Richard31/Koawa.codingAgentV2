@@ -221,7 +221,8 @@ profile 的详细诊断适配器、合成秘密覆盖 env/文件/镜像/链接/�
   降级 limited）。关键组合逐条测试（K03 completed+failed、K04
   withheld+withheld+human_required、K05 not_completed+not_evaluated、
   completed 不蕴含 passed、uncertain→recover_first）。
-- 测试：`tests/test_release_contracts.py` 12 项（合成 profile 验收，
+- producer_rules 执行点（2026-10-03 补装载）：条目格式 `字段@生成者[->变换]`；可信生成者白名单（runtime.safe_diagnostics / runtime.workspace_excerpt）；配对错误装载期拒绝、未列字段一律隐藏。测试同文件 ProducerRulesTest 5 项。
+- 测试：`tests/test_release_contracts.py` 17 项（原 12 + 5）（合成 profile 验收，
   真实维护者配置绑定待部署值）。`tests/test_release_rules.py` 收缩为
   纯单元（registry 路径由 release_contracts 覆盖）。
 - 交付链继承：计划 B 交付内容=已发布投影（内嵌契约过滤后的 §4

@@ -75,18 +75,26 @@
 
 ## 未实现（如实清单，全部在案）
 
-1. **真实 profile 绑定**：上面 cfg.json 里的 refs（audience/…、admission/…）
-   目前是"已记录的引用"，还没有一个注册表把它们解析成具体规则——绑定真实
-   值是你的部署输入，实现侧不代授权。
+1. **真实 profile 绑定**：按维护者裁决（2026-10-03），真实 profile 留为
+   **cfg.json 中维护者可直接修改的配置参数**——改 release_mode/release_fields/
+   producer_rules 等字段即刻生效（下一次 profile 运行按新契约出回执），无
+   注册表机器、无需实现侧参与；profile_version 自增即可让旧契约失效。
 2. **audience 注册表**：audience_policy_ref 现在只作为 detailed 档的证明门
    （有 ref 才允许详细诊断）；"换接收方后按新规则重判"已由 policy_superseded
    覆盖一半，完整的按接收方可见性规则表未建。
 3. **budget 计量引擎**：budget_policy_ref 缺失会禁用对应能力，但"已用了多少
    披露额度"的累计计量未建（搜索/读取配额已有 scan_truncated 一路）。
+3a. **producer_rules（已装载执行点，2026-10-03 补）**：cfg.json 写法
+   `"producer_rules": ["exit_code@runtime.safe_diagnostics",
+   "diagnostics_excerpt@runtime.workspace_excerpt->bounded"]` ——字段@可信生成
+   者[->变换]。执行点在回执组装处：有规则时，字段只有在"规则点名 + 生成者
+   匹配"时才展示；生成者配错在**装载期即拒绝**（fail-closed）；未列字段一律
+   不展示。可信生成者白名单：runtime.safe_diagnostics（结构化执行诊断）、
+   runtime.workspace_excerpt（隔离运行有界摘录）。
 4. **MCP 回执**：本次只覆盖测试 profile；MCP 仍走白名单+元数据门（原状），
    per-server 释放契约未做。
-5. **producer_rules**：字段已装载，"可信生成者/转换规则"的执行点未建
-   （目前回执全部由运行时自身生成，尚无第三方 producer 可供规则约束）。
+5. **producer_rules**：✅ 已实现（见 3a）；第三方 producer 的扩展点保留在
+   TRUSTED_PRODUCERS 白名单，新增生成者属代码变更（不是配置）。
 
 ## 审查路径建议
 
