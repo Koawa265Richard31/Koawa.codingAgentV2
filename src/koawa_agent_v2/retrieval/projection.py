@@ -674,6 +674,53 @@ def scan_test_results(store, turn_id: UUID) -> TestFactScan:
     )
 
 
+def build_test_fact_payload(fact) -> dict:
+    """The exact published-payload document for one trusted test fact.
+
+    Shared by publish_test_fact and the delivery decision so the delivered
+    content and the stored projection are byte-equal by construction.
+    """
+
+    receipt = fact["receipt"]
+    diagnostics = test_diagnostics(receipt)
+    if not diagnostics and receipt.get("schema_version"):
+        diagnostics = {"receipt": receipt}
+    return build_published_payload(
+        source_kind=TEST_SOURCE_KIND,
+        call_id=fact["call_id"],
+        diagnostics=diagnostics,
+        body_ref={
+            "stream": "run-execution",
+            "turn_id": str(fact["turn_id"]),
+            "model_turn_id": str(fact["model_turn_id"]),
+            "source_content_sha256": fact["source_content_sha256"],
+        },
+    )
+
+
+def publish_test_fact(store, *, turn_id, thread_id, run_id, fact) -> str:
+    """Single publish path for one trusted test fact (R2/plan B).
+
+    Both the in-loop publisher and the terminal catch-up MUST build the
+    payload here: identical identity AND identical fingerprint, otherwise
+    the second writer is rejected as a conflict (spec v4).  A §4-shaped
+    receipt is embedded verbatim so the delivered projection carries the
+    contract-filtered receipt.
+    """
+
+    payload = build_test_fact_payload(fact)
+    body_ref = payload["body_ref"]
+    return ResultProjectionStore(store).publish(
+        turn_id=turn_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        call_id=fact["call_id"],
+        source_kind=TEST_SOURCE_KIND,
+        diagnostics=payload["diagnostics"],
+        body_ref=body_ref,
+    )
+
+
 def lookup_projection(
     store,
     turn_id: UUID,
@@ -1043,23 +1090,22 @@ def make_test_receipt_publisher(store, ledger, runtime) -> Callable:
                     "model_turn_id": str(result_message.call_ref.model_turn_id),
                     "call_id": call_id,
                 }
-            diagnostics = test_diagnostics(receipt)
-            payload = build_published_payload(
-                source_kind=TEST_SOURCE_KIND,
-                call_id=call_id,
-                diagnostics=diagnostics,
-                body_ref=body_ref,
-            )
+            fact = {
+                "call_id": call_id,
+                "model_turn_id": str(result_message.call_ref.model_turn_id),
+                "turn_id": str(turn_id),
+                "receipt": receipt,
+                "source_content_sha256": body_ref["source_content_sha256"],
+            }
+            payload = build_test_fact_payload(fact)
             turn = runtime.get_turn(turn_id)
             try:
-                projection_store.publish(
+                publish_test_fact(
+                    store,
                     turn_id=turn_id,
                     thread_id=turn.thread_id,
                     run_id=execution_context.run_id,
-                    call_id=call_id,
-                    source_kind=TEST_SOURCE_KIND,
-                    diagnostics=diagnostics,
-                    body_ref=body_ref,
+                    fact=fact,
                 )
             except Exception as publish_error:
                 try:
