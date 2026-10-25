@@ -53,6 +53,10 @@ from ..control.event_store import (
     WrongExpectedVersion,
 )
 from ..verification.output_policy import BODY_VISIBILITY, POLICY_VERSION
+from ..verification.release_contracts import (
+    ReleaseMode,
+    effective_release_mode,
+)
 
 PROJECTION_PUBLISHED_EVENT = "result.projection-published.v1"
 PROJECTION_UNAVAILABLE_EVENT = "result.projection-unavailable.v1"
@@ -76,6 +80,10 @@ PLACEHOLDER_MESSAGE = (
 # Wire-level stream caps were considered and dropped: the event quota is the
 # enforced scan-work bound (a dead constant would misstate the guarantee).
 READ_SCAN_EVENT_QUOTA = 2000
+# N1 search quotas: per-call scan work and response size are bounded
+# separately; pagination continues from an opaque cursor bound to the query.
+SEARCH_SCAN_EVENT_QUOTA = 2000
+SEARCH_MAX_HITS = 20
 
 # read_stream serves ascending pages from an exclusive cursor; walking to a
 # short page is the protocol-level way to observe the true head (R2: scans
@@ -1203,3 +1211,215 @@ def make_test_receipt_publisher(store, ledger, runtime) -> Callable:
             }
 
     return publisher
+
+
+# ---------------------------------------------------------------------------
+# N1: thread-scoped search over published projections (bounded-result WP-E).
+# ---------------------------------------------------------------------------
+
+
+def _thread_turn_ids(store, thread_id: UUID) -> list[UUID]:
+    """Turn ids attached to one thread, in attach order (thread stream)."""
+
+    from ..control.models import THREAD_TURN_ATTACHED
+
+    ids: list[UUID] = []
+    cursor = -1
+    while True:
+        page = store.read_stream(
+            StreamId("thread", thread_id), after_version=cursor, limit=_PAGE_SIZE
+        )
+        if not page:
+            return ids
+        for event in page:
+            if event.event_type == THREAD_TURN_ATTACHED:
+                ids.append(UUID(str(event.payload.get("turn_id"))))
+        cursor = page[-1].stream_version
+        if len(page) < _PAGE_SIZE:
+            return ids
+
+
+def encode_search_cursor(turn_index: int, stream_version: int) -> str:
+    """Opaque pagination cursor: base64 of its canonical JSON document."""
+
+    import base64
+
+    document = {"ti": turn_index, "sv": stream_version}
+    return base64.urlsafe_b64encode(
+        canonical_json_bytes_v1(document, path="search-cursor")
+    ).decode("ascii")
+
+
+def decode_search_cursor(cursor: str) -> dict:
+    import base64
+
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii"))
+        document = json.loads(raw.decode("utf-8"))
+    except (ValueError, TypeError):
+        raise EventStoreError("invalid_search_cursor") from None
+    if (
+        not isinstance(document, dict)
+        or not isinstance(document.get("ti"), int)
+        or not isinstance(document.get("sv"), int)
+        or document["ti"] < 0
+        or document["sv"] < 0
+    ):
+        raise EventStoreError("invalid_search_cursor")
+    return document
+
+
+def _revoked_identities(store, turn_id: UUID) -> set[str]:
+    revoked: set[str] = set()
+    cursor = -1
+    while True:
+        page = store.read_stream(
+            StreamId(PROJECTION_STREAM_CATEGORY, turn_id),
+            after_version=cursor,
+            limit=_PAGE_SIZE,
+        )
+        if not page:
+            return revoked
+        for event in page:
+            if event.event_type in (
+                PROJECTION_REVOKED_EVENT,
+                PROJECTION_EXPIRED_EVENT,
+            ):
+                payload = dict(event.payload)
+                revoked.add(
+                    str(payload.get("model_turn_id"))
+                    + ":"
+                    + str(payload.get("call_id"))
+                )
+        cursor = page[-1].stream_version
+        if len(page) < _PAGE_SIZE:
+            return revoked
+
+
+def _hit_profile_id(payload: Mapping) -> str | None:
+    """The profile identity of one projection payload (either generation)."""
+
+    diagnostics = payload.get("diagnostics") or {}
+    if isinstance(diagnostics, Mapping):
+        receipt = diagnostics.get("receipt")
+        if isinstance(receipt, Mapping):
+            applicability = receipt.get("applicability")
+            if isinstance(applicability, Mapping):
+                value = applicability.get("profile_id")
+                if value:
+                    return str(value)
+        value = diagnostics.get("profile_id")
+        if value:
+            return str(value)
+    return None
+
+
+def search_projections(
+    store,
+    *,
+    thread_id: UUID,
+    profile_id: str | None = None,
+    cursor: str | None = None,
+    contract_resolver=None,
+) -> dict:
+    """N1 (WP-E): search published projections scoped to the CURRENT thread.
+
+    Per-profile retrieval semantics (ruling 2026-10-03): a hit's release
+    granularity follows the profile's CURRENT contract via
+    ``contract_resolver(profile_id)`` - detailed contracts receive the full
+    projection (diagnostics included); limited/aggregate/local_only receive
+    metadata only (identity, availability, completeness).  Revoked, expired
+    and policy-superseded facts are refused like the read chain; they never
+    appear as hits.
+
+    Pagination: fixed stream_version order per turn, turns in attach order;
+    the opaque cursor binds (turn index, version) so pages never mix or
+    repeat versions.  Scan work and response size are separately quotaed and
+    reported (``truncated``) - a short page is never a definitive "no more
+    results".
+    """
+
+    start_ti, start_sv = 0, -1
+    if cursor is not None:
+        decoded = decode_search_cursor(cursor)
+        start_ti, start_sv = decoded["ti"], decoded["sv"]
+
+    turn_ids = _thread_turn_ids(store, thread_id)
+    hits: list[dict] = []
+    scanned = 0
+    truncated = False
+    watermark_ti = start_ti
+    watermark_sv = start_sv
+    for ti in range(start_ti, len(turn_ids)):
+        turn_id = turn_ids[ti]
+        min_version = start_sv if ti == start_ti else -1
+        for event in _projection_events(store, turn_id):
+            scanned += 1
+            if scanned > SEARCH_SCAN_EVENT_QUOTA or len(hits) >= SEARCH_MAX_HITS:
+                # Quota hit BEFORE advancing the watermark: the cursor stays
+                # at the last PROCESSED event, so the next page re-reads this
+                # event instead of skipping it.
+                truncated = True
+                break
+            watermark_ti, watermark_sv = ti, event.stream_version
+            if event.stream_version <= min_version:
+                continue
+            payload = dict(event.payload)
+            if event.event_type != PROJECTION_PUBLISHED_EVENT:
+                continue
+            hit_call = str(payload.get("call_id"))
+            ref = payload.get("body_ref") or {}
+            model_turn = str(ref.get("model_turn_id"))
+            if f"{model_turn}:{hit_call}" in _revoked_identities(store, turn_id):
+                continue
+            hit_profile = _hit_profile_id(payload)
+            if profile_id is not None and hit_profile != profile_id:
+                continue
+            if payload.get("policy_version") != POLICY_VERSION:
+                continue
+            detailed = False
+            if contract_resolver is not None and hit_profile:
+                try:
+                    contract = contract_resolver(hit_profile)
+                except Exception:
+                    contract = None
+                detailed = bool(
+                    contract is not None
+                    and contract.release_mode is ReleaseMode.DETAILED
+                    and effective_release_mode(
+                        contract.release_mode, contract
+                    )
+                    is ReleaseMode.DETAILED
+                )
+            receipt_doc = (payload.get("diagnostics") or {}).get("receipt") or {}
+            hit = {
+                "turn_id": str(turn_id),
+                "call_id": hit_call,
+                "model_turn_id": model_turn,
+                "source_content_sha256": str(ref.get("source_content_sha256")),
+                "applicability": _plain_json(
+                    receipt_doc.get("applicability", {})
+                )
+                or {"profile_id": hit_profile},
+                "completeness": _plain_json(receipt_doc.get("completeness", {})),
+                "granularity": "full" if detailed else "metadata",
+            }
+            if detailed:
+                hit["projection"] = _plain_json(payload)
+            hits.append(hit)
+        if truncated:
+            break
+    result = {
+        "hits": hits,
+        "watermark": {
+            "turn_index": watermark_ti,
+            "stream_version": watermark_sv,
+        },
+        "truncated": truncated,
+        "scanned_events": scanned,
+    }
+    if truncated:
+        result["next_cursor"] = encode_search_cursor(watermark_ti, watermark_sv)
+    else:
+        result["next_cursor"] = None
+    return result
