@@ -711,6 +711,11 @@ class PolicyConfig:
         "sandbox.test",
         "mcp.use",
     )
+    # Policy gate: paths the patch tool must never modify.  Patterns are
+    # exact paths, directory prefixes ending in "/", or basename prefixes
+    # (e.g. "test_").  Removing the opportunity is stronger than auditing
+    # a diff afterwards: the edit is refused at the tool boundary.
+    protected_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -728,6 +733,23 @@ class PolicyConfig:
             raise RuntimeConfigError("invalid_principal_scopes")
         object.__setattr__(
             self, "principal_scopes", tuple(dict.fromkeys(self.principal_scopes))
+        )
+        if not isinstance(self.protected_paths, tuple):
+            raise RuntimeConfigError("invalid_protected_paths")
+        for pattern in self.protected_paths:
+            if (
+                not isinstance(pattern, str)
+                or not pattern
+                or pattern.startswith("/")
+                or "\\" in pattern
+                or ".." in pattern.split("/")
+                or len(pattern) > 256
+            ):
+                raise RuntimeConfigError("invalid_protected_paths")
+        object.__setattr__(
+            self,
+            "protected_paths",
+            tuple(dict.fromkeys(self.protected_paths)),
         )
 
     def __repr__(self) -> str:
@@ -754,6 +776,11 @@ class RuntimeConfig:
     lease_seconds: int = 30
     model_rounds: int = 32
     max_tool_calls: int = 128
+    # Verification budget: how many test-profile runs one turn may reserve.
+    # None = derived from the required-profile count (min(32, max(4, 4n))).
+    # Hard real-world issues need more repair cycles than the derivation
+    # grants; the knob stays explicit rather than silently raising limits.
+    verification_max_test_runs: int | None = None
     # D16 interactive session: bounded conversation history projection.
     history_max_turns: int = 16
     history_max_chars: int = 32_000
@@ -1031,6 +1058,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         "lease_seconds",
         "model_rounds",
         "max_tool_calls",
+        "verification_max_test_runs",
         "history_max_turns",
         "history_max_chars",
         "compact_min_turns",
@@ -1105,6 +1133,13 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     lease_seconds = document.get("lease_seconds", 30)
     model_rounds = document.get("model_rounds", 32)
     max_tool_calls = document.get("max_tool_calls", 128)
+    raw_verification_runs = document.get("verification_max_test_runs")
+    if raw_verification_runs is not None and (
+        not isinstance(raw_verification_runs, int)
+        or isinstance(raw_verification_runs, bool)
+        or not 1 <= raw_verification_runs <= 64
+    ):
+        raise RuntimeConfigError("invalid_verification_max_test_runs")
     history_max_turns = document.get("history_max_turns", 16)
     history_max_chars = document.get("history_max_chars", 32_000)
     compact_min_turns = document.get("compact_min_turns", 4)
@@ -1135,6 +1170,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         lease_seconds=lease_seconds,
         model_rounds=model_rounds,
         max_tool_calls=max_tool_calls,
+        verification_max_test_runs=raw_verification_runs,
         history_max_turns=history_max_turns,
         history_max_chars=history_max_chars,
         compact_min_turns=compact_min_turns,
@@ -1674,6 +1710,7 @@ def _parse_policy(value: Any) -> PolicyConfig:
         "patch_decision",
         "test_decision",
         "principal_scopes",
+        "protected_paths",
     }
     _reject_unknown(value, allowed, "invalid_policy_config")
     try:
@@ -1693,6 +1730,7 @@ def _parse_policy(value: Any) -> PolicyConfig:
                     ),
                 )
             ),
+            protected_paths=tuple(value.get("protected_paths", ())),
         )
     except RuntimeConfigError:
         raise

@@ -291,9 +291,11 @@ class ProducerRulesTest(unittest.TestCase):
         self.assertNotIn("duration_ms", receipt["diagnostic"])
 
     def test_excerpt_rule_grants_the_bounded_excerpt(self) -> None:
+        # The bounded failure excerpt is a DETAILED-only disclosure: a real
+        # failing test is undebuggable from an exit code alone.
         receipt = _execute_receipt(
             _contract(
-                release_mode=ReleaseMode.LIMITED,
+                release_mode=ReleaseMode.DETAILED,
                 producer_rules=(
                     "exit_code@runtime.safe_diagnostics",
                     "diagnostics_excerpt@runtime.workspace_excerpt->bounded",
@@ -303,6 +305,17 @@ class ProducerRulesTest(unittest.TestCase):
         self.assertIn(
             "diagnostics_excerpt", receipt["diagnostic"], receipt["diagnostic"]
         )
+
+    def test_limited_never_carries_the_excerpt(self) -> None:
+        receipt = _execute_receipt(
+            _contract(
+                release_mode=ReleaseMode.LIMITED,
+                producer_rules=(
+                    "diagnostics_excerpt@runtime.workspace_excerpt->bounded",
+                ),
+            )
+        )
+        self.assertNotIn("diagnostics_excerpt", receipt["diagnostic"])
 
     def test_wrong_producer_pairing_fails_at_load(self) -> None:
         # A producer named for a field it never generates is rejected at

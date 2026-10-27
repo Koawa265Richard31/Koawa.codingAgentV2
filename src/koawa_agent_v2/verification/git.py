@@ -140,6 +140,13 @@ class GitFacade:
         # 不得信任它：逐个 baseline 条目用 git hash-object 与 ls-files -s 的索引
         # blob 比对，内容一致即视为干净、不保护。未跟踪路径无 blob，一律保护。
         self._protected_paths = self._content_verified_protection(self._baseline)
+        # F2 parity (real-issue testing 2026-10-04): the agent-change
+        # subtraction must use the SAME content-verified truth as protection.
+        # Raw status metadata can report a phantom " M" (CRLF/stat cache) on
+        # a file whose content equals the index blob; excluding it here would
+        # cancel the agent's real edit and make finalize report
+        # no_agent_changes although the agent patched the file.
+        self._baseline_paths = self._protected_paths
 
     @property
     def baseline(self) -> GitStatusSnapshot:
@@ -294,6 +301,14 @@ class GitFacade:
             "-c", "diff.external=",
             "-c", "interactive.diffFilter=",
             "-c", "submodule.recurse=false",
+            # Line-ending normalization (real-issue testing 2026-10-04): the
+            # hermetic environment has no global config, so core.autocrlf
+            # defaults to false and a Windows checkout of an LF repository
+            # (worktree CRLF) reports EVERY line as changed - whole-file
+            # diffs that exhaust the context and phantom "dirty" entries.
+            # Normalize like the platform default so diff/hash compare
+            # content, not line-ending convention.
+            "-c", "core.autocrlf=true",
             "-C", str(self._root),
         )
 

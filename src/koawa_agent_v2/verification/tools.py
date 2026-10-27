@@ -317,12 +317,25 @@ class _VerificationTools:
             diagnostic["isolated_workspace"] = bool(
                 result.isolated_workspace
             )
-            if result.isolated_workspace:
+            # detailed (effective, i.e. with audience+environment proofs)
+            # discloses a BOUNDED failure excerpt - assertion lines and the
+            # head of the first traceback only.  Without it a real failing
+            # test is undebuggable (exit code alone cannot locate the fault);
+            # the full body still never leaves the operator side.
+            from .release_contracts import (
+                ReleaseMode as _ReleaseMode,
+                effective_release_mode as _effective,
+            )
+
+            if (
+                _effective(contract.release_mode, contract)
+                is _ReleaseMode.DETAILED
+                and verdict in ("failed", "unknown")
+            ):
                 from ..sandbox.test_workspace import extract_diagnostics
 
-                diagnostic["diagnostics_excerpt"] = extract_diagnostics(
-                    result.stdout,
-                )
+                combined = (result.stdout or "") + "\n" + (result.stderr or "")
+                diagnostic["diagnostics_excerpt"] = extract_diagnostics(combined)
             # §2 release_fields: unlisted fields are not shown.
             if contract.release_fields is not None:
                 diagnostic = {
@@ -379,6 +392,7 @@ def build_verified_coding_tool_registry(
     git_facade: GitFacade | None = None,
     plan_board: PlanBoard | None = None,
     post_build_registrars: Sequence = (),
+    protected_patterns: tuple[str, ...] = (),
 ) -> CodingToolRegistry:
     """构建 D3 read/search + D4 patch + D5 test/git/finalize 的完整目录。"""
     repository_limits = repository_limits or RepositoryToolLimits()
@@ -424,6 +438,7 @@ def build_verified_coding_tool_registry(
             limits=patch_limits,
             fault_injector=fault_injector,
             protected_paths=git.protected_paths,
+            protected_patterns=protected_patterns,
             observer=verification.record_patch,
         )
         _register_verification_tools(
