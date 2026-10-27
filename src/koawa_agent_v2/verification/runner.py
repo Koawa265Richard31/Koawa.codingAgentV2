@@ -197,6 +197,10 @@ class CommandResult:
     allocation_id: UUID | None = None
     container_id: str | None = None
     isolated_workspace: bool = False
+    # Frozen-input provenance: True when a manifest input changed between the
+    # frozen snapshot and the end of the run.  Such evidence can never prove
+    # a fixed candidate passed.
+    inputs_changed: bool = False
 
     @property
     def passed(self) -> bool:
@@ -344,6 +348,7 @@ class TrustedCommandRunner:
         self.validate_profile(profile_id)
         profile = self._profiles[profile_id]
         isolated = False
+        inputs_changed = False
         if profile.workspace_manifest and not profile.scratch_policy_ref:
             # §2 scratch_policy_ref missing -> scratch-requiring runs do not
             # start (the isolated workspace's private scratch is exactly that).
@@ -371,6 +376,11 @@ class TrustedCommandRunner:
                     max_stderr_bytes=profile.max_stderr_bytes,
                     environment=environment,
                     progress_guard=progress_guard,
+                )
+                from ..sandbox.test_workspace import inputs_unchanged
+
+                inputs_changed = not inputs_unchanged(
+                    self._root, workspace.snapshot,
                 )
             isolated = True
         else:
@@ -405,6 +415,7 @@ class TrustedCommandRunner:
             (Path(profile.argv[0]).name, *profile.argv[1:]),
             float(profile.timeout_seconds),
             isolated_workspace=isolated,
+            inputs_changed=inputs_changed,
         )
 
 

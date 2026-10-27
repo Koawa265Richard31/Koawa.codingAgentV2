@@ -174,6 +174,13 @@ class VerificationLedger:
                     raise VerificationError(
                         "required_test_profile_stale", profile_id=profile_id
                     )
+                if getattr(latest.result, "inputs_changed", False):
+                    # Frozen-input provenance: an input changed during the
+                    # run, so this evidence cannot prove the fixed candidate
+                    # passed (design: unstable evidence is not used).
+                    raise VerificationError(
+                        "required_test_inputs_changed", profile_id=profile_id
+                    )
                 if not latest.result.passed:
                     raise VerificationError(
                         "required_test_profile_not_passing", profile_id=profile_id
