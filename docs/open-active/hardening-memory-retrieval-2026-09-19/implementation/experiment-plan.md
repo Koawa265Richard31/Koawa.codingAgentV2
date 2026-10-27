@@ -23,6 +23,32 @@
   （检索工具未归类 READ → denied_by_default，F15 同类；chat 路径缺终端
   投影发布），修复后 turn2 检索命中 turn1 投影、撤销后 turn3 返回空。
 - **S5 长任务画像**：⏸ 未执行（场景构造最重，排在 S1–S4 验收确认后）。
+- **S5 长任务画像（2026-10-04，deepseek-chat，12 轮级任务）**：✅ 完成。
+  夹具：`calc` 四模块 4 个真 bug（add/mul 运算符互换、title_case 用 lower、
+  money 精度 .1f），13 项测试 7 项初始失败。任务：全修 + 复测至绿 + finalize。
+  两档预算各跑一次，形成 WP-H 数据：
+
+  | 观测 | 紧预算（soft 6k / hard 20k 字符） | 长档预算（soft 120k / hard 176k 字符） |
+  | --- | --- | --- |
+  | 终态 | context_capacity_exhausted（第 12 轮，诚实 fail-closed） | completed（11 轮） |
+  | 压缩 | 7 次（epoch 2–8），仍跟不上增长 | 0 次（未触软限） |
+  | 输入 tokens | 20,540 → 50,380（每轮 +2.5k） | 2,723 → 9,956（每轮 +0.7k），累计 72,729 |
+  | 输出 tokens | — | 2,598（累计） |
+  | 缓存命中 | — | 66,688 / 72,729 = **91.7%** |
+  | 结果 | 修复未完成（丢在 fail-closed） | 4 bug 全修、13/13 测试绿、finalize 通过 |
+
+  工具分布（长档跑）：read_file 7、run_test_profile 5、list_files 2、
+  apply_patch 2、git_diff 1、git_status 1、finalize_task 1（共 19 次）。
+
+  **WP-H 结论（初值，待多模型复测）**：
+  - 该任务形状的上下文增长约 **+0.7k tokens/轮**；稳定前缀缓存命中
+    **91.7%**，未命中输入仅 6,041 tokens —— 成本模型应以缓存价为主。
+  - 压缩在**紧预算下无法维持**（每轮新增 > 压缩回收），诚实失败正确；
+    预算选择应满足“任务预期轮数 × 每轮增量 + 余量”而不是压到刚好。
+  - 字符门 176k ↔ 实测峰值 9,956 tokens（≈3.5 chars/token），与 R4 区间一致。
+  - 长档可用性反例：**capacity fail-closed 不丢已完成工作**（补丁仍在
+    工作区），但 turn 终态为 failed，需 resume 才能继续 —— 记账。
+
 - **S2 复跑（withheld-retest 硬闸，A+C 裁决）**：✅ 生效——同代重测被
   拒绝 2 次（固定指引回执、未执行、零诊断正文）；3 次无效 profile 探测
   直接报错未执行；模型 M16 诚实停止并给出整合报告（"报告而不是掩盖"）。
