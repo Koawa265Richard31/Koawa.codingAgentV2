@@ -159,6 +159,9 @@ class SandboxCommandProfile:
     # R3/contracts §2: per-profile release contract (mirrors CommandProfile).
     release_fields: tuple[str, ...] | None = None
     sensitive: bool = False
+    # WP-C: fixed input manifest - non-empty runs in the isolated manifest
+    # workspace (only the candidate + private scratch are mounted).
+    workspace_manifest: tuple[str, ...] = ()
     profile_version: str = ""
     audience_policy_ref: str | None = None
     input_policy_ref: str | None = None
