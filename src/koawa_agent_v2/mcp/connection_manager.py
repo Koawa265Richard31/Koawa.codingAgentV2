@@ -654,6 +654,25 @@ class McpSession:
             pass
 
 
+_RELEASE_RULES: dict = {}
+
+
+def configure_release_rules(rules) -> None:
+    """Install the operator-side per-tool release rules (assembly calls this).
+
+    ``rules`` is a sequence of ``McpReleaseRule``.  Absent configuration
+    leaves every call at the fixed metadata-only envelope.
+    """
+
+    _RELEASE_RULES.clear()
+    for rule in rules or ():
+        _RELEASE_RULES[rule.key] = rule
+
+
+def _mcp_release_rule(binding: McpBinding):
+    return _RELEASE_RULES.get((binding.server_id, binding.tool_name))
+
+
 def bind_tool_handler(session: McpSession, binding: McpBinding):
     """Build a D3 typed handler that routes one binding to the live session."""
 
@@ -676,15 +695,18 @@ def bind_tool_handler(session: McpSession, binding: McpBinding):
         # server/tool pair.  ``untrusted_mcp_result`` keeps marking every
         # byte of MCP-derived data wherever it flows downstream.
         redacted = redact_text(result.content)
-        envelope = {
-            "untrusted_mcp_result": True,
-            "server_id": binding.server_id,
-            "tool": binding.tool_name,
-            "result_visibility": MCP_BODY_VISIBILITY,
-            "output_policy": MCP_POLICY_VERSION,
-            "body_bytes": len(redacted),
-            "result": None,
-        }
+        # A2 (WP-C §8): the fixed metadata envelope, optionally widened by an
+        # explicit per server/tool release rule (bounded excerpt requires an
+        # audience contract).  No rule keeps exactly the WP-1 behaviour.
+        from .release_rules import build_envelope
+
+        envelope = build_envelope(
+            server_id=binding.server_id,
+            tool_name=binding.tool_name,
+            redacted_body=redacted,
+            is_error=bool(result.is_error),
+            rule=_mcp_release_rule(binding),
+        )
         content = json.dumps(
             envelope,
             ensure_ascii=False,
