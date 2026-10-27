@@ -94,6 +94,11 @@ class _VerificationTools:
         # runners without the accessor (non-contract test doubles) keep the
         # legacy safe-diagnostic receipt shape.
         self._release_contracts = release_contracts
+        # Withheld-retest gate state: (run_id, profile_id) -> generation at
+        # which the last receipt was WITHHELD.  A re-test at the same
+        # generation (no code change since) is probe retesting and is
+        # refused; a patch bumps the generation and reopens the gate.
+        self._withheld_marks: dict = {}
 
     def run_test_profile(
         self,
@@ -104,13 +109,58 @@ class _VerificationTools:
         try:
             self._runner.validate_profile(arguments.profile_id)
             generation = self._verification.reserve_test(context.run_id)
+            if self._release_contracts is not None:
+                mark = self._withheld_marks.get(
+                    (context.run_id, arguments.profile_id),
+                )
+                if mark is not None and mark == generation:
+                    # contracts.md §4: withheld results do not count as
+                    # evidence; re-running without a code change is probe
+                    # retesting and is refused with the fixed guidance.
+                    return ToolExecutionResult(
+                        json.dumps(
+                            {
+                                "profile_id": arguments.profile_id,
+                                "test_output_policy": output_policy.POLICY_VERSION,
+                                "availability": "result_withheld",
+                                "human_required": True,
+                                "retest_blocked": True,
+                                "message": (
+                                    "该 profile 的结果已扣且代码未变更，重测被拒绝。"
+                                    "请整合已知信息给出最终报告，或修改代码后再测。"
+                                ),
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    )
             result = self._runner.run(
                 arguments.profile_id,
                 progress_guard=context.check_progress,
                 execution_id=context.execution_id,
             )
             self._verification.record_test(context.run_id, generation, result)
-            return ToolExecutionResult(self._command_json(result))
+            receipt_text = self._command_json(result)
+            # Withheld-retest gate bookkeeping: mark the generation when the
+            # receipt was withheld; clear it once a receipt is disclosable
+            # (a code change reopens the normal repair loop).
+            if self._release_contracts is not None:
+                try:
+                    receipt = json.loads(receipt_text)
+                except (TypeError, ValueError):
+                    receipt = None
+                if (
+                    isinstance(receipt, dict)
+                    and receipt.get("execution_status") == "withheld"
+                ):
+                    self._withheld_marks[
+                        (context.run_id, arguments.profile_id)
+                    ] = generation
+                else:
+                    self._withheld_marks.pop(
+                        (context.run_id, arguments.profile_id), None
+                    )
+            return ToolExecutionResult(receipt_text)
         except (CommandRunnerError, VerificationError) as error:
             return tool_error_result(error.code)
 
