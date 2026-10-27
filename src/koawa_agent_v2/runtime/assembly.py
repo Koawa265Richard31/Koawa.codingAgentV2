@@ -114,6 +114,11 @@ READ_TOOL_NAMES = (
     # a pure read.
     "update_plan",
     "repo_map",
+    # N1 (WP-E): bounded result-retrieval reads — thread-scoped, three-valued
+    # availability, per-profile granularity via release contracts.  Same
+    # registered-but-dead failure class as F15 if omitted here.
+    "read_result_projection",
+    "search_result_projections",
 )
 WRITE_TOOL_NAMES = ("apply_patch",)
 TEST_TOOL_NAMES = ("run_test_profile",)
