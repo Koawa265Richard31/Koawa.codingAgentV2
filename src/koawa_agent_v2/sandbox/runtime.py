@@ -1150,6 +1150,12 @@ class DockerCommandRunner:
         execution_id: UUID,
         progress_guard: Callable[[], None] | None,
     ) -> CommandResult:
+        if profile.workspace_manifest and not profile.scratch_policy_ref:
+            # §2: scratch_policy_ref missing -> a scratch-requiring isolated
+            # run does not start.
+            raise SandboxError("scratch_policy_required")
+        if profile.workspace_manifest:
+            return self._run_manifest_profile(profile, execution_id, progress_guard)
         root, digest = resolve_workspace_mount(
             self._root,
             max_entries=self._limits.max_workspace_entries,
@@ -1311,11 +1317,109 @@ class DockerCommandRunner:
         )
         return result
 
+    def _run_manifest_profile(
+        self,
+        profile: SandboxCommandProfile,
+        execution_id: UUID,
+        progress_guard: Callable[[], None] | None,
+    ) -> CommandResult:
+        """B1: run one profile inside the isolated manifest workspace.
+
+        The host repository is never mounted: the container sees only the
+        manifest-derived candidate copy (read-only) and a private scratch
+        directory.  Input provenance is re-verified after the run.
+        """
+
+        from ..sandbox.test_workspace import prepare_test_workspace
+
+        with prepare_test_workspace(
+            self._root, profile.workspace_manifest, label=profile.profile_id,
+        ) as workspace:
+            deadline = datetime.now(timezone.utc) + timedelta(
+                seconds=60.0
+                + profile.timeout_seconds
+                + self._limits.cleanup_grace_seconds
+            )
+            allocation = self._store.intent(
+                owner_execution_id=execution_id,
+                image_id=self._image_id,
+                mount_digest=getattr(workspace, "base_digest", self._mount_digest),
+                profile_digest=profile.profile_digest,
+                command_digest=profile.command_digest,
+                deadline_at=deadline,
+            )
+            created = _run_cli(
+                self._docker,
+                self._create_arguments(profile, allocation, workspace=workspace),
+                timeout_seconds=30.0,
+            )
+            if created.returncode != 0 or created.timed_out or not created.stdout.strip():
+                return self._result(
+                    profile,
+                    allocation,
+                    outcome=CommandOutcome.START_FAILED,
+                    exit_code=None,
+                    stdout=created.stdout,
+                    stderr=created.stderr,
+                    stdout_bytes=len(created.stdout),
+                    stderr_bytes=len(created.stderr),
+                    duration_ms=0,
+                )
+            container_id = _require_container_id(
+                created.stdout.decode("ascii", "strict").strip()
+            )
+            try:
+                attached = _attach_container(
+                    self._docker,
+                    container_id,
+                    timeout_seconds=profile.timeout_seconds,
+                    max_stdout_bytes=profile.max_stdout_bytes,
+                    max_stderr_bytes=profile.max_stderr_bytes,
+                    progress_guard=progress_guard,
+                )
+            finally:
+                self._reaper.reap(
+                    allocation_id=allocation.allocation_id, force=True,
+                )
+            from ..sandbox.test_workspace import inputs_unchanged
+
+            inputs_changed = not inputs_unchanged(self._root, workspace.snapshot)
+        outcome = (
+            CommandOutcome.PASSED
+            if attached.returncode == 0
+            else CommandOutcome.FAILED
+        )
+        result = self._result(
+            profile,
+            allocation,
+            outcome=outcome,
+            exit_code=attached.returncode,
+            stdout=attached.stdout,
+            stderr=attached.stderr,
+            stdout_bytes=attached.stdout_bytes,
+            stderr_bytes=attached.stderr_bytes,
+            duration_ms=attached.duration_ms,
+        )
+        from dataclasses import replace as _replace
+
+        return _replace(
+            result, isolated_workspace=True, inputs_changed=inputs_changed,
+        )
+
     def _create_arguments(
         self,
         profile: SandboxCommandProfile,
         allocation: SandboxAllocation,
+        *,
+        workspace: object | None = None,
     ) -> tuple[str, ...]:
+        """Container create argv.
+
+        ``workspace`` (a PreparedTestWorkspace) switches to the isolated
+        manifest mode: only the materialized candidate is mounted at
+        /workspace (read-only) plus its private scratch at /scratch (rw) -
+        the host repository itself is never mounted.
+        """
         values = [
             "container",
             "create",
@@ -1346,7 +1450,15 @@ class DockerCommandRunner:
                 f"size={self._limits.tmpfs_bytes},mode=1777"
             ),
             "--mount",
-            f"type=bind,src={self._root},dst=/workspace,readonly",
+            (
+                f"type=bind,src={self._root},dst=/workspace,readonly"
+                if workspace is None
+                else (
+                    "type=bind,src={},dst=/workspace,readonly".format(
+                        getattr(workspace, "candidate_dir")
+                    )
+                )
+            ),
             "--workdir",
             profile.working_directory,
             "--init",
@@ -1355,6 +1467,17 @@ class DockerCommandRunner:
         ]
         for name, value in allocation.expected_labels:
             values.extend(("--label", f"{name}={value}"))
+        if workspace is not None:
+            values.extend(
+                (
+                    "--mount",
+                    "type=bind,src={},dst=/scratch".format(
+                        getattr(workspace, "scratch_dir")
+                    ),
+                    "--env",
+                    "KOAWA_TEST_SCRATCH=/scratch",
+                )
+            )
         for name, value in profile.environment:
             values.extend(("--env", f"{name}={value}"))
         values.extend(

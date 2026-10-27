@@ -23,7 +23,7 @@ import shutil
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator, Mapping, Sequence
 
 MAX_MANIFEST_ENTRIES = 64
 MAX_ENTRY_BYTES = 2 * 1024 * 1024
@@ -64,6 +64,17 @@ def validate_manifest(root: Path, manifest: Sequence[str]) -> tuple[Path, ...]:
         source = root / candidate
         if source.is_symlink() or not source.is_file():
             raise WorkspaceError("workspace_manifest_source_invalid")
+        # Link escape: any path component may be a symlink/junction that
+        # leaves the source root even when the leaf is a regular file.
+        try:
+            resolved_source = source.resolve(strict=True)
+            resolved_root = root.resolve(strict=True)
+        except OSError:
+            raise WorkspaceError("workspace_manifest_source_invalid") from None
+        if resolved_source != resolved_root and (
+            resolved_root not in resolved_source.parents
+        ):
+            raise WorkspaceError("workspace_manifest_escape")
         size = source.stat().st_size
         if size > MAX_ENTRY_BYTES:
             raise WorkspaceError("workspace_manifest_entry_too_large")
@@ -74,14 +85,55 @@ def validate_manifest(root: Path, manifest: Sequence[str]) -> tuple[Path, ...]:
     return tuple(resolved)
 
 
+def manifest_snapshot(root: Path, entries: Sequence[Path]) -> dict[str, str]:
+    """Content snapshot of the frozen inputs (relative path -> sha256).
+
+    The snapshot is the provenance anchor: the copy is verified against it
+    (check-then-swap defense) and the sources are re-hashed after the run
+    (an input change makes the evidence unstable, never "passed").
+    """
+
+    import hashlib
+
+    snapshot: dict[str, str] = {}
+    for relative in entries:
+        snapshot[relative.as_posix()] = hashlib.sha256(
+            (Path(root) / relative).read_bytes()
+        ).hexdigest()
+    return snapshot
+
+
+def inputs_unchanged(root: Path, snapshot: Mapping[str, str]) -> bool:
+    """True when every frozen input still has its snapshot content."""
+
+    import hashlib
+
+    for relative, digest in snapshot.items():
+        try:
+            current = hashlib.sha256(
+                (Path(root) / relative).read_bytes()
+            ).hexdigest()
+        except OSError:
+            return False
+        if current != digest:
+            return False
+    return True
+
+
 class PreparedTestWorkspace:
     """One run's ephemeral workspace: read-only candidate + private scratch."""
 
-    def __init__(self, base: Path, entries: tuple[Path, ...]) -> None:
+    def __init__(
+        self,
+        base: Path,
+        entries: tuple[Path, ...],
+        snapshot: Mapping[str, str] | None = None,
+    ) -> None:
         self.base = base
         self.candidate_dir = base / "candidate"
         self.scratch_dir = base / "scratch"
         self.entries = entries
+        self.snapshot = dict(snapshot or {})
 
     def cleanup(self) -> None:
         """Best-effort removal; failures quarantine, never reuse."""
@@ -116,14 +168,27 @@ def prepare_test_workspace(
         f"koawa-wpc-{label}-{uuid.uuid4().hex[:12]}",
     )
     base.mkdir(parents=True)
-    workspace = PreparedTestWorkspace(base, entries)
+    snapshot = manifest_snapshot(root, entries)
+    workspace = PreparedTestWorkspace(base, entries, snapshot)
     try:
         workspace.candidate_dir.mkdir()
         workspace.scratch_dir.mkdir()
         for relative in entries:
             destination = workspace.candidate_dir / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(root / relative, destination)
+            source = root / relative
+            shutil.copyfile(source, destination)
+            # Check-then-swap defense: the copied bytes must hash to the
+            # frozen snapshot, and the SOURCE must still hash to it as well
+            # (the file can be replaced between validation and copy).
+            import hashlib
+
+            expected = snapshot[relative.as_posix()]
+            if (
+                hashlib.sha256(destination.read_bytes()).hexdigest() != expected
+                or hashlib.sha256(source.read_bytes()).hexdigest() != expected
+            ):
+                raise WorkspaceError("workspace_manifest_input_changed")
             # Best-effort read-only candidate (Windows raises on writes to
             # read-only files; POSIX needs the bit as intent marker).
             os.chmod(destination, 0o444)
