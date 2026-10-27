@@ -104,23 +104,56 @@ channels, invariants): [docs/open-active/repo-map-and-architecture.md](docs/open
 ## Repository map
 
 ```text
-src/koawa_agent_v2/
-├─ control/      event-sourcing core: EventStore contract + SQLite, ThreadRuntime   ~6.7k
-├─ runtime/      AppRuntime, assembly, config, memory(D23), session(D19), cli       ~8.5k
-├─ execution/    AgentLoop (rounds, compaction, three gates), TurnWorker            ~2.0k
-├─ model/        provider typed-stream protocol                                     ~2.4k
-├─ ledger/       D7 tool-execution ledger + J2 gate wiring                          ~2.0k
-├─ verification/ D5 verification registry, runner, output policy + release rules    ~1.9k
-├─ retrieval/    bounded-result retrieval: projections, delivery, recall, by-ref    ~1.4k
-├─ recovery/     recorder, reducer v3, checkpoint cache, coordinator, backfill      ~3.6k
-├─ sandbox/      Docker runner + allocations + WP-C v1 isolated workspaces          ~2.8k
-├─ mcp/          D10/D24/D25 connection manager, activation, adapters               ~5.9k
-├─ agents/       delegation graph (D12+, B-3 open)                                  ~5.1k
-├─ tools/ editing/ workspace/ plan/ security/ context/ telemetry/
-tests/           133 modules — day-slice suites + hardening suites + fixtures
-docs/            closed-archive (D1–D25 history) · open-active (living ledgers)
-scripts/ audits/ stable-scenario + metering-probe / platform audit archives
+v2/
+├─ src/koawa_agent_v2/                                        # the runtime (116 modules)
+│  ├─ control/      event-sourcing core: EventStore contract + SQLite
+│  │                (typed events, exact-version CAS, idempotency keys;
+│  │                 streams: thread/turn/run-execution/tool-execution/
+│  │                 result-projection), ThreadRuntime state machine      ~6.7k
+│  ├─ runtime/      AppRuntime (run/chat/resume/status/cancel/doctor),
+│  │                assembly (control/execution planes), config, cli,
+│  │                memory budgets (D23), session (D19), truth, gates     ~8.5k
+│  ├─ execution/    AgentLoop: model rounds, D23 compaction, three
+│  │                completion gates (D22 claim / D5 verify / R4 metered
+│  │                final-send), plan-B delivery integration; TurnWorker  ~2.0k
+│  ├─ model/        provider-neutral typed-stream protocol +
+│  │                OpenAI-compatible chat client (any /chat/completions
+│  │                endpoint: SiliconFlow, DeepSeek, Moonshot, vLLM…)     ~2.4k
+│  ├─ ledger/       D7 tool-execution ledger: claim→execute→commit,
+│  │                recovery profiles, J2 canary gate wiring              ~2.0k
+│  ├─ verification/ D5 verification registry (test/git/finalize),
+│  │                TrustedCommandRunner, output policy + per-profile
+│  │                release contracts (§2/§4)                             ~1.9k
+│  ├─ retrieval/    bounded-result retrieval: projection store
+│  │                (publish/revoke/expire/delivery), contract-filtered
+│  │                receipts, by-ref reads, thread-scoped search,
+│  │                session recall                                        ~1.4k
+│  ├─ recovery/     DurableExecutionRecorder (canonical facts + live
+│  │                projection), reducer v3, verified checkpoint cache,
+│  │                coordinator, delivery backfill                        ~3.6k
+│  ├─ sandbox/      Docker runner + allocations; WP-C v1 isolated test
+│  │                workspaces (manifest → read-only candidates + private
+│  │                scratch)                                              ~2.8k
+│  ├─ mcp/          D10/D24/D25 whitelist + metadata-only gate            ~5.9k
+│  ├─ agents/       delegation graph (D12+; B-3 wiring open)             ~5.1k
+│  ├─ tools/ editing/ workspace/ plan/ security/ context/ telemetry/
+├─ tests/          134 modules — day-slice suites + hardening suites
+│                  (delivery gate, revocation, release contracts, WP-C
+│                  workspaces, N1 search, metering) + fixtures
+├─ docs/           closed-archive (D1–D25 design history) ·
+│                  open-active (living ledgers: closure review with five
+│                  external rounds, self-audit, delivery-gate spec v4,
+│                  WP-E audit, R4 metering report, experiment plan/matrix,
+│                  repo map)
+├─ scripts/        stability scenarios · R4 metering probe
+└─ audits/         platform audit archives
 ```
+
+Provider note: the model layer speaks OpenAI-compatible Chat Completions, so
+any compatible endpoint works — SiliconFlow, DeepSeek official, Moonshot, or a
+self-hosted vLLM. Switching provider = three config lines (`base_url`,
+`api_key_env` name, `model`). Reasoning-effort knobs are whitelisted
+fail-closed per provider family; unknown combos refuse rather than guess.
 
 Day-slice design history (D1–D25) lives in
 [docs/closed-archive/](docs/closed-archive/) — the day tables in previous
