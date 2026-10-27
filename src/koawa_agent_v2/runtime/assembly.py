@@ -557,12 +557,17 @@ def assemble_execution_plane(
             register_recall_tool(
                 built_registry, store=control.store, runtime=control.runtime
             )
-            # R2 slice (b): read published result projections by reference -
-            # thread-scoped, three-valued availability, no raw bodies.
+            # R2 slice (b) + N1: read/search published result projections -
+            # thread-scoped, three-valued availability, no raw bodies.  The
+            # contract resolver gives the search per-profile granularity from
+            # the CURRENT release contracts.
             from ..retrieval.result_read_tool import register_result_read_tool
 
             register_result_read_tool(
-                built_registry, store=control.store, runtime=control.runtime
+                built_registry,
+                store=control.store,
+                runtime=control.runtime,
+                contract_resolver=getattr(runner, "release_contract", None),
             )
 
         # Hardening E1/E2: the JSON config admits up to 64 required profiles while
