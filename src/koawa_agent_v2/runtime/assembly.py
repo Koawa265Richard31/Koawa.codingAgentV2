@@ -581,8 +581,13 @@ def assemble_execution_plane(
         # Derive the budget from the config: every required profile must fit
         # at least one full pass plus repair cycles, inside the 1..32 bound.
         required_count = len(config.required_test_profiles or ())
+        configured_runs = config.verification_max_test_runs
         verification_limits = VerificationLimits(
-            max_test_runs=min(32, max(4, 4 * required_count))
+            max_test_runs=(
+                configured_runs
+                if configured_runs is not None
+                else min(32, max(4, 4 * required_count))
+            )
         )
         builtin_registry = build_verified_coding_tool_registry(
             config.repo,
@@ -595,6 +600,9 @@ def assemble_execution_plane(
                 *post_build_registrars,
                 _register_retrieval_tools,
             ),
+            # Policy gate: configured protected patterns (e.g. "tests/")
+            # are refused at the patch-tool boundary.
+            protected_patterns=tuple(config.policy.protected_paths),
         )
         mcp_sessions, mcp_bindings = _connect_execution_mcp_servers(
             control, granted_plan, launcher_builder=launcher_builder,

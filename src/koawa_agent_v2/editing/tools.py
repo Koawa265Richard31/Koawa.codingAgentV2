@@ -88,12 +88,35 @@ class _ApplyPatchTool:
         limits: PatchLimits,
         *,
         protected_paths: frozenset[str] = frozenset(),
+        protected_patterns: tuple[str, ...] = (),
         observer: PatchObserver | None = None,
     ) -> None:
         self._workspace = workspace
         self._limits = limits
         self._protected_paths = protected_paths
+        # Policy gate (config-driven): patterns the agent may never edit.
+        # Removing the opportunity at the tool boundary beats auditing the
+        # diff afterwards.
+        self._protected_patterns = tuple(protected_patterns)
         self._observer = observer
+
+    def _policy_blocked(self, path: str) -> bool:
+        lowered = path.casefold()
+        for pattern in self._protected_patterns:
+            needle = pattern.casefold()
+            if needle.endswith("/"):
+                if lowered.startswith(needle):
+                    return True
+                continue
+            if "/" in needle:
+                if lowered == needle:
+                    return True
+                continue
+            # Bare token: match the basename exactly or as a prefix.
+            basename = lowered.rsplit("/", 1)[-1]
+            if basename == needle or basename.startswith(needle):
+                return True
+        return False
 
     def __call__(
         self,
@@ -114,6 +137,18 @@ class _ApplyPatchTool:
                 return tool_error_result(
                     "baseline_dirty_path_forbidden",
                     detail="protected_user_changes:start",
+                )
+            blocked = [
+                change.path
+                for change in patch.changes
+                if self._policy_blocked(change.path)
+            ]
+            if blocked:
+                # Policy gate: the path matches a configured protected
+                # pattern (e.g. tests/).  Deterministic refusal - no edit,
+                # no partial transaction.
+                return tool_error_result(
+                    "protected_path_forbidden", detail=blocked[0],
                 )
             result = self._workspace.apply(
                 patch,
@@ -136,6 +171,7 @@ def register_patch_tool(
     limits: PatchLimits | None = None,
     fault_injector: FaultInjector | None = None,
     protected_paths: frozenset[str] = frozenset(),
+    protected_patterns: tuple[str, ...] = (),
     observer: PatchObserver | None = None,
 ) -> None:
     """注册 D4 工具；D5 可附加脏文件保护与成功修改证据。"""
@@ -152,6 +188,7 @@ def register_patch_tool(
             workspace,
             limits,
             protected_paths=protected_paths,
+            protected_patterns=protected_patterns,
             observer=observer,
         ),
     )
@@ -163,6 +200,7 @@ def build_coding_tool_registry(
     repository_limits: RepositoryToolLimits | None = None,
     patch_limits: PatchLimits | None = None,
     fault_injector: FaultInjector | None = None,
+    protected_patterns: tuple[str, ...] = (),
 ) -> RepositoryToolRegistry:
     """构建 D3 read/list/search + D4 apply_patch 的单一、可 seal Registry。"""
     repository_limits = repository_limits or RepositoryToolLimits()
@@ -191,6 +229,7 @@ def build_coding_tool_registry(
             resolver,
             limits=patch_limits,
             fault_injector=fault_injector,
+            protected_patterns=protected_patterns,
         )
         return registry
     except BaseException:
