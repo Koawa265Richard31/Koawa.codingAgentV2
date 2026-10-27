@@ -123,12 +123,14 @@ def main() -> None:
         app = AppRuntime(config, api_key=(Path("D:/A_Dev_Projects/key.txt").read_text().strip()))
 
         repair = "The unit test is failing. Fix the bug, run tests until green, then finalize."
-        outcome1 = app.chat(repair)
+        # Task path (run): D5 gate + terminal projection publication happen here.
+        outcome1 = app.run(repair)
         print("TURN1:", outcome1.ok, outcome1.payload.get("status"),
               "| published:", outcome1.payload.get("result_projections", {}).get("published"))
         if not outcome1.ok:
             print("TURN1 payload:", json.dumps(outcome1.payload, ensure_ascii=False)[:600])
             return
+        thread_id = outcome1.payload["thread_id"]
         turn1_id = outcome1.payload["turn_id"]
 
         query = (
@@ -138,7 +140,7 @@ def main() -> None:
             "each result's verdict and source_content_sha256 (first 8 chars). "
             "Do not modify any files."
         )
-        outcome2 = app.chat(query)
+        outcome2 = app.chat(query, thread_id=thread_id)
         print("TURN2:", outcome2.ok, "| final:",
               str(outcome2.payload.get("final_text"))[:200])
 
@@ -169,7 +171,7 @@ def main() -> None:
             "Report in plain text: how many results are returned now, and for "
             "each, the call_id and availability. Do not modify any files."
         )
-        outcome3 = app.chat(requery)
+        outcome3 = app.chat(requery, thread_id=thread_id)
         print("TURN3:", outcome3.ok, "| final:",
               str(outcome3.payload.get("final_text"))[:400])
         app.close()
