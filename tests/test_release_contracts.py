@@ -59,8 +59,8 @@ class _RuleRunner:
             duration_ms=9,
             argv=("trusted-test", "only"),
             timeout_seconds=10.0,
-            backend="host",
-            immutable_image_id=None,
+            backend="docker",
+            immutable_image_id="sha256:" + "3" * 64,
             profile_digest="2" * 64,
             isolated_workspace=True,
         )

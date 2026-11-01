@@ -127,7 +127,7 @@ class FallbackSummaryModelConfigTest(unittest.TestCase):
                 "model": "m",
                 "provider": "openai_compatible",
             },
-            "sandbox": {"runner": "host", "host_trust": "builtin_fixture"},
+            "sandbox": {"runner": "host", "host_trust": "builtin_fixture", "allow_unisolated_execution": True},
             "test_profiles": [
                 {"profile_id": "unit", "argv": ["python", "-m", "unittest"], "timeout_seconds": 60},
             ],
