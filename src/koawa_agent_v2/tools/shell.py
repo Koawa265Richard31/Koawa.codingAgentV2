@@ -303,11 +303,22 @@ class ShellExecutor:
 
 
 class ShellTool:
-    """Tool handler: validates, executes, and reports a stable receipt."""
+    """Tool handler: validates, reviews, executes, reports a stable receipt."""
 
-    def __init__(self, executor: ShellExecutor, limits: ShellLimits) -> None:
+    def __init__(
+        self,
+        executor: ShellExecutor,
+        limits: ShellLimits,
+        *,
+        reviewer=None,
+        review_policy=None,
+    ) -> None:
+        from .shell_review import ReviewPolicy
+
         self._executor = executor
         self._limits = limits
+        self._reviewer = reviewer
+        self._review_policy = review_policy or ReviewPolicy()
 
     def __call__(
         self,
@@ -315,11 +326,26 @@ class ShellTool:
         *,
         context: ToolExecutionContext,
     ) -> ToolExecutionResult:
+        from .shell_review import review_or_deny
+
         root = self._executor.root
         try:
             argv = validate_shell_argv(arguments.argv, self._limits, root)
         except ShellError as error:
             return tool_error_result(error.code)
+        # Issue #9: the heuristic gate runs only after the deterministic one,
+        # and every uncertain outcome is a deny.
+        allowed, review_fields = review_or_deny(
+            self._reviewer,
+            argv,
+            mode=self._executor.mode.value,
+            policy=self._review_policy,
+        )
+        if not allowed:
+            return tool_error_result(
+                "shell_review_denied",
+                detail=str(review_fields.get("review_reason", "unavailable")),
+            )
         try:
             result = self._executor.run(
                 argv,
@@ -341,6 +367,7 @@ class ShellTool:
             "stdout": result.stdout,
             "timed_out": result.timed_out,
         }
+        payload.update(review_fields)
         return ToolExecutionResult(
             json.dumps(payload, ensure_ascii=False, sort_keys=True)
         )

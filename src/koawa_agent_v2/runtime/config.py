@@ -749,6 +749,10 @@ class PolicyConfig:
     shell_decision: Decision = Decision.DENY
     shell_max_output_chars: int = 32_768
     shell_max_timeout_seconds: int = 60
+    # Issue #9: heuristic provider-model review.  "required" enables the
+    # second gate; without a wired judge every call is denied (fail-closed).
+    shell_review: str = "off"
+    shell_review_min_confidence: float = 0.6
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -834,6 +838,14 @@ class PolicyConfig:
             or not 1 <= self.shell_max_timeout_seconds <= 600
         ):
             raise RuntimeConfigError("invalid_shell_limits")
+        if self.shell_review not in ("off", "required"):
+            raise RuntimeConfigError("invalid_shell_review")
+        if not isinstance(self.shell_review_min_confidence, (int, float)) or (
+            isinstance(self.shell_review_min_confidence, bool)
+        ):
+            raise RuntimeConfigError("invalid_shell_review")
+        if not 0.0 <= float(self.shell_review_min_confidence) <= 1.0:
+            raise RuntimeConfigError("invalid_shell_review")
 
     def __repr__(self) -> str:
         return (
@@ -1821,6 +1833,8 @@ def _parse_policy(value: Any) -> PolicyConfig:
         "shell_decision",
         "shell_max_output_chars",
         "shell_max_timeout_seconds",
+        "shell_review",
+        "shell_review_min_confidence",
     }
     _reject_unknown(value, allowed, "invalid_policy_config")
     try:
@@ -1857,6 +1871,10 @@ def _parse_policy(value: Any) -> PolicyConfig:
             shell_max_output_chars=value.get("shell_max_output_chars", 32_768),
             shell_max_timeout_seconds=value.get(
                 "shell_max_timeout_seconds", 60
+            ),
+            shell_review=value.get("shell_review", "off"),
+            shell_review_min_confidence=value.get(
+                "shell_review_min_confidence", 0.6
             ),
         )
     except RuntimeConfigError:
