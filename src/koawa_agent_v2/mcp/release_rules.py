@@ -100,8 +100,16 @@ def build_envelope(
     redacted_body: str,
     is_error: bool,
     rule: McpReleaseRule | None,
+    isolation: str = "none",
 ) -> dict:
-    """Build the model-facing envelope for one MCP call result."""
+    """Build the model-facing envelope for one MCP call result.
+
+    ``isolation`` (issue #10) declares the boundary the server actually ran
+    under: "container" for the docker endpoint, "none" for a stdio child
+    process holding the invoking account's rights.  The envelope controls
+    what comes BACK from the server; it says nothing about what the server
+    itself can do, so the two are reported separately.
+    """
 
     envelope: dict = {
         "untrusted_mcp_result": True,
@@ -111,6 +119,7 @@ def build_envelope(
         "output_policy": MCP_POLICY_VERSION,
         "body_bytes": len(redacted_body),
         "is_error": bool(is_error),
+        "mcp_isolation": isolation,
         "result": None,
     }
     if rule is None:
