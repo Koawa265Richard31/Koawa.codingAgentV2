@@ -119,6 +119,10 @@ READ_TOOL_NAMES = (
     # registered-but-dead failure class as F15 if omitted here.
     "read_result_projection",
     "search_result_projections",
+    # Issue #7 A4: dependency-preparation request.  Registered only when a
+    # scope is configured; classification as READ_ONLY keeps it out of the
+    # write path while still avoiding denied_by_default (the F15 class).
+    "request_dependency_preparation",
 )
 WRITE_TOOL_NAMES = ("apply_patch",)
 TEST_TOOL_NAMES = ("run_test_profile",)
@@ -589,6 +593,23 @@ def assemble_execution_plane(
                 else min(32, max(4, 4 * required_count))
             )
         )
+        # Issue #7 A4: a dependency-preparation scope exists only when the
+        # administrator authorised a package set.  The default executor can
+        # only report "unavailable", which turns a ready plan into a human
+        # handoff instead of a silent retry loop.
+        dependency_scope = None
+        if config.policy.dependency_allowed_packages:
+            from ..verification.dependency_preparation import (
+                DependencyScope,
+                UnavailablePreparationExecutor,
+            )
+
+            dependency_scope = DependencyScope(
+                allowed_packages=tuple(config.policy.dependency_allowed_packages),
+                allow_install=bool(config.policy.dependency_allow_install),
+                max_packages=int(config.policy.dependency_max_packages),
+                index_urls=tuple(config.policy.dependency_index_urls),
+            )
         builtin_registry = build_verified_coding_tool_registry(
             config.repo,
             command_runner=runner,
@@ -603,6 +624,12 @@ def assemble_execution_plane(
             # Policy gate: configured protected patterns (e.g. "tests/")
             # are refused at the patch-tool boundary.
             protected_patterns=tuple(config.policy.protected_paths),
+            dependency_scope=dependency_scope,
+            dependency_executor=(
+                UnavailablePreparationExecutor()
+                if dependency_scope is not None
+                else None
+            ),
         )
         mcp_sessions, mcp_bindings = _connect_execution_mcp_servers(
             control, granted_plan, launcher_builder=launcher_builder,

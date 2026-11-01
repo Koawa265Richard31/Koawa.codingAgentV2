@@ -15,10 +15,18 @@ reviewable step - so the decision is testable without network.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Protocol
 
 PREP_READY = "ready"
 PREP_REQUIRES_AUTHORIZATION = "requires_authorization"
 PREP_REFUSED = "refused"
+
+# Executor outcomes (issue #7 A5).  ``materialized`` is the ONLY state that
+# lets the caller continue; everything else is a fixed human handoff so a
+# failed preparation can never look like progress.
+EXEC_MATERIALIZED = "materialized"
+EXEC_UNAVAILABLE = "unavailable"
+EXEC_FAILED = "failed"
 
 # Package name shape we accept for a preparation request.
 import re as _re
@@ -76,6 +84,59 @@ class PreparationDecision:
     requires_authorization: tuple[str, ...] = ()
     refused: tuple[str, ...] = ()
     reason: str | None = None
+
+
+class PreparationExecutorError(RuntimeError):
+    """Content-free executor failure carrying a stable code."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparationOutcome:
+    """What the executor actually did - never what it intends to do."""
+
+    status: str
+    environment_ref: str | None = None
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in (EXEC_MATERIALIZED, EXEC_UNAVAILABLE, EXEC_FAILED):
+            raise PreparationExecutorError("invalid_preparation_outcome")
+        if self.status == EXEC_MATERIALIZED and not self.environment_ref:
+            # A new environment without an identity cannot be bound to a
+            # profile version, so it is not a usable result.
+            raise PreparationExecutorError("invalid_preparation_outcome")
+
+
+class PreparationExecutor(Protocol):
+    """The separate, reviewable installation step.
+
+    Implementations build a NEW pinned environment from an authorised plan.
+    They must never accept package versions or index URLs from the model -
+    the plan already carries the approved set.
+    """
+
+    def materialize(
+        self, plan: tuple[str, ...], *, profile_id: str
+    ) -> PreparationOutcome: ...
+
+
+class UnavailablePreparationExecutor:
+    """Default executor: the decision surface is live, installation is not.
+
+    Returning a fixed "unavailable" keeps the loop terminating: a ready plan
+    without an executor becomes a human handoff instead of a silent retry.
+    """
+
+    def materialize(
+        self, plan: tuple[str, ...], *, profile_id: str
+    ) -> PreparationOutcome:
+        return PreparationOutcome(
+            status=EXEC_UNAVAILABLE, detail="preparation_executor_unavailable"
+        )
 
 
 def _allowed(name: str, scope: DependencyScope) -> bool:

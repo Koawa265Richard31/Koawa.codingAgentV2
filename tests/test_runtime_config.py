@@ -296,7 +296,7 @@ class McpServerDeadlinesConfigTest(unittest.TestCase):
                 "api_key_env": "EnvKey",
                 "model": "test-model",
             },
-            "sandbox": {"runner": "host", "host_trust": "builtin_fixture"},
+            "sandbox": {"runner": "host", "host_trust": "builtin_fixture", "allow_unisolated_execution": True},
             "test_profiles": [
                 {
                     "profile_id": "unit",
@@ -561,6 +561,7 @@ class StrictConfigLoaderTest(unittest.TestCase):
             "sandbox": {
                 "runner": "host",
                 "host_trust": "builtin_fixture",
+                "allow_unisolated_execution": True,
             },
             "policy": {"patch_decision": "allow"},
             "test_profiles": [
@@ -585,7 +586,7 @@ class StrictConfigLoaderTest(unittest.TestCase):
         path = self.write_bytes(
             '{"config_schema_version":2,"provider":{"base_url":"https://x","api_key_env":"K","model":"m",'
             '"provider_options":{"temperature":0.7,"temperature":0.8}},"repo":"repo","db":"d.sqlite3",'
-            '"sandbox":{"runner":"host"},"test_profiles":[{"profile_id":"u","argv":["p"]}]}'.encode("utf-8"),
+            '"sandbox":{"runner":"host","allow_unisolated_execution":true},"test_profiles":[{"profile_id":"u","argv":["p"]}]}'.encode("utf-8"),
         )
         with self.assertRaises(RuntimeConfigError) as raised:
             load_runtime_config(path)
