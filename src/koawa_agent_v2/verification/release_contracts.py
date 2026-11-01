@@ -231,6 +231,10 @@ def build_receipt(
     projection_reduced: bool = False,
     read_truncated: bool = False,
     receipt_ref: str | None = None,
+    environment_signal: str | None = None,
+    missing_dependencies: tuple[str, ...] = (),
+    collection_regression: tuple[int, int] | None = None,
+    isolation: str | None = None,
 ) -> dict:
     """§4 receipt: generated FROM the release contract, never a serialization
     of the local execution record.  States stay separate; unauthorized
@@ -304,4 +308,27 @@ def build_receipt(
     if mode is ReleaseMode.LOCAL_ONLY:
         receipt["availability"] = "result_withheld"
         receipt["human_required"] = True
+    else:
+        # Issue #7 A2: environment attribution is a TRUSTED, content-free
+        # state derived locally from the captured output.  It is not part of
+        # the (filterable) diagnostic body, so a limited-mode contract still
+        # sees the actionable identifiers - otherwise a missing dependency
+        # is indistinguishable from a failing assertion.
+        if environment_signal is not None:
+            receipt["environment_signal"] = environment_signal
+        if missing_dependencies:
+            receipt["missing_dependencies"] = list(missing_dependencies)
+        if collection_regression is not None:
+            # Issue #7 C: the run executed, but it executed FEWER tests than
+            # the established baseline.  Degenerate evidence is reported by
+            # count only - never as a pass.
+            expected, observed = collection_regression
+            receipt["test_collection_regression"] = {
+                "expected": int(expected),
+                "observed": int(observed),
+            }
+        if isolation is not None:
+            # Issue #7 D: which boundary produced this evidence.  "none"
+            # means the tests ran with the invoking account's full rights.
+            receipt["isolation"] = isolation
     return receipt

@@ -17,6 +17,7 @@ from uuid import UUID
 from ..execution.loop import AgentLoopError, ToolExecutionContext
 from .git import GitDiffSnapshot, GitFacade, GitStatusSnapshot
 from ..editing.transaction import PatchTransactionResult
+from .environment_signals import evidence_isolation
 from .runner import CommandResult
 
 
@@ -234,6 +235,19 @@ class VerificationLedger:
                 "optional_tests": optional_tests,
                 "test_runs": len(state.tests),
             }
+            # Issue #7 D2: the delivery carries the weakest boundary that
+            # produced the required evidence, so a consumer cannot mistake
+            # host results for sandboxed ones.
+            required_isolations = {
+                evidence_isolation(latest_by_profile[profile_id].result.backend)
+                for profile_id in self._required_test_profiles
+            }
+            if required_isolations == {"container"}:
+                payload["evidence_isolation"] = "container"
+            elif required_isolations == {"none"}:
+                payload["evidence_isolation"] = "none"
+            else:
+                payload["evidence_isolation"] = "mixed"
             # One-profile reports retain the D5 field for compatible consumers.
             # Multi-profile reports deliberately have no singular success field.
             if len(self._required_test_profiles) == 1:
@@ -361,6 +375,7 @@ def _command_evidence_json(evidence: TestEvidence) -> dict[str, object]:
         "exit_code": result.exit_code,
         "generation": evidence.generation,
         "immutable_image_id": result.immutable_image_id,
+        "isolation": evidence_isolation(result.backend),
         "outcome": result.outcome.value,
         "profile_id": result.profile_id,
         "profile_digest": result.profile_digest,

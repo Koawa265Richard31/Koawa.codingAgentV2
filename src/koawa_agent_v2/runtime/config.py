@@ -36,6 +36,17 @@ _CONFIG_ERROR = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _PROFILE_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
 _MCP_SERVER_ID = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# Issue #7 B1: what a verification gate must not let the model edit.
+_DEFAULT_PROTECTED_PATHS: tuple[str, ...] = (
+    "tests/",
+    "test/",
+    "conftest",
+    "pyproject.toml",
+    "pytest.ini",
+    "tox.ini",
+    "setup.cfg",
+)
+_DEPENDENCY_ENTRY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\*?")
 # §8.3: loader / code-injection environment variables are hard-denied for
 # every MCP server config (compared casefolded on every platform).
 _MCP_INJECTION_ENV_CASEFOLD = frozenset({
@@ -669,6 +680,10 @@ class SandboxConfig:
     image_id: str | None = None
     docker_executable: str = "docker"
     host_trust: RepositoryTrustMode = RepositoryTrustMode.USER_CONFIRMED
+    # Issue #7 D: the host runner has no kernel boundary.  The JSON loader
+    # requires this flag before it will accept ``runner: "host"``; direct
+    # construction is a trusted-code path and is not re-checked here.
+    allow_unisolated_execution: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.runner, SandboxRunner):
@@ -715,7 +730,17 @@ class PolicyConfig:
     # exact paths, directory prefixes ending in "/", or basename prefixes
     # (e.g. "test_").  Removing the opportunity is stronger than auditing
     # a diff afterwards: the edit is refused at the tool boundary.
-    protected_paths: tuple[str, ...] = ()
+    # Issue #7 B1: the test surface is protected BY DEFAULT.  A verification
+    # gate that lets the model rewrite its own tests can prove nothing, so
+    # "no protection" has to be an explicit, rejected choice.
+    protected_paths: tuple[str, ...] = _DEFAULT_PROTECTED_PATHS
+    # Issue #7 A4: controlled dependency preparation scope.  Empty
+    # ``dependency_allowed_packages`` means the capability is off and the
+    # tool is not registered at all.
+    dependency_allowed_packages: tuple[str, ...] = ()
+    dependency_allow_install: bool = False
+    dependency_max_packages: int = 8
+    dependency_index_urls: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -751,6 +776,25 @@ class PolicyConfig:
             "protected_paths",
             tuple(dict.fromkeys(self.protected_paths)),
         )
+        if not isinstance(self.dependency_allowed_packages, tuple) or any(
+            not isinstance(entry, str)
+            or _DEPENDENCY_ENTRY.fullmatch(entry) is None
+            for entry in self.dependency_allowed_packages
+        ):
+            raise RuntimeConfigError("invalid_dependency_scope")
+        if not isinstance(self.dependency_allow_install, bool):
+            raise RuntimeConfigError("invalid_dependency_scope")
+        if (
+            not isinstance(self.dependency_max_packages, int)
+            or isinstance(self.dependency_max_packages, bool)
+            or not 1 <= self.dependency_max_packages <= 64
+        ):
+            raise RuntimeConfigError("invalid_dependency_scope")
+        if not isinstance(self.dependency_index_urls, tuple) or any(
+            not isinstance(entry, str) or not entry.startswith("https://")
+            for entry in self.dependency_index_urls
+        ):
+            raise RuntimeConfigError("invalid_dependency_index")
 
     def __repr__(self) -> str:
         return (
@@ -881,6 +925,11 @@ class RuntimeConfig:
         object.__setattr__(
             self, "required_test_profiles", tuple(sorted(required_profiles))
         )
+        if not self.policy.protected_paths:
+            # Issue #7 B1: a verification gate whose tests the model may
+            # rewrite proves nothing.  Refusing the assembly is stronger than
+            # a runtime warning - it cannot be "worked around" mid-turn.
+            raise RuntimeConfigError("verification_requires_protected_tests")
         if not isinstance(self.mcp_servers, tuple) or any(
             not isinstance(value, McpServerConfig) for value in self.mcp_servers
         ):
@@ -1392,7 +1441,10 @@ def _parse_provider(value: Any, *, strict_options: bool = False) -> ProviderConf
 def _parse_sandbox(value: Any) -> SandboxConfig:
     if not isinstance(value, dict):
         raise RuntimeConfigError("invalid_sandbox_config")
-    allowed = {"runner", "image_id", "docker_executable", "host_trust"}
+    allowed = {
+        "runner", "image_id", "docker_executable", "host_trust",
+        "allow_unisolated_execution",
+    }
     _reject_unknown(value, allowed, "invalid_sandbox_config")
     try:
         runner_value = value.get("runner", "docker")
@@ -1407,11 +1459,21 @@ def _parse_sandbox(value: Any) -> SandboxConfig:
             if isinstance(host_trust_value, RepositoryTrustMode)
             else RepositoryTrustMode(host_trust_value)
         )
+        allow_unisolated = value.get("allow_unisolated_execution", False)
+        if not isinstance(allow_unisolated, bool):
+            raise RuntimeConfigError("invalid_sandbox_config")
+        if runner is SandboxRunner.HOST and not allow_unisolated:
+            # Issue #7 D1: the host runner executes model-written code with
+            # the invoking account's full rights and no egress control.
+            # Choosing it has to be an explicit, greppable decision - it is
+            # never inherited from a default.
+            raise RuntimeConfigError("unisolated_execution_forbidden")
         return SandboxConfig(
             runner=runner,
             image_id=value.get("image_id"),
             docker_executable=value.get("docker_executable", "docker"),
             host_trust=host_trust,
+            allow_unisolated_execution=allow_unisolated,
         )
     except RuntimeConfigError:
         raise
@@ -1711,6 +1773,10 @@ def _parse_policy(value: Any) -> PolicyConfig:
         "test_decision",
         "principal_scopes",
         "protected_paths",
+        "dependency_allowed_packages",
+        "dependency_allow_install",
+        "dependency_max_packages",
+        "dependency_index_urls",
     }
     _reject_unknown(value, allowed, "invalid_policy_config")
     try:
@@ -1730,7 +1796,17 @@ def _parse_policy(value: Any) -> PolicyConfig:
                     ),
                 )
             ),
-            protected_paths=tuple(value.get("protected_paths", ())),
+            protected_paths=tuple(
+                value.get("protected_paths", _DEFAULT_PROTECTED_PATHS)
+            ),
+            dependency_allowed_packages=tuple(
+                value.get("dependency_allowed_packages", ())
+            ),
+            dependency_allow_install=bool(
+                value.get("dependency_allow_install", False)
+            ),
+            dependency_max_packages=value.get("dependency_max_packages", 8),
+            dependency_index_urls=tuple(value.get("dependency_index_urls", ())),
         )
     except RuntimeConfigError:
         raise

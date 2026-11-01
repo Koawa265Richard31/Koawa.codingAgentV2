@@ -204,7 +204,7 @@ class V3ConfigTest(unittest.TestCase):
                 "api_key_env": "SF_TEST_KEY",
                 "model": "m",
             },
-            "sandbox": {"runner": "host", "host_trust": "builtin_fixture"},
+            "sandbox": {"runner": "host", "host_trust": "builtin_fixture", "allow_unisolated_execution": True},
             "policy": {"patch_decision": "allow"},
             "test_profiles": [
                 {"profile_id": "unit", "argv": ["/usr/local/bin/python", "-B"]},
