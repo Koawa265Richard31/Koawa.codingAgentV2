@@ -126,6 +126,9 @@ READ_TOOL_NAMES = (
 )
 WRITE_TOOL_NAMES = ("apply_patch",)
 TEST_TOOL_NAMES = ("run_test_profile",)
+# Issue #8: structured argv only, allowlist-gated, default deny.  Registered
+# only when ``policy.shell_mode`` is not "disabled".
+SHELL_TOOL_NAMES = ("run_shell",)
 
 
 class RuntimeAssemblyError(RuntimeError):
@@ -579,6 +582,40 @@ def assemble_execution_plane(
                 contract_resolver=getattr(runner, "release_contract", None),
             )
 
+        # Issue #8: restricted shell.  Registered only when an explicit mode
+        # and allowlist are configured; the policy decision defaults to deny,
+        # so "registered" never means "usable".
+        shell_registrar = ()
+        if config.policy.shell_mode != "disabled":
+            from ..tools.shell import (
+                ShellExecutor,
+                ShellLimits,
+                ShellMode,
+                ShellTool,
+                shell_tool_spec,
+            )
+
+            shell_limits = ShellLimits(
+                allowed_programs=tuple(config.policy.shell_allowlist),
+                max_output_chars=config.policy.shell_max_output_chars,
+                max_timeout_seconds=config.policy.shell_max_timeout_seconds,
+            )
+            shell_executor = ShellExecutor(
+                config.repo,
+                shell_limits,
+                mode=ShellMode(config.policy.shell_mode),
+                image_id=config.sandbox.image_id,
+                docker_executable=config.sandbox.docker_executable,
+            )
+
+            def _register_shell_tool(built_registry):
+                built_registry.register(
+                    shell_tool_spec(),
+                    ShellTool(shell_executor, shell_limits),
+                )
+
+            shell_registrar = (_register_shell_tool,)
+
         # Hardening E1/E2: the JSON config admits up to 64 required profiles while
         # VerificationLimits defaults to max_test_runs=4, so 5+ profiles were
         # structurally unsatisfiable (the 5th reservation always failed).
@@ -620,6 +657,7 @@ def assemble_execution_plane(
             post_build_registrars=(
                 *post_build_registrars,
                 _register_retrieval_tools,
+                *shell_registrar,
             ),
             # Policy gate: configured protected patterns (e.g. "tests/")
             # are refused at the patch-tool boundary.
@@ -1219,6 +1257,17 @@ def _bind_ledger_policy(
                 required_scopes=("sandbox.test",),
                 side_effect_classes=(SideEffectClass.READ_ONLY,),
             ),
+            PolicyRule(
+                "builtin-shell-allow-or-ask",
+                config.policy.shell_decision,
+                action_kinds=(ActionKind.BUILTIN_TOOL,),
+                tool_names=SHELL_TOOL_NAMES,
+                principal_ids=("root",),
+                required_scopes=("workspace.write",),
+                # Shell side effects are not enumerable: the ledger profile is
+                # NON_IDEMPOTENT/MANUAL and blind retry is forbidden.
+                side_effect_classes=(SideEffectClass.NON_IDEMPOTENT_WRITE,),
+            ),
             *mcp_rules,
         ),
         network_enabled=False,
@@ -1253,6 +1302,10 @@ def _bind_ledger_policy(
         elif call.name == "run_test_profile":
             side_effect = SideEffectClass.READ_ONLY
             sandbox_profile_id = "sandbox-test"
+        elif call.name in SHELL_TOOL_NAMES:
+            # Issue #8: not idempotent, never blindly retried.
+            side_effect = SideEffectClass.NON_IDEMPOTENT_WRITE
+            sandbox_profile_id = "builtin-shell"
         else:
             side_effect = SideEffectClass.READ_ONLY
             sandbox_profile_id = "builtin-read"
@@ -1270,6 +1323,10 @@ def _bind_ledger_policy(
     for name in names:
         if name == "apply_patch":
             profiles[name] = IDEMPOTENT_WRITE_PROFILE
+        elif name in SHELL_TOOL_NAMES:
+            # NON_IDEMPOTENT_WRITE + MANUAL: a crashed shell call is never
+            # re-executed automatically.
+            profiles[name] = MANUAL_WRITE_PROFILE
         elif name in mcp_by_tool:
             profiles[name] = _mcp_recovery_profile(mcp_by_tool[name][0])
         else:

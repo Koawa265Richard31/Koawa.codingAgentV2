@@ -741,6 +741,14 @@ class PolicyConfig:
     dependency_allow_install: bool = False
     dependency_max_packages: int = 8
     dependency_index_urls: tuple[str, ...] = ()
+    # Issue #8: restricted command execution.  "disabled" keeps the tool out
+    # of the registry entirely; the other modes require an explicit program
+    # allowlist, and the policy decision defaults to deny.
+    shell_mode: str = "disabled"
+    shell_allowlist: tuple[str, ...] = ()
+    shell_decision: Decision = Decision.DENY
+    shell_max_output_chars: int = 32_768
+    shell_max_timeout_seconds: int = 60
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -795,6 +803,37 @@ class PolicyConfig:
             for entry in self.dependency_index_urls
         ):
             raise RuntimeConfigError("invalid_dependency_index")
+        if self.shell_mode not in (
+            "disabled", "container_only", "trusted_workspace",
+        ):
+            raise RuntimeConfigError("invalid_shell_mode")
+        if not isinstance(self.shell_allowlist, tuple) or any(
+            not isinstance(entry, str)
+            or not entry
+            or "/" in entry
+            or "\\" in entry
+            or len(entry) > 64
+            for entry in self.shell_allowlist
+        ):
+            raise RuntimeConfigError("invalid_shell_allowlist")
+        if self.shell_mode != "disabled" and not self.shell_allowlist:
+            # A mode without an allowlist would allow nothing; refusing the
+            # config is clearer than shipping a silently dead tool.
+            raise RuntimeConfigError("shell_allowlist_required")
+        if not isinstance(self.shell_decision, Decision):
+            raise RuntimeConfigError("invalid_shell_decision")
+        if (
+            not isinstance(self.shell_max_output_chars, int)
+            or isinstance(self.shell_max_output_chars, bool)
+            or not 256 <= self.shell_max_output_chars <= 1_000_000
+        ):
+            raise RuntimeConfigError("invalid_shell_limits")
+        if (
+            not isinstance(self.shell_max_timeout_seconds, int)
+            or isinstance(self.shell_max_timeout_seconds, bool)
+            or not 1 <= self.shell_max_timeout_seconds <= 600
+        ):
+            raise RuntimeConfigError("invalid_shell_limits")
 
     def __repr__(self) -> str:
         return (
@@ -1777,6 +1816,11 @@ def _parse_policy(value: Any) -> PolicyConfig:
         "dependency_allow_install",
         "dependency_max_packages",
         "dependency_index_urls",
+        "shell_mode",
+        "shell_allowlist",
+        "shell_decision",
+        "shell_max_output_chars",
+        "shell_max_timeout_seconds",
     }
     _reject_unknown(value, allowed, "invalid_policy_config")
     try:
@@ -1807,6 +1851,13 @@ def _parse_policy(value: Any) -> PolicyConfig:
             ),
             dependency_max_packages=value.get("dependency_max_packages", 8),
             dependency_index_urls=tuple(value.get("dependency_index_urls", ())),
+            shell_mode=value.get("shell_mode", "disabled"),
+            shell_allowlist=tuple(value.get("shell_allowlist", ())),
+            shell_decision=_decision(value.get("shell_decision", "deny")),
+            shell_max_output_chars=value.get("shell_max_output_chars", 32_768),
+            shell_max_timeout_seconds=value.get(
+                "shell_max_timeout_seconds", 60
+            ),
         )
     except RuntimeConfigError:
         raise
