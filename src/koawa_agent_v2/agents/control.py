@@ -2833,6 +2833,29 @@ class AgentControlPlane:
             self._ancestor_principals(parent)
         ):
             raise AgentError("child_principal_impersonation")
+        if principal_id != parent.principal_id:
+            # Wiring gap (issue #18): the policy layer already owns "what a
+            # delegated identity may become" via Principal.narrow.  Delegate
+            # to it instead of keeping a second copy of the rule here.
+            self._narrow_delegated_identity(parent, principal_id, scopes)
+
+    def _narrow_delegated_identity(
+        self, parent: AgentRecord, principal_id: str, scopes: tuple[str, ...]
+    ) -> None:
+        from ..policy import PolicyError, Principal, narrow_child_principal
+
+        try:
+            narrowed = narrow_child_principal(
+                Principal(parent.principal_id, parent.scopes),
+                child_principal_id=principal_id,
+                requested_scopes=scopes,
+            )
+        except PolicyError as error:
+            raise AgentError(error.code) from None
+        if set(narrowed.scopes) != set(scopes):
+            # The policy layer intersected the request; anything dropped means
+            # the request exceeded the parent's authority.
+            raise AgentError("child_scope_escalation")
 
     def _ancestor_principals(self, parent: AgentRecord) -> set[str]:
         """Principal names held by this agent and every ancestor above it."""
