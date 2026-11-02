@@ -457,7 +457,7 @@ class AgentControlPlane:
             parent = self.graph.load(parent_agent_id)
             if parent is None:
                 raise AgentError("parent_agent_missing")
-            self._validate_spawn_parent(parent, parent_run_id, scopes)
+            self._validate_spawn_parent(parent, parent_run_id, scopes, principal_id)
             if self.graph.has_cycle(parent_agent_id, child_id):
                 raise AgentError("agent_spawn_cycle")
             depth = (
@@ -2808,6 +2808,7 @@ class AgentControlPlane:
         parent: AgentRecord,
         parent_run_id: UUID | None,
         scopes: tuple[str, ...],
+        principal_id: str,
     ) -> None:
         if parent.state in (
             AgentState.COMPLETED,
@@ -2824,6 +2825,51 @@ class AgentControlPlane:
                 raise AgentError("parent_run_fenced")
         if not set(scopes).issubset(set(parent.scopes)):
             raise AgentError("child_scope_escalation")
+        # Issue #15 F1: policy rules match on the principal NAME, so claiming
+        # an ancestor's name is claiming its authority.  A child may inherit
+        # the parent's own identity (same name), or use a name no ancestor
+        # holds; impersonating any OTHER ancestor is refused.
+        if principal_id != parent.principal_id and principal_id in (
+            self._ancestor_principals(parent)
+        ):
+            raise AgentError("child_principal_impersonation")
+        if principal_id != parent.principal_id:
+            # Wiring gap (issue #18): the policy layer already owns "what a
+            # delegated identity may become" via Principal.narrow.  Delegate
+            # to it instead of keeping a second copy of the rule here.
+            self._narrow_delegated_identity(parent, principal_id, scopes)
+
+    def _narrow_delegated_identity(
+        self, parent: AgentRecord, principal_id: str, scopes: tuple[str, ...]
+    ) -> None:
+        from ..policy import PolicyError, Principal, narrow_child_principal
+
+        try:
+            narrowed = narrow_child_principal(
+                Principal(parent.principal_id, parent.scopes),
+                child_principal_id=principal_id,
+                requested_scopes=scopes,
+            )
+        except PolicyError as error:
+            raise AgentError(error.code) from None
+        if set(narrowed.scopes) != set(scopes):
+            # The policy layer intersected the request; anything dropped means
+            # the request exceeded the parent's authority.
+            raise AgentError("child_scope_escalation")
+
+    def _ancestor_principals(self, parent: AgentRecord) -> set[str]:
+        """Principal names held by this agent and every ancestor above it."""
+
+        names: set[str] = set()
+        visited: set[UUID] = set()
+        current: AgentRecord | None = parent
+        while current is not None and current.agent_id not in visited:
+            visited.add(current.agent_id)
+            names.add(current.principal_id)
+            if current.parent_agent_id is None:
+                break
+            current = self.graph.load(current.parent_agent_id)
+        return names
 
     def _spawned_event(
         self,
