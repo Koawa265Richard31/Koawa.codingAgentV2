@@ -45,8 +45,18 @@ def main() -> int:
         clock=_Clock(),
     )
 
-    worker = control.spawn_agent(
+    # Real topology: one root actually named "root"; "worker" is its child.
+    # (An earlier version spawned "worker" as the root, which removed "root"
+    # from the ancestor chain and made the impersonation look allowed.)
+    root = control.spawn_agent(
         parent_agent_id=None,
+        task_id="root",
+        principal_id="root",
+        scopes=("workspace.read", "workspace.write"),
+        context_mode=ContextMode.FRESH,
+    )
+    worker = control.spawn_agent(
+        parent_agent_id=root.agent_id,
         task_id="worker-root",
         principal_id="worker",
         scopes=("workspace.read", "workspace.write"),
