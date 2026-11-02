@@ -457,7 +457,7 @@ class AgentControlPlane:
             parent = self.graph.load(parent_agent_id)
             if parent is None:
                 raise AgentError("parent_agent_missing")
-            self._validate_spawn_parent(parent, parent_run_id, scopes)
+            self._validate_spawn_parent(parent, parent_run_id, scopes, principal_id)
             if self.graph.has_cycle(parent_agent_id, child_id):
                 raise AgentError("agent_spawn_cycle")
             depth = (
@@ -2808,6 +2808,7 @@ class AgentControlPlane:
         parent: AgentRecord,
         parent_run_id: UUID | None,
         scopes: tuple[str, ...],
+        principal_id: str,
     ) -> None:
         if parent.state in (
             AgentState.COMPLETED,
@@ -2824,6 +2825,28 @@ class AgentControlPlane:
                 raise AgentError("parent_run_fenced")
         if not set(scopes).issubset(set(parent.scopes)):
             raise AgentError("child_scope_escalation")
+        # Issue #15 F1: policy rules match on the principal NAME, so claiming
+        # an ancestor's name is claiming its authority.  A child may inherit
+        # the parent's own identity (same name), or use a name no ancestor
+        # holds; impersonating any OTHER ancestor is refused.
+        if principal_id != parent.principal_id and principal_id in (
+            self._ancestor_principals(parent)
+        ):
+            raise AgentError("child_principal_impersonation")
+
+    def _ancestor_principals(self, parent: AgentRecord) -> set[str]:
+        """Principal names held by this agent and every ancestor above it."""
+
+        names: set[str] = set()
+        visited: set[UUID] = set()
+        current: AgentRecord | None = parent
+        while current is not None and current.agent_id not in visited:
+            visited.add(current.agent_id)
+            names.add(current.principal_id)
+            if current.parent_agent_id is None:
+                break
+            current = self.graph.load(current.parent_agent_id)
+        return names
 
     def _spawned_event(
         self,

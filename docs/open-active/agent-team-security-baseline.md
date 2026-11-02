@@ -39,7 +39,7 @@
 
 ## 3. 安全发现
 
-### F1(P0,实测)身份名字由调用方指定,而授权按名字匹配
+### F1(P0,实测,已在 #17 封堵)身份名字由调用方指定,而授权按名字匹配
 
 **攻击路径**:
 1. 一个 principal 为 `worker` 的父代理,scope 含 `workspace.write`。
@@ -47,19 +47,34 @@
 3. scope 校验通过(确实是子集)。
 4. 子代理被记成 `root`;策略规则里 `principal_ids=("root",)` 直接命中。
 
-**实测输出**(探针 `scripts/probe_delegation_identity.py`):
+**修复前**(探针 `scripts/probe_delegation_identity.py`,真实拓扑:根叫 `root`):
 
 ```
 parent principal: worker scopes: ('workspace.read', 'workspace.write')
 PART A : ACCEPTED -> child principal: root
 PART A2: refused -> child_scope_escalation
 PART B : narrowed principal_id= root parent= worker scopes=('workspace.write',)
-PART B2: rule principal_ids=('root',) | name matches: True
+PART B2: rule principal_ids=('root',) | name matches forged principal: True
 ```
 
-**影响**:scope 收窄挡不住这条,因为父级本来就有那些 scope。漏洞在"名字即权限"。
+**修复后**(#17):
 
-**现有兜底**:无。
+```
+PART A : refused -> child_principal_impersonation
+PART A2: refused -> child_scope_escalation
+PART B : narrowed principal_id= root parent= worker scopes=('workspace.write',)
+PART B2: rule principal_ids=('root',) | name matches forged principal: True
+```
+
+**修法**:子代理的身份只能是**父代理自己的身份**(继承),或者一个**祖先没用过的名字**;冒用链上任何祖先的名字会被 `child_principal_impersonation` 拒绝。`Principal.narrow()` 同步拒绝"采用签发者自己的名字"。
+
+**为什么这条够用**:单根系统里,唯一带特权的名字就是根的名字,而根在**每一条**链上。所以"链上祖先检查"等价于"不能冒充任何有特权的身份"。
+
+**残余(属于 F2,不属于 F1)**:`PART B2` 仍然显示匹配为真。因为 `Principal` 是个普通 dataclass,没有来源证明——**谁能凭空构造一个 `Principal`,谁就能给它起任何名字**。这不是委派的问题,是根的身份问题,见 F2。
+
+**影响**:在修好之前,scope 收窄挡不住这条,因为父级本来就有那些 scope。漏洞在"名字即权限"。
+
+**现有兜底**:`child_principal_impersonation`(#17)。
 
 **对齐的基线**:B4 / B6 —— 身份不可自签。
 
@@ -198,9 +213,11 @@ token 解决的是"身份能不能被伪造",不解决"谁有权签发"。**F2 �
 
 ### 7.7 落地顺序(重要)
 
-1. **先让身份不可伪造**:`subject` 从名字改成 `agent_id`,策略规则按 id 绑定而不是按名字字符串。**这一步单独就能消灭 F1**,而且不依赖签名体系。
+1. **先让身份不可伪造**(#17 已完成):委派时子代理不能采用链上任何祖先的名字,只能继承父级或使用新名字。**这一步单独就消灭了 F1**,而且不依赖签名体系。
 2. **再加 TTL 与每动作验证**:此时 token 可以是运行时内部结构,不一定要真实签名。
 3. **最后加续约 + 硬上限 + 撤销**:配合 F2 的可信根,才谈得上"签名"。
 
-反过来做(先上签名)会得到一个自签的 token——比名字好一点,但根上还是自证。
+反向做法(先上签名)会得到一个自签的 token——比名字好一点,但根上还是自证。
+
+**1b(未做)**:策略规则目前仍按 `principal_ids` 名字字符串匹配。在只有一个根的前提下,链条检查已经足够;一旦出现**多个**特权身份,必须改成按 `agent_id` 绑定,否则跨树重名会重新打开这条路。
 
