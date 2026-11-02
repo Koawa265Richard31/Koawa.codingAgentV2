@@ -609,9 +609,29 @@ def assemble_execution_plane(
             )
 
             def _register_shell_tool(built_registry):
+                reviewer = None
+                review_policy = None
+                if config.policy.shell_review == "required":
+                    # Issue #9: the provider-backed judge is injected by the
+                    # deployment.  Until one is wired, the gate denies every
+                    # command instead of silently allowing it.
+                    from ..tools.shell_review import (
+                        ReviewPolicy,
+                        UnavailableShellReviewer,
+                    )
+
+                    reviewer = UnavailableShellReviewer()
+                    review_policy = ReviewPolicy(
+                        min_confidence=config.policy.shell_review_min_confidence
+                    )
                 built_registry.register(
                     shell_tool_spec(),
-                    ShellTool(shell_executor, shell_limits),
+                    ShellTool(
+                        shell_executor,
+                        shell_limits,
+                        reviewer=reviewer,
+                        review_policy=review_policy,
+                    ),
                 )
 
             shell_registrar = (_register_shell_tool,)
