@@ -84,6 +84,7 @@ class ThreadRuntime:
         store: EventStore,
         *,
         actor: str = "runtime",
+        owner_id: str | None = None,
         text_policy: CanonicalTextPolicy | None = None,
         fault_port: object | None = None,
     ) -> None:
@@ -98,10 +99,17 @@ class ThreadRuntime:
         """
         if not isinstance(actor, str) or not actor.strip():
             raise ValueError("actor must be non-empty")
+        resolved_owner = actor if owner_id is None else owner_id
+        if not isinstance(resolved_owner, str) or not resolved_owner.strip():
+            raise ValueError("owner_id must be non-empty")
         if text_policy is not None and not isinstance(text_policy, CanonicalTextPolicy):
             raise TypeError("text_policy must be CanonicalTextPolicy or None")
         self._store = store
         self._actor = actor
+        # Issue #18 F2: recorded on every session so root authority can be
+        # issued from the record.  Defaults to the audit actor for legacy
+        # callers; production should pass the configured owner explicitly.
+        self._owner_id = resolved_owner
         if fault_port is None:
             from ..telemetry.faults import NO_OP_FAULT_PORT
 
@@ -151,6 +159,7 @@ class ThreadRuntime:
             payload={
                 "thread_id": str(resolved_thread_id),
                 "workspace_ref": workspace_ref,
+                "owner_id": self._owner_id,
             },
             occurred_at=_now(),
             command_id=resolved_command_id,

@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+from ..control.event_store import StreamId
 from ..telemetry.faults import FaultPoint, adapt_fault_callback
 
 from .graph import (
@@ -240,6 +241,8 @@ class AgentControlPlane:
         clock: Callable[[], datetime] | None = None,
         faults: FaultInjector = NO_FAULTS,
         fault_port=None,
+        owner_id: str | None = None,
+        root_principal_id: str = "root",
     ) -> None:
         for method in ("append_batch", "read_stream", "read_all", "current_global_position"):
             if not callable(getattr(event_store, method, None)):
@@ -260,6 +263,17 @@ class AgentControlPlane:
         self.limits = limits or AgentBudgetLimits()
         self._clock = clock
         self._faults = adapt_fault_callback(faults, fault_port)
+        # Issue #18 F2: when an owner is configured, root agents must be
+        # issued by an existing session created by that owner.  None keeps the
+        # legacy construction path (tests / embedded use) available.
+        if owner_id is not None and (
+            not isinstance(owner_id, str) or not owner_id.strip()
+        ):
+            raise ValueError("owner_id must be non-empty text or None")
+        if not isinstance(root_principal_id, str) or not root_principal_id.strip():
+            raise ValueError("root_principal_id must be non-empty text")
+        self._owner_id = owner_id
+        self._root_principal_id = root_principal_id
         # Incremental, process-local index over the append-only global log.
         # It never asserts truth: each scan consumes the durable tail after the
         # last observed global position before returning the accumulated spawns.
@@ -297,6 +311,7 @@ class AgentControlPlane:
         scopes: tuple[str, ...],
         context_mode: ContextMode = ContextMode.FRESH,
         turn_id: UUID | None = None,
+        thread_id: UUID | None = None,
         parent_run_id: UUID | None = None,
         semantic_idempotency_key: str | None = None,
     ) -> AgentRecord:
@@ -325,6 +340,11 @@ class AgentControlPlane:
         child_id = uuid5(command_id, "child")
         reservation_id = uuid5(command_id, "resource-reservation")
         if parent_agent_id is None:
+            # Issue #18 F2: root authority is issued by the session record,
+            # not chosen by the caller.  A root spawn must name the session it
+            # belongs to, and that session must have been created by this
+            # runtime's owner.
+            self._validate_session_root(thread_id, principal_id)
             return self._spawn_root(
                 command_id,
                 child_id,
@@ -2802,6 +2822,35 @@ class AgentControlPlane:
         """Compatibility count of active non-root reservations under a root."""
 
         return self._root_budget(root_agent_id).active_count
+
+    def _validate_session_root(
+        self, thread_id: UUID | None, principal_id: str
+    ) -> None:
+        """Issue root authority from the session record (issue #18 F2).
+
+        With no owner configured this is the legacy path.  With an owner
+        configured, a root agent may only be created for an existing session
+        created by that owner, and only under the issued root principal name.
+        Forgery then requires writing the thread stream - CAS-guarded and
+        audited - instead of passing a string.
+        """
+
+        if self._owner_id is None:
+            return
+        if thread_id is None:
+            raise AgentError("root_spawn_requires_session")
+        if not isinstance(thread_id, UUID):
+            raise AgentError("invalid_session_reference")
+        head = self.event_store.read_stream(
+            StreamId("thread", thread_id), limit=1
+        )
+        if not head or head[0].event_type != "thread.created.v1":
+            raise AgentError("session_root_unissued")
+        owner = head[0].payload.get("owner_id")
+        if owner != self._owner_id:
+            raise AgentError("session_owner_mismatch")
+        if principal_id != self._root_principal_id:
+            raise AgentError("root_principal_not_issued")
 
     def _validate_spawn_parent(
         self,
