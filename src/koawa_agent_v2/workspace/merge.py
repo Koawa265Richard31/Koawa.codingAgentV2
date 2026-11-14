@@ -43,7 +43,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ..agents.graph import AgentError
 from ..editing.protocol import PatchError, TextDocument, decode_text_document
@@ -339,6 +339,102 @@ def validate_merge_request(
         total_bytes += size
         if total_bytes > limits.max_total_bytes:
             raise MergeError("merge_too_large")
+
+
+def record_merge_effect(
+    store: Any,
+    *,
+    request: MergeRequest,
+    parent_agent_id: UUID,
+) -> Any:
+    """把一次合并授权确定性入账 workspace-effect 账本（MERGE_APPLY）。
+
+    幂等键 = ``(source_agent_id, run_id, patch_digest)``，语义键不含授权方：
+    同一请求换 ``parent_agent_id`` 重放会因请求指纹不符撞
+    ``workspace_effect_idempotency_conflict``——一份补丁在一次 run 里只承认
+    一次授权记录，fail-closed。持久载荷五字段
+    ``(source_agent_id, run_id, parent_agent_id, base_commit, patch_digest)``
+    落在效果记录的 result 映射与效果流事件 payload 里；返回值暴露 effect id
+    （终态效果记录）。
+    """
+    if not isinstance(request, MergeRequest):
+        raise MergeError("invalid_merge_request")
+    if not isinstance(parent_agent_id, UUID):
+        raise MergeError("invalid_merge_parent")
+
+    # 本地导入破循环（与 control.py 的方法内导入同一先例）。
+    from .effects import (
+        WorkspaceEffectConflict,
+        WorkspaceEffectKind,
+        WorkspaceEffectResultKind,
+        WorkspaceEffectState,
+        workspace_effect_id,
+        workspace_resource_nonce,
+    )
+
+    fields = {
+        "source_agent_id": str(request.source_agent_id),
+        "run_id": str(request.run_id),
+        "parent_agent_id": str(parent_agent_id),
+        "base_commit": request.base_commit,
+        "patch_digest": request.patch_digest,
+    }
+
+    def _doc_digest(document: dict) -> str:
+        payload = json.dumps(
+            document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    semantic = uuid5(
+        NAMESPACE_URL,
+        "koawa-v2:merge-apply:"
+        f"{request.source_agent_id}:{request.run_id}:{request.patch_digest}",
+    )
+    effect_id = workspace_effect_id(WorkspaceEffectKind.MERGE_APPLY, semantic)
+    nonce = workspace_resource_nonce(effect_id)
+
+    intended = store.intend(
+        semantic_command_id=semantic,
+        kind=WorkspaceEffectKind.MERGE_APPLY,
+        repository_identity_digest=_doc_digest(
+            {"base_commit": request.base_commit}
+        ),
+        agent_id=request.source_agent_id,
+        run_id=request.run_id,
+        resource_ref=(
+            f"merge-apply/{fields['source_agent_id']}/{fields['run_id']}/{nonce}"
+        ),
+        base_digest=_doc_digest({"base_commit": request.base_commit}),
+        input_digest=_doc_digest(fields),
+        precondition_digest=_doc_digest({"ledger_entry_present": False}),
+        expected_postcondition_digest=_doc_digest({"ledger_entry_present": True}),
+    )
+    record = intended.record
+    if record.state is not WorkspaceEffectState.INTENDED:
+        # 幂等回放：效果流已存在。按已入账的授权方 fail-closed 比较。
+        durable_parent = (record.result or {}).get("parent_agent_id")
+        if durable_parent is None or str(durable_parent) != str(parent_agent_id):
+            raise WorkspaceEffectConflict("workspace_effect_idempotency_conflict")
+        if record.state is WorkspaceEffectState.APPLIED:
+            return record
+        raise MergeError("merge_effect_unresolved_state")
+
+    claimed = store.claim(
+        effect_id, expected_version=record.version, owner_id="merge-ledger"
+    ).record
+    return store.record_applied(
+        effect_id,
+        expected_version=claimed.version,
+        claim_epoch=claimed.claim_epoch,
+        claim_token=claimed.claim_token,
+        result_kind=WorkspaceEffectResultKind.SUCCESS,
+        result_code="merge_recorded",
+        exit_code=0,
+        postcondition_digest=_doc_digest({"ledger_entry_present": True}),
+        evidence_digest=_doc_digest(fields),
+        result=dict(fields),
+    ).record
 
 
 def _locate_git() -> str:
