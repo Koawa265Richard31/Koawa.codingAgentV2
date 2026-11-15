@@ -341,6 +341,41 @@ def validate_merge_request(
             raise MergeError("merge_too_large")
 
 
+def patch_paths(patch_json: str) -> tuple[str, ...]:
+    """严格解析 patch 文档,返回折叠后的全部 change 路径(按文档顺序)。
+
+    与 :func:`validate_merge_request` 同一套文档形状判据:patch_json 可解析、
+    顶层键集恰为 ``{"schema_version", "changes"}``、``schema_version`` 为非
+    bool 的 1、``changes`` 是非空列表、每个 change 是带非空 str ``path`` 的
+    dict;路径经同一个 :func:`_canonical_merge_path` 折叠。任何形状偏差都是
+    ``invalid_merge_patch``。这里只回答"路径从哪来":change 的 operation/内容
+    结构、digest 绑定与字节限额仍由 validate_merge_request 复核,不重复。
+    """
+    if not isinstance(patch_json, str):
+        raise MergeError("invalid_merge_patch")
+    try:
+        document = json.loads(patch_json)
+    except (json.JSONDecodeError, UnicodeError, ValueError, RecursionError, TypeError):
+        raise MergeError("invalid_merge_patch") from None
+    if not isinstance(document, dict) or set(document) != {"schema_version", "changes"}:
+        raise MergeError("invalid_merge_patch")
+    version = document["schema_version"]
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        raise MergeError("invalid_merge_patch")
+    changes = document["changes"]
+    if not isinstance(changes, list) or not changes:
+        raise MergeError("invalid_merge_patch")
+    paths: list[str] = []
+    for change in changes:
+        if not isinstance(change, dict):
+            raise MergeError("invalid_merge_patch")
+        raw_path = change.get("path")
+        if not isinstance(raw_path, str) or not raw_path:
+            raise MergeError("invalid_merge_patch")
+        paths.append(_canonical_merge_path(raw_path))
+    return tuple(paths)
+
+
 def record_merge_effect(
     store: Any,
     *,
@@ -711,18 +746,21 @@ def _canonical_merge_path(value: str) -> str:
     return "/".join(parts)
 
 
-def _path_protected(path: str, patterns: Iterable[str]) -> bool:
-    """保护模式匹配："/" 结尾按目录前缀、含 "/" 按精确匹配、裸词按文件名前缀。
+def path_in_scope(path: str, scope: tuple[str, ...]) -> bool:
+    """作用域命中："/" 结尾按目录前缀、含 "/" 按精确匹配、裸词按文件名前缀。
 
-    全部比较统一 casefold（与协议的路径去重和 Windows 大小写不敏感一致）。
-    空模式按裸词空前缀处理，会保护一切路径——保持字面语义，由调用方负责传入
-    有意义的模式。
+    与保护模式同一段三段匹配语义，任一模式命中即 True；全部比较统一
+    casefold（与协议的路径去重和 Windows 大小写不敏感一致），作用在已经
+    :func:`_canonical_merge_path` 折叠的路径上。空作用域返回 False（不限制
+    时调用方应先判空、根本不进入本函数）。保护检查与子代理 ``change_scope``
+    的委派作用域检查共用这段实现：前者任一路径命中即拒，后者每个路径必须
+    命中其一，极性不同、谓词相同。
     """
     key = path.casefold()
     name = PurePosixPath(path).name.casefold()
-    for pattern in patterns:
+    for pattern in scope:
         if not isinstance(pattern, str):
-            raise TypeError("protected_patterns must be strings")
+            raise TypeError("scope patterns must be strings")
         folded = pattern.casefold()
         if folded.endswith("/"):
             if key.startswith(folded):
@@ -733,6 +771,15 @@ def _path_protected(path: str, patterns: Iterable[str]) -> bool:
         elif name.startswith(folded):
             return True
     return False
+
+
+def _path_protected(path: str, patterns: Iterable[str]) -> bool:
+    """保护模式匹配：任一 pattern 命中即受保护；谓词复用 :func:`path_in_scope`。
+
+    空模式按裸词空前缀处理，会保护一切路径——保持字面语义，由调用方负责传入
+    有意义的模式。
+    """
+    return path_in_scope(path, patterns)
 
 
 _ADD_FIELDS = frozenset({"operation", "path", "content", "newline", "utf8_bom"})
@@ -814,5 +861,7 @@ __all__ = [
     "canonical_patch_digest",
     "export_patch",
     "export_worktree_patch",
+    "patch_paths",
+    "path_in_scope",
     "validate_merge_request",
 ]
