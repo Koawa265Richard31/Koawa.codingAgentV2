@@ -314,12 +314,30 @@ class AgentControlPlane:
         thread_id: UUID | None = None,
         parent_run_id: UUID | None = None,
         semantic_idempotency_key: str | None = None,
+        change_scope: tuple[str, ...] = (),
     ) -> AgentRecord:
         if not isinstance(task_id, str) or not task_id or len(task_id) > 256:
             raise AgentError("invalid_agent_task")
         if not isinstance(principal_id, str) or not principal_id or len(principal_id) > 128:
             raise AgentError("invalid_agent_principal")
         scopes = tuple(sorted(set(scopes)))
+        # 委派作用域:声明后,该子代理导出的补丁路径必须命中其中之一才能被父级
+        # 授权合并。形状规则与 PolicyConfig.protected_paths 相同(runtime/
+        # config.py):精确路径、"/" 结尾目录前缀或裸词文件名前缀;空元组即不
+        # 限制。
+        if not isinstance(change_scope, tuple):
+            raise AgentError("invalid_agent_change_scope")
+        change_scope = tuple(sorted(set(change_scope)))
+        for pattern in change_scope:
+            if (
+                not isinstance(pattern, str)
+                or not pattern
+                or pattern.startswith("/")
+                or "\\" in pattern
+                or ".." in pattern.split("/")
+                or len(pattern) > 256
+            ):
+                raise AgentError("invalid_agent_change_scope")
         if semantic_idempotency_key is not None:
             if (
                 not isinstance(semantic_idempotency_key, str)
@@ -354,6 +372,7 @@ class AgentControlPlane:
                 context_mode=context_mode,
                 turn_id=turn_id,
                 parent_run_id=parent_run_id,
+                change_scope=change_scope,
             )
         return self._spawn_child(
             command_id,
@@ -366,6 +385,7 @@ class AgentControlPlane:
             scopes=scopes,
             context_mode=context_mode,
             turn_id=turn_id,
+            change_scope=change_scope,
         )
 
     def _spawn_root(
@@ -379,6 +399,7 @@ class AgentControlPlane:
         context_mode: ContextMode,
         turn_id: UUID | None,
         parent_run_id: UUID | None,
+        change_scope: tuple[str, ...],
     ) -> AgentRecord:
         """Root spawn: a single spawned.v2 write; no pseudo reserve/release."""
         fingerprint = _fingerprint({
@@ -387,6 +408,7 @@ class AgentControlPlane:
             "task_id": task_id,
             "principal_id": principal_id,
             "scopes": list(scopes),
+            "change_scope": list(change_scope),
             "context_mode": context_mode.value,
             "turn_id": None if turn_id is None else str(turn_id),
             "limits": _limits_document(self.limits),
@@ -413,6 +435,7 @@ class AgentControlPlane:
                 observed_at=observed_at,
                 capacity_reservation_id=None,
                 budget_reservation_id=None,
+                change_scope=change_scope,
             )
             try:
                 self.event_store.append_batch(
@@ -444,6 +467,7 @@ class AgentControlPlane:
         scopes: tuple[str, ...],
         context_mode: ContextMode,
         turn_id: UUID | None,
+        change_scope: tuple[str, ...],
     ) -> AgentRecord:
         """Atomic four-stream spawn (section 5.5, P0-03).
 
@@ -464,6 +488,7 @@ class AgentControlPlane:
             "task_id": task_id,
             "principal_id": principal_id,
             "scopes": list(scopes),
+            "change_scope": list(change_scope),
             "context_mode": context_mode.value,
             "turn_id": None if turn_id is None else str(turn_id),
             "limits": _limits_document(self.limits),
@@ -562,6 +587,7 @@ class AgentControlPlane:
                 observed_at=observed_at,
                 capacity_reservation_id=reservation_id,
                 budget_reservation_id=reservation_id,
+                change_scope=change_scope,
             )
             writes = (
                 StreamWrite(
@@ -2859,11 +2885,13 @@ class AgentControlPlane:
 
         与 :meth:`_validate_spawn_parent` 同风格:逐条失败闭合为稳定错误码,
         全部通过时返回 ``None``。patch digest/路径/限额校验由
-        ``workspace.merge.validate_merge_request`` 承担,这里不重复。类型引用
-        用方法内本地导入破循环(与 :meth:`_narrow_delegated_identity` 的函数级
-        导入同一先例),模块顶部 import 区不动。
+        ``workspace.merge.validate_merge_request`` 承担,这里不重复(唯一的
+        例外是子代理声明了 ``change_scope`` 时的作用域命中检查,它是授权围栏
+        而非内容校验)。类型引用用方法内本地导入破循环(与
+        :meth:`_narrow_delegated_identity` 的函数级导入同一先例),模块顶部
+        import 区不动。
         """
-        from ..workspace.merge import MergeRequest
+        from ..workspace.merge import MergeRequest, patch_paths, path_in_scope
 
         if not isinstance(request, MergeRequest):
             raise AgentError("invalid_merge_request")
@@ -2886,6 +2914,35 @@ class AgentControlPlane:
         if parent.state is AgentState.RUNNING:
             if parent_run_id is None or parent_run_id != parent.run_id:
                 raise AgentError("parent_run_fenced")
+        # 来源终态闸(维护者决定 2026-11-15):已取消/已失败的子代理不再产出
+        # 可合并的变更;COMPLETED/RUNNING/CREATED 不在此闸内。
+        if child.state is AgentState.CANCELLED:
+            raise AgentError("merge_source_cancelled")
+        if child.state is AgentState.FAILED:
+            raise AgentError("merge_source_failed")
+        # run 一致性:请求必须绑定子代理当前 run。child 从未 start_attempt 时
+        # record.run_id 为 None,同样不匹配即拒绝。COMPLETED 例外:terminal
+        # 结算按 reducer 语义清空 record.run_id(agent.completed.v2 分支,
+        # graph.py),补丁的 run 绑定只由 request.run_id 携带(正常流:子代理
+        # 跑完 -> 导出补丁 -> 父级授权),故 COMPLETED 来源不做记录比对。
+        # MergeRequest 无 __post_init__:手拼请求可携带 run_id=None,与
+        # record.run_id 同为 None 时"!= "为假会放行——补丁必须绑定具体 run,
+        # 无条件先拒。
+        if request.run_id is None:
+            raise AgentError("merge_source_run_mismatch")
+        if (
+            child.state is not AgentState.COMPLETED
+            and request.run_id != child.run_id
+        ):
+            raise AgentError("merge_source_run_mismatch")
+        # 委派作用域:子代理声明了 change_scope 时,补丁里每个路径都必须命中
+        # 作用域之一(三段匹配语义与 protected_patterns 相同)。路径解析用
+        # workspace.merge.patch_paths;解析失败按 invalid_merge_patch 原样
+        # 传出——补丁内容问题归 validate_merge_request 的码,这里不重复。
+        if child.change_scope:
+            for path in patch_paths(request.patch_json):
+                if not path_in_scope(path, child.change_scope):
+                    raise AgentError("merge_path_outside_change_scope")
         # 链检查:parent 必须在 child 的严格祖先路径上。带 visited 防环,
         # 走法与 _ancestor_principals / root_for 一致;祖先流缺失即"走不到"。
         if child.agent_id == parent_agent_id:
@@ -3009,6 +3066,7 @@ class AgentControlPlane:
         observed_at: datetime,
         capacity_reservation_id: UUID | None,
         budget_reservation_id: UUID | None,
+        change_scope: tuple[str, ...],
     ) -> NewEvent:
         return self._event(
             command_id,
@@ -3025,6 +3083,7 @@ class AgentControlPlane:
                 "run_id": None,
                 "principal_id": principal_id,
                 "scopes": list(scopes),
+                "change_scope": list(change_scope),
                 "context_mode": context_mode.value,
                 "created_at": observed_at.isoformat(),
                 "depth": depth,
