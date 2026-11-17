@@ -14,4 +14,29 @@ build/
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
+
+# Local audit logs and runtime snapshots.
+/audits/**/*.log
+/audits/**/core-tests*.txt
+/audits/**/focused-tests*.txt
+/audits/**/full-regression*.txt
+/audits/**/docker-lane-*.txt
+/audits/2026-09-11-platform-audit/d10-retest-clean.txt
+/audits/**/*.sqlite3.session.json
+/audits/**/run*-usage.json
+
+# Local study notes and retired drafts.
+/docs/local/
+/docs/note/d13-d23-context-memory-reading-notes-2026-09-16.md
+/docs/note/r[234]-guided-read-unit.md
+/docs/note/r5-complete-plain.md
+/docs/open-active/agent-security-community-roadmap-2026-09-30.md
+/docs/open-active/community-contribution-progress.md
+/docs/open-active/community-contribution-retrospective.md
+/docs/open-active/gap-implementation-plan.md
+/docs/open-active/guardrail-repo-scouting.md
+
 audits/2026-09-11-platform-audit/t1-run/
+
+# 本地笔记：只保留在工作区，不进入仓库
+docs/note/OpenShell笔记_2026.9.16.md

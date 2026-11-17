@@ -1,6 +1,6 @@
 # docs/ 目录结构（2026-09-13 整理）
 
-全部设计/治理/操作文档按状态分为两夹；未删除任何文件，git 保留全部历史。
+项目设计、治理和操作文档按状态归档。索引记录当前查阅入口，历次提交保留变更历史。
 
 ## closed-archive/ —— 已闭合（历史档案，只读参考）
 
@@ -15,7 +15,7 @@
 
 ## open-active/ —— 待办与活文档（有未闭合项或持续使用）
 
-- `agent-security-community-roadmap-2026-09-30.md`：Agent 安全社区贡献与 KoawaAgent 学习的 8 周路线；首题为安全评测空转验证，含每周产物、证据标准和披露边界。仅规划，未启动外部贡献。
+- 测试验收应引用实际执行证据。[测试证据层验收规则](open-active/test-evidence-layer-rule.md)
 - `psec-progress.md`：PSEC 进度账本（**唯一状态事实源**）——未闭合项：B-3 委派图接线、B-1 残余（remote-MCP OAuth/凭据代管）、Mimosa 13+14 findings 逐条分诊、takeover×sticky 交集未审计。
 - `rtj-progress.md`：RT/J 账本——sticky escalation×takeover 交集、变形/编码种子（declared 不检测）。
 - `agent-security-threat-model.md`：活治理文档（T1–T7，随代码演进更新哈希）。
@@ -29,7 +29,11 @@
 
 ## 相关目录
 
-- `audits/2026-09-11-platform-audit/`：**现役**平台审计（§10 开口项：S1 facade 已修待回归、S4 空文本待定位、S6 task 主 loop claim gate、S7 工具描述、S8 设计裁决、T2 消融、真实模型续跑）。
-- `audits/closed/2026-09-07-platform-audit/`：首轮审计，已被 09-11 取代，其 F1–F3 已修复（cbc0629/b29e4c6）。
+- **现役**平台审计（§10 开口项：S1 facade 已修待回归、S4 空文本待定位、S6 task 主 loop claim gate、S7 工具描述、S8 设计裁决、T2 消融、真实模型续跑）。[09-11 平台审计报告](../audits/2026-09-11-platform-audit/report.md)
+- 首轮审计已被 09-11 取代，其 F1–F3 已修复（cbc0629/b29e4c6）。[09-07 首轮审计报告](../audits/closed/2026-09-07-platform-audit/report.md)
+
+审计目录保留报告、验收基线、复现实验输入和证据摘要。原始测试日志、运行日志、状态库、会话与用量快照由运行者保存在本地。历史报告中列出的原始产物可按文件名从相应的 Git 提交追溯。
+
+个人阅读笔记、社区协作记录与不再维护的草稿存放在本地。新增此类笔记可放入 `docs/local/`，该目录已加入 [.gitignore](../.gitignore)。
 
 注意：src/tests 的 docstring 中存在指向 `docs/day-23-*.md` 等旧路径的注释引用（仅注释，无运行时加载）；本整理不改源码注释。
