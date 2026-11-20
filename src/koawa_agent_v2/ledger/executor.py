@@ -15,7 +15,7 @@ from ..execution.loop import (
     ToolExecutor,
 )
 from ..model.protocol import ToolCallItem, ToolDefinition
-from ..approval_service import (
+from ..authorization.approval_service import (
     ApprovalDenied,
     ApprovalError,
     ApprovalRecord,
@@ -24,7 +24,7 @@ from ..approval_service import (
     ApprovalWaiting,
 )
 from ..control.event_store import StreamId
-from ..policy import Decision, PolicyEngine, PolicyVerdict, ResolvedAction
+from ..authorization.policy import Decision, PolicyEngine, PolicyVerdict, ResolvedAction
 from ..telemetry.trace import TraceProbe, TraceSink
 from .protocol import (
     DurableToolResult,
@@ -765,7 +765,7 @@ class LedgerExecutor:
             turn_id=context.turn_id,
             matched=matched,
         )
-        from ..approval_service import ApprovalWaiting
+        from ..authorization.approval_service import ApprovalWaiting
         raise ApprovalWaiting("security_escalation_pending")
 
     def _require_grant(

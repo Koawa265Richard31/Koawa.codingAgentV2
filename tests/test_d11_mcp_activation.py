@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from koawa_agent_v2.approval_service import ApprovalService
+from koawa_agent_v2.authorization.approval_service import ApprovalService
 from koawa_agent_v2.control.runtime import ThreadRuntime
 from koawa_agent_v2.control.sqlite_store import SqliteEventStore
 from koawa_agent_v2.execution.loop import AgentLoop

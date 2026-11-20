@@ -21,7 +21,7 @@ from koawa_agent_v2.agents.control import (
 from koawa_agent_v2.agents.graph import AgentState, ContextMode
 from koawa_agent_v2.agents.messages import MessageKind
 from koawa_agent_v2.agents.scheduler import AgentScheduler, ScriptedAgentProvider
-from koawa_agent_v2.approval_service import ApprovalService, ApprovalStatus
+from koawa_agent_v2.authorization.approval_service import ApprovalService, ApprovalStatus
 from koawa_agent_v2.control.models import TurnStatus
 from koawa_agent_v2.control.runtime import ThreadRuntime
 from koawa_agent_v2.control.sqlite_store import SqliteEventStore
@@ -57,7 +57,7 @@ from koawa_agent_v2.model.protocol import (
     TurnCompleted,
     TurnStarted,
 )
-from koawa_agent_v2.policy import (
+from koawa_agent_v2.authorization.policy import (
     ActionKind,
     Decision,
     PolicyEngine,

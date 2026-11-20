@@ -15,7 +15,7 @@ from pathlib import Path
 from koawa_agent_v2.agents.control import AgentBudgetLimits, AgentControlPlane
 from koawa_agent_v2.agents.graph import ContextMode
 from koawa_agent_v2.control.sqlite_store import SqliteEventStore
-from koawa_agent_v2.policy import PolicyError, Principal
+from koawa_agent_v2.authorization.policy import PolicyError, Principal
 
 
 def _clock() -> datetime:

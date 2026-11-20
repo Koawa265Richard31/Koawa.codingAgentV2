@@ -32,6 +32,7 @@ D1–D25 切片设计、15 天路线图、I1–I9 稳定化、RT/J 红队计划�
 
 - `agent-team-security-baseline.md`:产品级基线对照 + F1–F7 安全问题清单。
 - `session-root-and-identity.md`:F2 落地说明——root 由会话签发,不再是一个名字。
+- [任务工作区模式决策记录](open-active/workspace-permission-modes.md)（读取范围、候选工作区、测试与 MCP、补丁交付）。
 
 ### 操作手册(持续使用)
 

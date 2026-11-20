@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from koawa_agent_v2.approval_service import ApprovalService
+from koawa_agent_v2.authorization.approval_service import ApprovalService
 from koawa_agent_v2.control.sqlite_store import SqliteEventStore
 from koawa_agent_v2.control.runtime import ThreadRuntime
 from koawa_agent_v2.execution.loop import (
@@ -37,7 +37,7 @@ from koawa_agent_v2.mcp.activation import (
     resolve_launch_identity,
 )
 from koawa_agent_v2.mcp.launcher import SandboxedLauncher
-from koawa_agent_v2.policy import ActionKind, Decision, PolicyEngine, PolicyRule
+from koawa_agent_v2.authorization.policy import ActionKind, Decision, PolicyEngine, PolicyRule
 from koawa_agent_v2.runtime.config import (
     McpExecutionProfile,
     McpResourceLimits,
@@ -145,7 +145,7 @@ class SandboxE2ETest(unittest.TestCase):
         return ticket, launcher
 
     def _executor(self, session: McpSession, catalog):
-        from koawa_agent_v2.policy import (
+        from koawa_agent_v2.authorization.policy import (
             Principal,
             ResolvedAction,
             SideEffectClass as PolicySideEffectClass,

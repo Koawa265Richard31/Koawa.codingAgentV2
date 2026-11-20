@@ -29,7 +29,7 @@ from ..control.durable_json import (
 )
 from ..recovery.redaction import _ASSIGNMENT, _BEARER, _OPENAI_KEY, _SENSITIVE_KEY
 from ..model.openai_client import ReasoningEffort, reasoning_family
-from ..policy import Decision
+from ..authorization.policy import Decision
 from .memory import MemoryConfig, MemoryConfigError
 
 _CONFIG_ERROR = re.compile(r"[a-z][a-z0-9_]{0,127}")

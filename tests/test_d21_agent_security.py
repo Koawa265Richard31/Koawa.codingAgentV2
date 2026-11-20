@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from koawa_agent_v2.approval_service import ApprovalService
+from koawa_agent_v2.authorization.approval_service import ApprovalService
 from koawa_agent_v2.control.event_store import StreamId
 from koawa_agent_v2.control.models import TurnStatus
 from koawa_agent_v2.control.runtime import ThreadRuntime
@@ -53,7 +53,7 @@ from koawa_agent_v2.model.protocol import (
     TurnCompleted,
     TurnStarted,
 )
-from koawa_agent_v2.policy import (
+from koawa_agent_v2.authorization.policy import (
     ActionKind,
     Decision,
     NetworkTarget,

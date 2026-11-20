@@ -11,7 +11,7 @@ from threading import Barrier
 from typing import TypeAlias
 from uuid import UUID, uuid4
 
-from koawa_agent_v2.approval_service import (
+from koawa_agent_v2.authorization.approval_service import (
     ApprovalService,
     ApprovalStatus,
 )
@@ -51,7 +51,7 @@ from koawa_agent_v2.model.protocol import (
     TurnCompleted,
     TurnStarted,
 )
-from koawa_agent_v2.policy import (
+from koawa_agent_v2.authorization.policy import (
     ActionKind,
     Decision,
     PolicyEngine,

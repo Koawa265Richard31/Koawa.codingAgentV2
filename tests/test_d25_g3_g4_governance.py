@@ -51,7 +51,7 @@ from koawa_agent_v2.runtime.config import (
     SandboxRunner,
     TestProfileConfig,
 )
-from koawa_agent_v2.policy import Decision
+from koawa_agent_v2.authorization.policy import Decision
 from koawa_agent_v2.sandbox.docker_primitives import ContainerSpec
 from koawa_agent_v2.sandbox.runtime import SandboxAllocationStore
 

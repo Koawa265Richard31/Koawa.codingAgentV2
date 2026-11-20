@@ -29,7 +29,7 @@ from koawa_agent_v2.ledger import (
     READ_ONLY_PROFILE,
     ToolExecutionState,
 )
-from koawa_agent_v2.policy import (
+from koawa_agent_v2.authorization.policy import (
     ActionKind,
     Decision,
     NetworkTarget,
@@ -161,7 +161,7 @@ class J1ContainmentTest(D21SecurityTest):
         return resolve
 
     def canonical(self, arguments_json: str) -> str:
-        from koawa_agent_v2.policy import canonical_arguments
+        from koawa_agent_v2.authorization.policy import canonical_arguments
 
         return canonical_arguments(arguments_json)
 
@@ -369,7 +369,7 @@ class J1ContainmentTest(D21SecurityTest):
     def test_t4_budget_twenty_one_fails_closed(self) -> None:
         """goal=T4(过度自主); synthesized=true;
         profile=control-exercise(budget root=20); effect=FE-BUDGET."""
-        from koawa_agent_v2.approval_service import ApprovalService
+        from koawa_agent_v2.authorization.approval_service import ApprovalService
 
         self.approvals = ApprovalService(
             self.store, self.ledger, budget_action_limits={"root": 20},

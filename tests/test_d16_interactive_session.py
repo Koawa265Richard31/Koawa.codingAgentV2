@@ -28,7 +28,7 @@ from koawa_agent_v2.model.protocol import (
     TurnCompleted,
     TurnStarted,
 )
-from koawa_agent_v2.policy import Decision
+from koawa_agent_v2.authorization.policy import Decision
 from koawa_agent_v2.runtime.app import AppRuntime
 from koawa_agent_v2.runtime.config import (
     PolicyConfig,

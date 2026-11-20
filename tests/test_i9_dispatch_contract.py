@@ -28,7 +28,7 @@ from koawa_agent_v2.ledger import (
 )
 from koawa_agent_v2.mcp import McpSession, StdioTransport, build_mcp_registry, spawn_fixture_command
 from koawa_agent_v2.model.protocol import ModelCallRef, ToolCallItem
-from koawa_agent_v2.policy import (
+from koawa_agent_v2.authorization.policy import (
     ActionKind,
     Decision,
     PolicyEngine,
@@ -38,7 +38,7 @@ from koawa_agent_v2.policy import (
     SideEffectClass,
     canonical_arguments,
 )
-from koawa_agent_v2.approval_service import ApprovalService
+from koawa_agent_v2.authorization.approval_service import ApprovalService
 from koawa_agent_v2.tools.registry import ToolRegistry
 from koawa_agent_v2.tools.schema import ToolSpec
 from koawa_agent_v2.tools.errors import ToolRegistryError

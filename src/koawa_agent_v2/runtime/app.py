@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping
 from uuid import UUID, uuid4
 
 from ..agents.graph import AgentError
-from ..approval_service import ApprovalRecord, ApprovalStatus
+from ..authorization.approval_service import ApprovalRecord, ApprovalStatus
 from ..control.event_store import StreamId
 from ..control.models import TERMINAL_TURN_STATUSES, TurnStatus
 from ..execution.loop import AgentLoopApprovalWaiting

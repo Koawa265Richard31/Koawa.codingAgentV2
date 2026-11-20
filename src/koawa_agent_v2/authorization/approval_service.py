@@ -11,20 +11,20 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from .control.event_store import (
+from ..control.event_store import (
     EventMetadata, EventStore, EventStoreError, NewEvent, StreamId,
     StreamPrecondition, StreamWrite, WrongExpectedVersion,
 )
-from .control.models import (
+from ..control.models import (
     RUN_INTERRUPTED, RUN_STARTED, TURN_RECOVERY_QUEUED, TURN_WAITING_FOR_APPROVAL,
     TurnState, TurnStatus, rebuild_turn,
 )
-from .execution.loop import ToolExecutionContext
+from ..execution.loop import ToolExecutionContext
 from .policy import Decision, PolicyError, PolicyVerdict, ResolvedAction
 
 if TYPE_CHECKING:
-    from .ledger.protocol import ToolExecutionRecord
-    from .ledger.store import ToolLedgerStore
+    from ..ledger.protocol import ToolExecutionRecord
+    from ..ledger.store import ToolLedgerStore
 
 
 class ApprovalStatus(StrEnum):
@@ -276,7 +276,7 @@ class ApprovalService:
         now: datetime | None = None,
     ) -> ToolExecutionRecord:
         """Reserve budget, consume a grant and claim D7 in one append batch."""
-        from .ledger.protocol import (
+        from ..ledger.protocol import (
             RecoveryMode,
             ToolExecutionState,
             ToolLedgerConflict,
@@ -493,7 +493,7 @@ class ApprovalService:
         context: ToolExecutionContext,
     ) -> None:
         """Persist a one-shot gate for one exact claim before handler entry."""
-        from .ledger.protocol import (
+        from ..ledger.protocol import (
             ToolExecutionState, ToolLedgerConflict, ToolOutcomeBlocked,
         )
 
@@ -711,7 +711,7 @@ class ApprovalService:
         ):
             raise ApprovalError("approval_turn_fence_rejected")
 
-        from .security.state import (
+        from ..security.state import (
             POLICY_ESCALATED_EVENT,
             SECURITY_SIGNAL_EVENT,
             SecurityStateStore,
@@ -828,7 +828,7 @@ class ApprovalService:
         verdict: PolicyVerdict,
         context: ToolExecutionContext,
     ) -> None:
-        from .ledger.protocol import ToolExecutionRecord, canonical_arguments_digest
+        from ..ledger.protocol import ToolExecutionRecord, canonical_arguments_digest
 
         if not isinstance(record, ToolExecutionRecord):
             raise TypeError("record must be ToolExecutionRecord")

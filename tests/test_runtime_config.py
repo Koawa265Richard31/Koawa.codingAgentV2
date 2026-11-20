@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from koawa_agent_v2.policy import Decision
+from koawa_agent_v2.authorization.policy import Decision
 from koawa_agent_v2.runtime.config import (
     DEFAULT_SYSTEM_PROMPT,
     McpServerConfig,

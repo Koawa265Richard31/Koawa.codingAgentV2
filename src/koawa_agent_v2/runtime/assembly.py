@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from ..approval_service import ApprovalService
+from ..authorization.approval_service import ApprovalService
 from ..control.durable_json import CanonicalTextPolicy
 from ..control.runtime import ThreadRuntime
 from ..control.sqlite_store import SqliteEventStore
@@ -58,7 +58,7 @@ from ..security import SecurityGate
 from .config import resolve_canary_key
 from ..model.protocol import InstructionMessage, InstructionRole, ModelContextItem
 from ..model.stream import StreamLimits
-from ..policy import (
+from ..authorization.policy import (
     ActionKind,
     Decision,
     PolicyEngine,

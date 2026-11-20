@@ -10,7 +10,7 @@ from ..agents.control import AgentBudgetLimits, AgentControlPlane
 from ..agents.graph import AgentState, ContextMode
 from ..agents.messages import MessageKind
 from ..agents.scheduler import AgentScheduler, ScriptedAgentProvider
-from ..approval_service import ApprovalService
+from ..authorization.approval_service import ApprovalService
 from ..context.compaction import (
     AuthoritativeProjection,
     Compactor,

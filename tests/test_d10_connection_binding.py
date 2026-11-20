@@ -27,7 +27,7 @@ from koawa_agent_v2.mcp.tool_binding import (
     bind_catalog,
 )
 from koawa_agent_v2.mcp.transport import TransportClosed, TransportTimeout
-from koawa_agent_v2.policy import (
+from koawa_agent_v2.authorization.policy import (
     ActionKind,
     Decision,
     PolicyEngine,

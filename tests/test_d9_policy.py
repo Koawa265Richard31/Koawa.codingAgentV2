@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
-from koawa_agent_v2.policy import (
+from koawa_agent_v2.authorization.policy import (
     ActionKind,
     ActionRequest,
     CredentialScope,
@@ -26,7 +26,7 @@ from koawa_agent_v2.policy import (
     resolve_network_target,
     resolve_redirect,
 )
-from koawa_agent_v2.policy import SideEffectClass
+from koawa_agent_v2.authorization.policy import SideEffectClass
 
 
 PUBLIC_DNS_1 = "8.8.8.8"

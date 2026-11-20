@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from uuid import uuid4
 
-from koawa_agent_v2.approval_service import (
+from koawa_agent_v2.authorization.approval_service import (
     ApprovalService,
     ApprovalStatus,
     ApprovalWaiting,
@@ -46,7 +46,7 @@ from koawa_agent_v2.mcp.protocol import (
 )
 from koawa_agent_v2.mcp.transport import TransportClosed, TransportTimeout
 from koawa_agent_v2.model.protocol import ModelCallRef, ToolCallItem
-from koawa_agent_v2.policy import (
+from koawa_agent_v2.authorization.policy import (
     ActionKind,
     Decision,
     PolicyEngine,

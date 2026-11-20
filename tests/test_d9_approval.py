@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import Barrier
 from uuid import UUID, uuid4
 
-from koawa_agent_v2.approval_service import (
+from koawa_agent_v2.authorization.approval_service import (
     ApprovalError,
     ApprovalService,
     ApprovalStatus,
@@ -28,7 +28,7 @@ from koawa_agent_v2.ledger import (
     ToolOutcomeBlocked,
 )
 from koawa_agent_v2.model.protocol import ModelCallRef
-from koawa_agent_v2.policy import (
+from koawa_agent_v2.authorization.policy import (
     ActionKind,
     Decision,
     PolicyVerdict,

@@ -2227,7 +2227,7 @@ class AgentControlPlane:
     def _narrow_delegated_identity(
         self, parent: AgentRecord, principal_id: str, scopes: tuple[str, ...]
     ) -> None:
-        from ..policy import PolicyError, Principal, narrow_child_principal
+        from ..authorization.policy import PolicyError, Principal, narrow_child_principal
 
         try:
             narrowed = narrow_child_principal(

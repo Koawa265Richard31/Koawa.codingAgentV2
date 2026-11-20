@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import UUID, uuid4, uuid5
 
 from ..agents.graph import AgentError
-from ..approval_service import ApprovalService
+from ..authorization.approval_service import ApprovalService
 from ..control.models import TurnStatus
 from ..control.runtime import ThreadRuntime
 from ..control.sqlite_store import SqliteEventStore
@@ -36,7 +36,7 @@ from ..model.protocol import (
     TurnCompleted,
     TurnStarted,
 )
-from ..policy import (
+from ..authorization.policy import (
     ActionKind,
     Decision,
     PolicyEngine,
