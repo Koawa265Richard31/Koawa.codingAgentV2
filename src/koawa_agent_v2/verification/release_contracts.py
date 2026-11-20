@@ -49,6 +49,7 @@ RECEIPT_SCHEMA_VERSION = "result-receipt-v1"
 TRUSTED_PRODUCERS = {
     "runtime.safe_diagnostics": "structured execution diagnostics",
     "runtime.workspace_excerpt": "bounded isolated-run excerpt",
+    "runtime.environment_signal": "administrator-allowed dependency identifiers",
 }
 KNOWN_PRODUCER_FIELDS = {
     "runtime.safe_diagnostics": tuple(
@@ -58,6 +59,7 @@ KNOWN_PRODUCER_FIELDS = {
         "isolated_workspace".split()
     ),
     "runtime.workspace_excerpt": ("diagnostics_excerpt",),
+    "runtime.environment_signal": ("missing_dependencies",),
 }
 KNOWN_TRANSFORMS = ("verbatim", "bounded")
 
@@ -208,14 +210,38 @@ class ProfileReleaseContract:
             ReleaseMode.DETAILED,
         )
 
+    def allows_dependency_names(self) -> bool:
+        """The receipt and dependency request share this release gate."""
+        return (
+            not self.sensitive
+            and self.effective_mode_allows_body()
+            and (
+                self.release_fields is None
+                or "missing_dependencies" in self.release_fields
+            )
+            and (
+                not self.producer_rules
+                or any(
+                    field == "missing_dependencies"
+                    and producer == "runtime.environment_signal"
+                    for field, producer, _ in self.producer_rules
+                )
+            )
+        )
+
 
 def effective_release_mode(
-    mode: ReleaseMode, contract: ProfileReleaseContract
+    mode: ReleaseMode,
+    contract: ProfileReleaseContract,
+    *,
+    environment_verified: bool | None = None,
 ) -> ReleaseMode:
     """§2: detailed alone authorizes nothing — it downgrades without proofs."""
 
     if mode is ReleaseMode.DETAILED and not (
-        contract.audience_proven and contract.environment_proven
+        contract.audience_proven
+        and contract.environment_proven
+        and environment_verified is not False
     ):
         return ReleaseMode.LIMITED
     return mode
@@ -231,12 +257,19 @@ def build_receipt(
     projection_reduced: bool = False,
     read_truncated: bool = False,
     receipt_ref: str | None = None,
+    environment_verified: bool | None = None,
+    environment_signal: str | None = None,
+    missing_dependencies: tuple[str, ...] = (),
+    collection_regression: tuple[int, int | None] | None = None,
+    isolation: str | None = None,
 ) -> dict:
     """§4 receipt: generated FROM the release contract, never a serialization
     of the local execution record.  States stay separate; unauthorized
     diagnostics collapse to the fixed unavailable hint without reasons."""
 
-    mode = effective_release_mode(contract.release_mode, contract)
+    mode = effective_release_mode(
+        contract.release_mode, contract, environment_verified=environment_verified
+    )
 
     # local_only discloses nothing — not even completion or timing.
     if mode is ReleaseMode.LOCAL_ONLY:
@@ -304,4 +337,21 @@ def build_receipt(
     if mode is ReleaseMode.LOCAL_ONLY:
         receipt["availability"] = "result_withheld"
         receipt["human_required"] = True
+    else:
+        # Fixed state and provenance; never copy arbitrary runner messages.
+        if isolation is not None:
+            receipt["isolation"] = isolation
+        if contract.environment_proven and environment_verified is False:
+            receipt["environment_unproven"] = True
+        if not contract.sensitive and mode in (ReleaseMode.LIMITED, ReleaseMode.DETAILED):
+            if environment_signal is not None:
+                receipt["environment_signal"] = environment_signal
+            if missing_dependencies and contract.allows_dependency_names():
+                receipt["missing_dependencies"] = list(missing_dependencies)
+            if collection_regression is not None:
+                expected, observed = collection_regression
+                receipt["test_collection_regression"] = {
+                    "expected": expected,
+                    "observed": observed,
+                }
     return receipt

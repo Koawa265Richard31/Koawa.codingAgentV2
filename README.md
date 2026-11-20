@@ -194,6 +194,16 @@ trusted test profiles (fixed argv, optional `release_fields` / `sensitive` /
 [config examples](docs/open-active/examples/). Docker is optional; sensitive
 test profiles refuse the host runner by configuration instead of relaxing.
 
+For a local development profile, JSON configurations selecting
+`host` must explicitly set `sandbox.allow_unisolated_execution` to
+`true`. Required tests always keep the default test paths protected; extra
+`policy.protected_paths` add to them. A recognized environment failure
+does not count as a candidate failure. Only a releasing, non-sensitive
+profile with exact names configured in `policy.dependency_allowed_packages`
+can show those names or request a preparation handoff. The handoff cannot
+install dependencies. Reported pytest/unittest counts are a regression check
+within the running runtime, not a persistent inventory of the test surface.
+
 Workspace and collaboration rules: [AGENTS.md](AGENTS.md) — typed events only,
 JSON persistence only, slice-scoped commits, evidence discipline (skipped
 tests are not passes; audit conclusions are graded 实测确认 / 代码推断 / 待验证).

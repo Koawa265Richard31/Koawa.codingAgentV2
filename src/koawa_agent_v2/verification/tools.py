@@ -5,13 +5,33 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from threading import RLock
+from typing import Any, Callable, Sequence
 from uuid import UUID
 
 from ..execution.loop import ToolExecutionContext, ToolExecutionResult
+from .dependency_preparation import (
+    PREP_READY,
+    DependencyScope,
+    plan_preparation,
+    releasable_names,
+)
+from .environment_signals import (
+    MISSING_DEPENDENCY,
+    classify_environment_failure,
+    evidence_isolation,
+    parse_test_count,
+)
 from .finalization import VerificationError, VerificationLedger, VerificationLimits
 from .git import GitDiffSnapshot, GitFacade, GitFacadeError, GitLimits
 from . import output_policy
+from .release_contracts import (
+    ProfileReleaseContract,
+    ReleaseMode,
+    apply_producer_rules,
+    build_receipt,
+    effective_release_mode,
+)
 from ..editing.protocol import PatchLimits
 from ..editing.tools import register_patch_tool
 from ..editing.transaction import FaultInjector
@@ -26,6 +46,7 @@ from ..tools.errors import ToolConfigurationError, tool_error_result
 from ..tools.repo_map import register_repo_map_tool
 from ..tools.schema import ToolSpec
 from .runner import (
+    CommandOutcome,
     CommandProfile,
     CommandResult,
     CommandRunner,
@@ -36,9 +57,20 @@ from .runner import (
 from ..tools.workspace import WorkspacePathResolver
 
 
+_MAX_PREPARATION_PLANS_PER_RUN = 2
+_PreparationKey = tuple[str, int, tuple[str, ...], tuple[str, ...]]
+_ContractResolver = Callable[[str], ProfileReleaseContract | None]
+
+
 @dataclass(frozen=True, slots=True)
 class RunTestArguments:
     profile_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparationArguments:
+    profile_id: str
+    packages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +116,8 @@ class _VerificationTools:
         git: GitFacade,
         verification: VerificationLedger,
         limits: D5ToolLimits,
-        release_contracts=None,
+        release_contracts: _ContractResolver | None = None,
+        dependency_scope: DependencyScope | None = None,
     ) -> None:
         self._runner = runner
         self._git = git
@@ -99,6 +132,9 @@ class _VerificationTools:
         # generation (no code change since) is probe retesting and is
         # refused; a patch bumps the generation and reopens the gate.
         self._withheld_marks: dict = {}
+        self._dependency_scope = dependency_scope
+        self._prep_replies: dict[UUID, dict[_PreparationKey, dict]] = {}
+        self._prep_lock = RLock()
 
     def run_test_profile(
         self,
@@ -139,8 +175,26 @@ class _VerificationTools:
                 progress_guard=context.check_progress,
                 execution_id=context.execution_id,
             )
-            self._verification.record_test(context.run_id, generation, result)
-            receipt_text = self._command_json(result)
+            contract = (
+                self._release_contracts(arguments.profile_id)
+                if self._release_contracts is not None
+                else None
+            )
+            reported_count = None
+            if result.passed:
+                reported_count = parse_test_count(
+                    (result.stdout or "") + "\n" + (result.stderr or "")
+                )
+            evidence = self._verification.record_test(
+                context.run_id,
+                generation,
+                result,
+                reported_count=reported_count,
+                profile_version=contract.profile_version if contract is not None else "",
+            )
+            receipt_text = self._command_json(
+                result, contract, evidence.collection_regression
+            )
             # Withheld-retest gate bookkeeping: mark the generation when the
             # receipt was withheld; clear it once a receipt is disclosable
             # (a code change reopens the normal repair loop).
@@ -163,6 +217,85 @@ class _VerificationTools:
             return ToolExecutionResult(receipt_text)
         except (CommandRunnerError, VerificationError) as error:
             return tool_error_result(error.code)
+
+    def _visible_dependencies(
+        self, contract: ProfileReleaseContract, result: CommandResult
+    ) -> tuple[str | None, tuple[str, ...]]:
+        if (
+            result.outcome is not CommandOutcome.FAILED
+            or result.inputs_changed
+            or contract.sensitive
+        ):
+            return None, ()
+        signal, observed = classify_environment_failure(result.stdout, result.stderr)
+        if (
+            signal != MISSING_DEPENDENCY
+            or self._dependency_scope is None
+            or not contract.allows_dependency_names()
+        ):
+            return signal, ()
+        return signal, releasable_names(observed, self._dependency_scope)
+
+    def request_dependency_preparation(
+        self,
+        arguments: PreparationArguments,
+        *,
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        """Plan a human handoff; there is no installation or approval side effect."""
+        profile_id = arguments.profile_id
+        try:
+            self._runner.validate_profile(profile_id)
+        except CommandRunnerError as error:
+            return tool_error_result(error.code)
+        scope = self._dependency_scope
+        contract = self._release_contracts(profile_id) if self._release_contracts else None
+        if scope is None or contract is None or not contract.allows_dependency_names():
+            # Check release authority before looking at run evidence.
+            return tool_error_result("dependency_preparation_unavailable")
+        evidence = self._verification.latest_current_test(context.run_id, profile_id)
+        if evidence is None:
+            return tool_error_result("no_environment_failure_observed")
+        signal, known = self._visible_dependencies(contract, evidence.result)
+        if signal is None:
+            return tool_error_result("no_environment_failure_observed")
+        requested = tuple(sorted(set(arguments.packages or known)))
+        if any(name not in known for name in requested):
+            return tool_error_result("unexpected_dependency_request")
+
+        payload = {
+            "profile_id": profile_id,
+            "environment_signal": signal,
+            "human_required": True,
+            "next_action": "human_required",
+            "environment_ref": None,
+        }
+        if not requested:
+            payload["status"] = "names_unavailable"
+            return ToolExecutionResult(_bounded_json(payload, self._limits.max_tool_result_chars))
+        key = (profile_id, evidence.generation, known, requested)
+        with self._prep_lock:
+            replies = self._prep_replies.setdefault(context.run_id, {})
+            if key in replies:
+                payload = {**replies[key], "idempotent_replay": True}
+            elif len(replies) >= _MAX_PREPARATION_PLANS_PER_RUN:
+                return tool_error_result("dependency_preparation_budget_exceeded")
+            else:
+                decision = plan_preparation(requested, scope, missing=known)
+                payload.update(
+                    status=decision.status,
+                    install=list(decision.install),
+                    requires_authorization=list(decision.requires_authorization),
+                    refused=list(decision.refused),
+                    reason=decision.reason,
+                )
+                if decision.status == PREP_READY:
+                    payload.update(
+                        status="executor_unavailable",
+                        reason="preparation_executor_unavailable",
+                    )
+                replies[key] = dict(payload)
+        return ToolExecutionResult(_bounded_json(payload, self._limits.max_tool_result_chars))
 
     def git_status(
         self,
@@ -223,7 +356,12 @@ class _VerificationTools:
                 detail=error.profile_id,
             )
 
-    def _command_json(self, result: CommandResult) -> str:
+    def _command_json(
+        self,
+        result: CommandResult,
+        contract: ProfileReleaseContract | None,
+        collection_regression: tuple[int, int | None] | None,
+    ) -> str:
         # Hardening 2026-09-19: the model-visible receipt carries fixed
         # structured diagnostics only - stdout/stderr bodies stay in the
         # durable record (operator side) and never enter the model service.
@@ -231,7 +369,23 @@ class _VerificationTools:
         # sensitive profile without a contract yields the fixed withheld
         # state (distinct from failure, human handoff flagged).
         if self._release_contracts is not None:
-            return self._contract_receipt(result)
+            return self._contract_receipt(result, contract, collection_regression)
+        if collection_regression is not None:
+            expected, observed_count = collection_regression
+            return _bounded_json(
+                {
+                    "profile_id": result.profile_id,
+                    "test_output_policy": output_policy.POLICY_VERSION,
+                    "execution_status": "not_completed",
+                    "verdict": "not_evaluated",
+                    "next_action": "repair_safe_environment",
+                    "test_collection_regression": {
+                        "expected": expected,
+                        "observed": observed_count,
+                    },
+                },
+                self._limits.max_tool_result_chars,
+            )
         payload: dict[str, Any] = {
             "allocation_id": (
                 str(result.allocation_id) if result.allocation_id is not None else None
@@ -262,7 +416,12 @@ class _VerificationTools:
             payload["diagnostics_excerpt"] = extract_diagnostics(result.stdout)
         return _bounded_json(payload, self._limits.max_tool_result_chars)
 
-    def _contract_receipt(self, result: CommandResult) -> str:
+    def _contract_receipt(
+        self,
+        result: CommandResult,
+        contract: ProfileReleaseContract | None,
+        collection_regression: tuple[int, int | None] | None,
+    ) -> str:
         """contracts.md §4: receipt generated FROM the release contract.
 
         execution_status / verdict map from trusted process facts; the
@@ -272,10 +431,6 @@ class _VerificationTools:
         under limited/detailed so isolation provenance survives contracts.
         """
 
-        from .release_contracts import build_receipt
-        from .runner import CommandOutcome
-
-        contract = self._release_contracts(result.profile_id)
         if contract is None:
             # Unregistered profile: runner validation already refuses; the
             # receipt path fails closed as well.
@@ -284,7 +439,10 @@ class _VerificationTools:
                 self._limits.max_tool_result_chars,
             )
 
-        if result.outcome is CommandOutcome.PASSED:
+        signal, names = self._visible_dependencies(contract, result)
+        if collection_regression is not None or signal is not None:
+            execution_status, verdict = "not_completed", "not_evaluated"
+        elif result.outcome is CommandOutcome.PASSED:
             execution_status, verdict = "completed", "passed"
         elif result.outcome is CommandOutcome.FAILED:
             execution_status, verdict = "completed", "failed"
@@ -294,11 +452,18 @@ class _VerificationTools:
         else:  # TIMED_OUT / cancelled: result unknown.
             execution_status, verdict = "uncertain", "unknown"
 
-        mode_allows_body = contract.release_mode.value in {
-            "limited", "detailed",
-        } and contract.effective_mode_allows_body()
+        isolation = evidence_isolation(result.backend)
+        environment_verified = (
+            isolation == "container"
+            and result.isolated_workspace
+            and result.immutable_image_id is not None
+            and not result.inputs_changed
+        )
+        mode = effective_release_mode(
+            contract.release_mode, contract, environment_verified=environment_verified
+        )
         diagnostic: dict = {}
-        if mode_allows_body:
+        if mode in (ReleaseMode.LIMITED, ReleaseMode.DETAILED):
             diagnostic = output_policy.safe_diagnostics(result)
             # Execution identity fields are releasable structured provenance
             # (D8 governance reads them); never secrets.
@@ -322,14 +487,9 @@ class _VerificationTools:
             # head of the first traceback only.  Without it a real failing
             # test is undebuggable (exit code alone cannot locate the fault);
             # the full body still never leaves the operator side.
-            from .release_contracts import (
-                ReleaseMode as _ReleaseMode,
-                effective_release_mode as _effective,
-            )
-
             if (
-                _effective(contract.release_mode, contract)
-                is _ReleaseMode.DETAILED
+                mode is ReleaseMode.DETAILED
+                and not contract.sensitive
                 and verdict in ("failed", "unknown")
             ):
                 from ..sandbox.test_workspace import extract_diagnostics
@@ -346,8 +506,6 @@ class _VerificationTools:
             # §2 producer_rules execution point: when rules are configured,
             # a field is shown only if a rule names it AND names the trusted
             # producer that generated it; unlisted fields are never shown.
-            from .release_contracts import apply_producer_rules
-
             diagnostic = apply_producer_rules(
                 diagnostic, contract.producer_rules,
             )
@@ -359,6 +517,11 @@ class _VerificationTools:
             capture_truncated=bool(
                 result.stdout_truncated or result.stderr_truncated
             ),
+            environment_verified=environment_verified,
+            environment_signal=signal,
+            missing_dependencies=names,
+            collection_regression=collection_regression,
+            isolation=isolation,
         )
         return _bounded_json(receipt, self._limits.max_tool_result_chars)
 
@@ -393,6 +556,7 @@ def build_verified_coding_tool_registry(
     plan_board: PlanBoard | None = None,
     post_build_registrars: Sequence = (),
     protected_patterns: tuple[str, ...] = (),
+    dependency_scope: DependencyScope | None = None,
 ) -> CodingToolRegistry:
     """构建 D3 read/search + D4 patch + D5 test/git/finalize 的完整目录。"""
     repository_limits = repository_limits or RepositoryToolLimits()
@@ -448,6 +612,7 @@ def build_verified_coding_tool_registry(
             verification,
             tool_limits,
             release_contracts=getattr(runner, "release_contract", None),
+            dependency_scope=dependency_scope,
         )
         if plan_board is not None:
             register_plan_tool(registry, plan_board)
@@ -469,10 +634,12 @@ def _register_verification_tools(
     git: GitFacade,
     verification: VerificationLedger,
     limits: D5ToolLimits,
-    release_contracts=None,
+    release_contracts: _ContractResolver | None = None,
+    dependency_scope: DependencyScope | None = None,
 ) -> None:
     tools = _VerificationTools(
         runner, git, verification, limits, release_contracts=release_contracts,
+        dependency_scope=dependency_scope,
     )
     empty_schema = {
         "type": "object",
@@ -496,6 +663,29 @@ def _register_verification_tools(
         ),
         tools.run_test_profile,
     )
+    if dependency_scope is not None:
+        registry.register(
+            ToolSpec(
+                "request_dependency_preparation",
+                "Ask for a human handoff for approved missing dependencies of this run. "
+                "Does not install anything.",
+                PreparationArguments,
+                {
+                    "type": "object",
+                    "properties": {
+                        "profile_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                        "packages": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                            "maxItems": 8,
+                        },
+                    },
+                    "required": ["profile_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            tools.request_dependency_preparation,
+        )
     for name, description, handler in (
         ("git_status", "Read bounded Git status without repository-defined executors.", tools.git_status),
         ("git_diff", "Read bounded agent-owned Git diff without external diff or textconv.", tools.git_diff),

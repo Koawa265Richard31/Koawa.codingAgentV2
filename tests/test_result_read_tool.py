@@ -17,22 +17,25 @@ from koawa_agent_v2.control.sqlite_store import SqliteEventStore
 from koawa_agent_v2.execution.loop import ToolExecutionContext
 from koawa_agent_v2.model.protocol import ModelCallRef, ToolCallItem
 from koawa_agent_v2.retrieval.result_read_tool import register_result_read_tool
+from koawa_agent_v2.retrieval.projection import ResultProjectionStore
 from koawa_agent_v2.tools.registry import ToolRegistry
+from koawa_agent_v2.verification.dependency_preparation import DependencyScope
+from koawa_agent_v2.verification.release_contracts import ProfileReleaseContract, ReleaseMode
 from tests.test_wp_d_r2 import _publish_projection_fixture
 
 
 class ResultReadToolTest(unittest.TestCase):
-    def _registry(self, store, runtime):
+    def _registry(self, store, runtime, **release):
         registry = ToolRegistry()
-        register_result_read_tool(registry, store=store, runtime=runtime)
+        register_result_read_tool(registry, store=store, runtime=runtime, **release)
         return registry
 
-    def _execute(self, registry, queued, arguments):
+    def _execute(self, registry, queued, arguments, name="read_result_projection"):
         call = ToolCallItem(
             0,
             "item-rr",
             "rr",
-            "read_result_projection",
+            name,
             json.dumps(arguments),
         )
         exec_context = ToolExecutionContext(
@@ -42,8 +45,7 @@ class ResultReadToolTest(unittest.TestCase):
             ModelCallRef(uuid4(), "rr"),
             turn_id=queued.turn_id,
         )
-        dispatch = getattr(registry, "exec" + "ute")
-        return dispatch(call, context=exec_context)
+        return registry.execute(call, context=exec_context)
 
     def test_published_projection_is_readable_by_reference(self) -> None:
         with tempfile.TemporaryDirectory(prefix="koawa-rr-hit-") as tmp:
@@ -74,6 +76,69 @@ class ResultReadToolTest(unittest.TestCase):
             self.assertEqual(digest, payload["body_ref"]["source_content_sha256"])
             self.assertNotIn("stdout", json.dumps(payload))
             self.assertNotIn("stderr", json.dumps(payload))
+
+    def test_read_and_search_check_current_dependency_name_release(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="koawa-rr-name-release-") as tmp:
+            store = SqliteEventStore(Path(tmp, "store.db"))
+            runtime = ThreadRuntime(store)
+            thread = runtime.create_thread("repo")
+            queued = runtime.create_turn(
+                thread.thread_id, "run tests", expected_thread_version=thread.version
+            )
+            projections = ResultProjectionStore(store)
+            projections.publish(
+                turn_id=queued.turn_id,
+                thread_id=thread.thread_id,
+                run_id=uuid4(),
+                call_id="environment",
+                source_kind="test",
+                body_ref={
+                    "turn_id": str(queued.turn_id),
+                    "model_turn_id": str(uuid4()),
+                    "source_content_sha256": "a" * 64,
+                },
+                diagnostics={"receipt": {
+                    "applicability": {"profile_id": "unit", "profile_version": "v1"},
+                    "missing_dependencies": ["hypothesis", "rich"],
+                }},
+            )
+            for version, allowed, expected in (
+                ("v1", ("rich",), ["rich"]),
+                ("v2", ("hypothesis", "rich"), None),
+                ("v1", (), None),
+            ):
+                with self.subTest(version=version, allowed=allowed):
+                    contract = ProfileReleaseContract(
+                        "unit",
+                        version,
+                        audience_policy_ref="aud-v1",
+                        environment_ref="env-v1",
+                        release_mode=ReleaseMode.DETAILED,
+                    )
+                    registry = self._registry(
+                        store, runtime, contract_resolver=lambda _: contract,
+                        dependency_scope=DependencyScope(allowed_packages=allowed),
+                    )
+                    read = self._execute(
+                        registry, queued, {
+                            "turn_id": str(queued.turn_id), "call_id": "environment"
+                        }
+                    )
+                    search = self._execute(
+                        registry, queued, {}, name="search_result_projections"
+                    )
+                    for visible in (
+                        json.loads(read.content)["projection"],
+                        json.loads(search.content)["hits"][0]["projection"],
+                    ):
+                        self.assertEqual(
+                            expected,
+                            visible["diagnostics"]["receipt"].get("missing_dependencies"),
+                        )
+            self.assertEqual(
+                ("hypothesis", "rich"),
+                projections.read(queued.turn_id)[0]["diagnostics"]["receipt"]["missing_dependencies"],
+            )
 
     def test_unavailable_projection_reports_durable_marker(self) -> None:
         with tempfile.TemporaryDirectory(prefix="koawa-rr-unavail-") as tmp:

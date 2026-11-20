@@ -566,7 +566,7 @@ class InteractiveSessionTest(unittest.TestCase):
                         "api_key_env": "SF_CodingAgentTestKey",
                         "model": "Qwen/Qwen3.5-35B-A3B",
                     },
-                    "sandbox": {"runner": "host", "host_trust": "builtin_fixture"},
+                    "sandbox": {"runner": "host", "host_trust": "builtin_fixture", "allow_unisolated_execution": True},
                     "test_profiles": [
                         {
                             "profile_id": "unit",

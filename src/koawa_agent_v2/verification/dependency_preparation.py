@@ -90,6 +90,18 @@ def _allowed(name: str, scope: DependencyScope) -> bool:
     return False
 
 
+def releasable_names(
+    observed: tuple[str, ...], scope: DependencyScope
+) -> tuple[str, ...]:
+    """Return trusted spellings, not log text or matches on wildcard entries."""
+    observed_keys = {name.lower() for name in observed}
+    return tuple(dict.fromkeys(
+        entry
+        for entry in scope.allowed_packages
+        if _NAME.fullmatch(entry) and entry.lower() in observed_keys
+    ))[:8]
+
+
 def plan_preparation(
     requested: tuple[str, ...],
     scope: DependencyScope,

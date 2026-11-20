@@ -53,6 +53,7 @@ RELEASEABLE_FIELDS = frozenset(
         "duration_ms",
         "exit_code",
         "immutable_image_id",
+        "missing_dependencies",
         "outcome",
         "profile_digest",
         "stderr_bytes",

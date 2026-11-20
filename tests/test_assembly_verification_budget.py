@@ -43,7 +43,7 @@ def _write_config(root: Path, *, required: list[str], canary: str | None) -> Pat
             "model": "test-model",
             "provider": "siliconflow",
         },
-        "sandbox": {"runner": "host"},
+        "sandbox": {"runner": "host", "allow_unisolated_execution": True},
         "test_profiles": [
             {
                 "profile_id": name,
