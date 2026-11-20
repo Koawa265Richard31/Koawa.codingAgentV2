@@ -17,6 +17,7 @@ from uuid import UUID
 from ..execution.loop import AgentLoopError, ToolExecutionContext
 from .git import GitDiffSnapshot, GitFacade, GitStatusSnapshot
 from ..editing.transaction import PatchTransactionResult
+from .environment_signals import evidence_isolation
 from .runner import CommandResult
 
 
@@ -52,6 +53,15 @@ class VerificationLimits:
 class TestEvidence:
     generation: int
     result: CommandResult
+    collection_regression: tuple[int, int | None] | None = None
+
+    @property
+    def accepted(self) -> bool:
+        return (
+            self.result.passed
+            and not self.result.inputs_changed
+            and self.collection_regression is None
+        )
 
 
 @dataclass(slots=True)
@@ -92,6 +102,7 @@ class VerificationLedger:
             self._profile_ids, required_test_profiles
         )
         self._runs: dict[UUID, _RunEvidence] = {}
+        self._collection_baseline: dict[tuple[str, str], int] = {}
         self._lock = RLock()
 
     def record_patch(
@@ -119,7 +130,10 @@ class VerificationLedger:
         run_id: UUID,
         generation: int,
         result: CommandResult,
-    ) -> None:
+        *,
+        reported_count: int | None = None,
+        profile_version: str = "",
+    ) -> TestEvidence:
         if not isinstance(result, CommandResult):
             raise TypeError("result must be CommandResult")
         with self._lock:
@@ -135,8 +149,33 @@ class VerificationLedger:
                 or generation > state.generation
             ):
                 raise VerificationError("invalid_test_generation")
-            state.tests.append(TestEvidence(generation, result))
+            regression = None
+            if result.passed and not result.inputs_changed:
+                key = (result.profile_id, profile_version)
+                baseline = self._collection_baseline.get(key, 1)
+                if (
+                    (reported_count is None and key in self._collection_baseline)
+                    or (reported_count is not None and reported_count < baseline)
+                ):
+                    regression = (baseline, reported_count)
+                elif reported_count is not None and generation == state.generation:
+                    self._collection_baseline[key] = reported_count
+            # Even rejected evidence must replace older passing evidence at
+            # this generation. Keep the actual process outcome intact.
+            evidence = TestEvidence(generation, result, regression)
+            state.tests.append(evidence)
             self._invalidate_final(state)
+            return evidence
+
+    def latest_current_test(self, run_id: UUID, profile_id: str) -> TestEvidence | None:
+        """Read only the current generation of this run, never another run."""
+        with self._lock:
+            state = self._runs.get(run_id)
+            if state is not None:
+                for evidence in reversed(state.tests):
+                    if evidence.result.profile_id == profile_id:
+                        return evidence if evidence.generation == state.generation else None
+            return None
 
     def record_status(self, run_id: UUID, status: GitStatusSnapshot) -> None:
         with self._lock:
@@ -162,7 +201,7 @@ class VerificationLedger:
                 profile_id = evidence.result.profile_id
                 latest_by_profile[profile_id] = evidence
                 runs_by_profile[profile_id] += 1
-                if not evidence.result.passed:
+                if not evidence.accepted:
                     failures_by_profile[profile_id] += 1
             for profile_id in self._required_test_profiles:
                 latest = latest_by_profile.get(profile_id)
@@ -181,7 +220,11 @@ class VerificationLedger:
                     raise VerificationError(
                         "required_test_inputs_changed", profile_id=profile_id
                     )
-                if not latest.result.passed:
+                if latest.collection_regression is not None:
+                    raise VerificationError(
+                        "required_test_collection_regressed", profile_id=profile_id
+                    )
+                if not latest.accepted:
                     raise VerificationError(
                         "required_test_profile_not_passing", profile_id=profile_id
                     )
@@ -234,6 +277,21 @@ class VerificationLedger:
                 "optional_tests": optional_tests,
                 "test_runs": len(state.tests),
             }
+            # Issue #7 D2: the delivery carries the weakest boundary that
+            # produced the required evidence, so a consumer cannot mistake
+            # host results for sandboxed ones.
+            required_isolations = {
+                evidence_isolation(latest_by_profile[profile_id].result.backend)
+                for profile_id in self._required_test_profiles
+            }
+            if required_isolations == {"container"}:
+                payload["evidence_isolation"] = "container"
+            elif required_isolations == {"none"}:
+                payload["evidence_isolation"] = "none"
+            elif "unknown" in required_isolations:
+                payload["evidence_isolation"] = "unknown"
+            else:
+                payload["evidence_isolation"] = "mixed"
             # One-profile reports retain the D5 field for compatible consumers.
             # Multi-profile reports deliberately have no singular success field.
             if len(self._required_test_profiles) == 1:
@@ -360,7 +418,9 @@ def _command_evidence_json(evidence: TestEvidence) -> dict[str, object]:
         "duration_ms": result.duration_ms,
         "exit_code": result.exit_code,
         "generation": evidence.generation,
+        "accepted": evidence.accepted,
         "immutable_image_id": result.immutable_image_id,
+        "isolation": evidence_isolation(result.backend),
         "outcome": result.outcome.value,
         "profile_id": result.profile_id,
         "profile_digest": result.profile_digest,

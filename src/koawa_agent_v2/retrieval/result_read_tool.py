@@ -20,6 +20,7 @@ from ..execution.loop import ToolExecutionContext, ToolExecutionResult
 from ..tools.errors import tool_error_result
 from ..tools.registry import ToolRegistry
 from ..tools.schema import ToolSpec
+from ..verification.dependency_preparation import DependencyScope, releasable_names
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,13 +121,55 @@ def register_result_read_tool(
     store,
     runtime,
     contract_resolver=None,
+    dependency_scope: DependencyScope | None = None,
 ) -> None:
     """Register both read tools on a not-yet-sealed registry.
 
     ``contract_resolver`` (optional) resolves a profile id to its CURRENT
     release contract; the N1 search uses it for per-profile granularity.
     Callers without contracts (test doubles) get metadata granularity.
+    Dependency names require current authority for either model-facing read;
+    the immutable projection used by durable delivery is not rewritten.
     """
+
+    def current_projection_view(projection):
+        if not isinstance(projection, dict):
+            return projection
+        diagnostics = projection.get("diagnostics")
+        receipt = diagnostics.get("receipt") if isinstance(diagnostics, dict) else None
+        if not isinstance(receipt, dict) or "missing_dependencies" not in receipt:
+            return projection
+        approved: tuple[str, ...] = ()
+        source = receipt.get("applicability")
+        names = receipt["missing_dependencies"]
+        if (
+            dependency_scope is not None
+            and contract_resolver is not None
+            and isinstance(source, dict)
+            and isinstance(source.get("profile_id"), str)
+            and isinstance(names, list)
+            and all(isinstance(name, str) for name in names)
+        ):
+            try:
+                contract = contract_resolver(source["profile_id"])
+                if (
+                    contract is not None
+                    and contract.profile_id == source["profile_id"]
+                    and contract.profile_version == source.get("profile_version")
+                    and contract.allows_dependency_names()
+                ):
+                    approved = releasable_names(tuple(names), dependency_scope)
+            except Exception:
+                pass  # A failed release lookup never reopens names.
+        visible_receipt = dict(receipt)
+        if approved:
+            visible_receipt["missing_dependencies"] = list(approved)
+        else:
+            del visible_receipt["missing_dependencies"]
+        return {
+            **projection,
+            "diagnostics": {**diagnostics, "receipt": visible_receipt},
+        }
 
     def read_handler(
         arguments: ResultReadArguments, *, context: ToolExecutionContext
@@ -158,7 +201,7 @@ def register_result_read_tool(
                     "availability": result["availability"],
                     "error_code": result["error_code"],
                     "model_turn_id": result.get("model_turn_id"),
-                    "projection": result["projection"],
+                    "projection": current_projection_view(result["projection"]),
                     "matches": result.get("matches"),
                     "scan_truncated": bool(result.get("scan_truncated")),
                 },
@@ -188,7 +231,11 @@ def register_result_read_tool(
         return ToolExecutionResult(
             json.dumps(
                 {
-                    "hits": result["hits"],
+                    "hits": [
+                        {**hit, "projection": current_projection_view(hit["projection"])}
+                        if "projection" in hit else hit
+                        for hit in result["hits"]
+                    ],
                     "watermark": result["watermark"],
                     "next_cursor": result["next_cursor"],
                     "truncated": result["truncated"],

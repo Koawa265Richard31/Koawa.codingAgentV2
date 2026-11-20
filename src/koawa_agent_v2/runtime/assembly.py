@@ -121,7 +121,7 @@ READ_TOOL_NAMES = (
     "search_result_projections",
 )
 WRITE_TOOL_NAMES = ("apply_patch",)
-TEST_TOOL_NAMES = ("run_test_profile",)
+TEST_TOOL_NAMES = ("run_test_profile", "request_dependency_preparation")
 
 
 class RuntimeAssemblyError(RuntimeError):
@@ -573,6 +573,7 @@ def assemble_execution_plane(
                 store=control.store,
                 runtime=control.runtime,
                 contract_resolver=getattr(runner, "release_contract", None),
+                dependency_scope=dependency_scope,
             )
 
         # Hardening E1/E2: the JSON config admits up to 64 required profiles while
@@ -589,6 +590,16 @@ def assemble_execution_plane(
                 else min(32, max(4, 4 * required_count))
             )
         )
+        from ..verification.dependency_preparation import DependencyScope
+
+        dependency_scope = None
+        if config.policy.dependency_allowed_packages:
+            dependency_scope = DependencyScope(
+                allowed_packages=config.policy.dependency_allowed_packages,
+                allow_install=config.policy.dependency_allow_install,
+                max_packages=config.policy.dependency_max_packages,
+                index_urls=config.policy.dependency_index_urls,
+            )
         builtin_registry = build_verified_coding_tool_registry(
             config.repo,
             command_runner=runner,
@@ -602,7 +613,8 @@ def assemble_execution_plane(
             ),
             # Policy gate: configured protected patterns (e.g. "tests/")
             # are refused at the patch-tool boundary.
-            protected_patterns=tuple(config.policy.protected_paths),
+            protected_patterns=config.policy.verification_protected_paths,
+            dependency_scope=dependency_scope,
         )
         mcp_sessions, mcp_bindings = _connect_execution_mcp_servers(
             control, granted_plan, launcher_builder=launcher_builder,
@@ -1223,7 +1235,7 @@ def _bind_ledger_policy(
         if call.name == "apply_patch":
             side_effect = SideEffectClass.IDEMPOTENT_WRITE
             sandbox_profile_id = "builtin-patch"
-        elif call.name == "run_test_profile":
+        elif call.name in TEST_TOOL_NAMES:
             side_effect = SideEffectClass.READ_ONLY
             sandbox_profile_id = "sandbox-test"
         else:
