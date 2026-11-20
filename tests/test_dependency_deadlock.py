@@ -12,6 +12,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,6 +32,7 @@ from koawa_agent_v2.verification.environment_signals import (
     classify_environment_failure,
     parse_test_count,
 )
+from koawa_agent_v2.verification.finalization import TestEvidence
 from koawa_agent_v2.verification.release_contracts import (
     ProfileReleaseContract,
     ReleaseMode,
@@ -221,6 +223,11 @@ class TestCountTest(unittest.TestCase):
 
     def test_larger_count_does_not_hide_smaller_report(self) -> None:
         self.assertEqual(2, parse_test_count("collected 99 items\nRan 2 tests in 0.01s\n"))
+
+    def test_passing_process_with_changed_inputs_is_not_accepted_evidence(self) -> None:
+        result = replace(_result(CommandOutcome.PASSED), inputs_changed=True)
+        self.assertTrue(result.passed)
+        self.assertFalse(TestEvidence(0, result).accepted)
 
 
 class EnvironmentReceiptTest(_RepoCase):

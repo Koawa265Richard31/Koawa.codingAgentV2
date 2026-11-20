@@ -57,7 +57,11 @@ class TestEvidence:
 
     @property
     def accepted(self) -> bool:
-        return self.result.passed and self.collection_regression is None
+        return (
+            self.result.passed
+            and not self.result.inputs_changed
+            and self.collection_regression is None
+        )
 
 
 @dataclass(slots=True)
