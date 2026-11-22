@@ -39,10 +39,6 @@ from .config_models import (
     SandboxConfig,
     SandboxRunner,
     TestProfileConfig,
-<<<<<<< main
-    _DEFAULT_PROTECTED_PATHS,
-=======
->>>>>>> feat/merge-authorization
     _PROFILE_ID,
 )
 from .memory import MemoryConfig, MemoryConfigError
@@ -308,18 +304,6 @@ def _reject_secret_config_literals(document: Mapping[str, Any]) -> None:
             for option_value in raw_options.values():
                 if isinstance(option_value, str) and _credential_shape(option_value):
                     raise RuntimeConfigError("config_secret_in_generic_field")
-<<<<<<< main
-    policy = document.get("policy")
-    if isinstance(policy, dict):
-        for key in ("dependency_allowed_packages", "dependency_index_urls"):
-            values = policy.get(key)
-            if isinstance(values, list) and any(
-                isinstance(value, str) and _credential_shape(value)
-                for value in values
-            ):
-                raise RuntimeConfigError("config_secret_in_generic_field")
-=======
->>>>>>> feat/merge-authorization
     for section, argv_key, env_key in (
         ("test_profiles", "argv", "environment"),
         ("mcp_servers", "command", "environment"),
@@ -460,14 +444,7 @@ def _parse_provider(value: Any, *, strict_options: bool = False) -> ProviderConf
 def _parse_sandbox(value: Any) -> SandboxConfig:
     if not isinstance(value, dict):
         raise RuntimeConfigError("invalid_sandbox_config")
-<<<<<<< main
-    allowed = {
-        "runner", "image_id", "docker_executable", "host_trust",
-        "allow_unisolated_execution",
-    }
-=======
     allowed = {"runner", "image_id", "docker_executable", "host_trust"}
->>>>>>> feat/merge-authorization
     _reject_unknown(value, allowed, "invalid_sandbox_config")
     try:
         runner_value = value.get("runner", "docker")
@@ -482,23 +459,11 @@ def _parse_sandbox(value: Any) -> SandboxConfig:
             if isinstance(host_trust_value, RepositoryTrustMode)
             else RepositoryTrustMode(host_trust_value)
         )
-<<<<<<< main
-        allow_unisolated = value.get("allow_unisolated_execution", False)
-        if not isinstance(allow_unisolated, bool):
-            raise RuntimeConfigError("invalid_sandbox_config")
-        if runner is SandboxRunner.HOST and not allow_unisolated:
-            raise RuntimeConfigError("unisolated_execution_forbidden")
-=======
->>>>>>> feat/merge-authorization
         return SandboxConfig(
             runner=runner,
             image_id=value.get("image_id"),
             docker_executable=value.get("docker_executable", "docker"),
             host_trust=host_trust,
-<<<<<<< main
-            allow_unisolated_execution=allow_unisolated,
-=======
->>>>>>> feat/merge-authorization
         )
     except RuntimeConfigError:
         raise
@@ -798,20 +763,8 @@ def _parse_policy(value: Any) -> PolicyConfig:
         "test_decision",
         "principal_scopes",
         "protected_paths",
-<<<<<<< main
-        "dependency_allowed_packages",
-        "dependency_allow_install",
-        "dependency_max_packages",
-        "dependency_index_urls",
     }
     _reject_unknown(value, allowed, "invalid_policy_config")
-    for key in ("protected_paths", "dependency_allowed_packages", "dependency_index_urls"):
-        if key in value and not isinstance(value[key], list):
-            raise RuntimeConfigError("invalid_policy_config")
-=======
-    }
-    _reject_unknown(value, allowed, "invalid_policy_config")
->>>>>>> feat/merge-authorization
     try:
         return PolicyConfig(
             policy_version=value.get("policy_version", "policy-v1"),
@@ -829,17 +782,7 @@ def _parse_policy(value: Any) -> PolicyConfig:
                     ),
                 )
             ),
-<<<<<<< main
-            protected_paths=tuple(
-                value.get("protected_paths", _DEFAULT_PROTECTED_PATHS)
-            ),
-            dependency_allowed_packages=tuple(value.get("dependency_allowed_packages", ())),
-            dependency_allow_install=value.get("dependency_allow_install", False),
-            dependency_max_packages=value.get("dependency_max_packages", 8),
-            dependency_index_urls=tuple(value.get("dependency_index_urls", ())),
-=======
             protected_paths=tuple(value.get("protected_paths", ())),
->>>>>>> feat/merge-authorization
         )
     except RuntimeConfigError:
         raise

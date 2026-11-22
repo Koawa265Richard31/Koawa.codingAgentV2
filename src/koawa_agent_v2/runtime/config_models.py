@@ -34,14 +34,6 @@ _CONFIG_ERROR = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _PROFILE_ID = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
 _MCP_SERVER_ID = re.compile(r"[a-z][a-z0-9_]{0,63}")
-<<<<<<< main
-_DEFAULT_PROTECTED_PATHS = (
-    "tests/", "test/", "test_", "conftest", "pyproject.toml",
-    "pytest.ini", "tox.ini", "setup.cfg",
-)
-_DEPENDENCY_ENTRY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\*?")
-=======
->>>>>>> feat/merge-authorization
 # §8.3: loader / code-injection environment variables are hard-denied for
 # every MCP server config (compared casefolded on every platform).
 _MCP_INJECTION_ENV_CASEFOLD = frozenset({
@@ -651,12 +643,6 @@ class SandboxConfig:
     image_id: str | None = None
     docker_executable: str = "docker"
     host_trust: RepositoryTrustMode = RepositoryTrustMode.USER_CONFIRMED
-<<<<<<< main
-    # JSON ingress requires explicit opt-in. Direct construction is trusted
-    # Python code (also used by the in-process test fixtures).
-    allow_unisolated_execution: bool = False
-=======
->>>>>>> feat/merge-authorization
 
     def __post_init__(self) -> None:
         if not isinstance(self.runner, SandboxRunner):
@@ -679,11 +665,6 @@ class SandboxConfig:
         )
         if not isinstance(self.host_trust, RepositoryTrustMode):
             raise RuntimeConfigError("invalid_host_trust")
-<<<<<<< main
-        if not isinstance(self.allow_unisolated_execution, bool):
-            raise RuntimeConfigError("invalid_sandbox_config")
-=======
->>>>>>> feat/merge-authorization
 
     def __repr__(self) -> str:
         return (
@@ -708,15 +689,7 @@ class PolicyConfig:
     # exact paths, directory prefixes ending in "/", or basename prefixes
     # (e.g. "test_").  Removing the opportunity is stronger than auditing
     # a diff afterwards: the edit is refused at the tool boundary.
-<<<<<<< main
-    protected_paths: tuple[str, ...] = _DEFAULT_PROTECTED_PATHS
-    dependency_allowed_packages: tuple[str, ...] = ()
-    dependency_allow_install: bool = False
-    dependency_max_packages: int = 8
-    dependency_index_urls: tuple[str, ...] = ()
-=======
     protected_paths: tuple[str, ...] = ()
->>>>>>> feat/merge-authorization
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -752,31 +725,6 @@ class PolicyConfig:
             "protected_paths",
             tuple(dict.fromkeys(self.protected_paths)),
         )
-<<<<<<< main
-        if (
-            not isinstance(self.dependency_allowed_packages, tuple)
-            or any(
-                not isinstance(name, str)
-                or _DEPENDENCY_ENTRY.fullmatch(name) is None
-                for name in self.dependency_allowed_packages
-            )
-            or not isinstance(self.dependency_allow_install, bool)
-            or type(self.dependency_max_packages) is not int
-            or not 1 <= self.dependency_max_packages <= 64
-        ):
-            raise RuntimeConfigError("invalid_dependency_scope")
-        if not isinstance(self.dependency_index_urls, tuple) or any(
-            not isinstance(url, str) or not url.startswith("https://")
-            for url in self.dependency_index_urls
-        ):
-            raise RuntimeConfigError("invalid_dependency_index")
-
-    @property
-    def verification_protected_paths(self) -> tuple[str, ...]:
-        """Project-specific paths extend, rather than replace, the defaults."""
-        return tuple(dict.fromkeys((*_DEFAULT_PROTECTED_PATHS, *self.protected_paths)))
-=======
->>>>>>> feat/merge-authorization
 
     def __repr__(self) -> str:
         return (
@@ -907,11 +855,6 @@ class RuntimeConfig:
         object.__setattr__(
             self, "required_test_profiles", tuple(sorted(required_profiles))
         )
-<<<<<<< main
-        if not self.policy.protected_paths:
-            raise RuntimeConfigError("verification_requires_protected_tests")
-=======
->>>>>>> feat/merge-authorization
         if not isinstance(self.mcp_servers, tuple) or any(
             not isinstance(value, McpServerConfig) for value in self.mcp_servers
         ):

@@ -218,8 +218,6 @@ class AgentControlPlane:
             now=self.now,
             faults=self._faults,
         )
-<<<<<<< main
-=======
         # Issue #18 F2: when an owner is configured, root agents must be
         # issued by an existing session created by that owner.  None keeps the
         # legacy construction path (tests / embedded use) available.
@@ -231,7 +229,6 @@ class AgentControlPlane:
             raise ValueError("root_principal_id must be non-empty text")
         self._owner_id = owner_id
         self._root_principal_id = root_principal_id
->>>>>>> feat/merge-authorization
         # Incremental, process-local index over the append-only global log.
         # It never asserts truth: each scan consumes the durable tail after the
         # last observed global position before returning the accumulated spawns.
