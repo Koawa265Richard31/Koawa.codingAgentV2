@@ -2852,6 +2852,78 @@ class AgentControlPlane:
         if principal_id != self._root_principal_id:
             raise AgentError("root_principal_not_issued")
 
+    def authorize_merge(
+        self, request, *, parent_agent_id: UUID, parent_run_id: UUID | None
+    ) -> None:
+        """只复核合并授权的身份与围栏;补丁内容校验归 workspace.merge。
+
+        与 :meth:`_validate_spawn_parent` 同风格:逐条失败闭合为稳定错误码,
+        全部通过时返回 ``None``。patch digest/路径/限额校验由
+        ``workspace.merge.validate_merge_request`` 承担,这里不重复。类型引用
+        用方法内本地导入破循环(与 :meth:`_narrow_delegated_identity` 的函数级
+        导入同一先例),模块顶部 import 区不动。
+        """
+        from ..workspace.merge import MergeRequest
+
+        if not isinstance(request, MergeRequest):
+            raise AgentError("invalid_merge_request")
+        child = self.graph.load(request.source_agent_id)
+        if child is None:
+            raise AgentError("merge_source_agent_missing")
+        parent = self.graph.load(parent_agent_id)
+        if parent is None:
+            raise AgentError("merge_parent_agent_missing")
+        # 父级围栏:复用 spawn 侧的既有错误码。RUNNING 时不区分缺 run 与
+        # 错 run,统一按围栏拒绝(与 _validate_spawn_parent 的两分法有意不同)。
+        if parent.state in (
+            AgentState.COMPLETED,
+            AgentState.FAILED,
+            AgentState.CANCELLED,
+        ):
+            raise AgentError("parent_agent_not_active")
+        if parent.state is AgentState.ORPHANED:
+            raise AgentError("parent_agent_orphaned")
+        if parent.state is AgentState.RUNNING:
+            if parent_run_id is None or parent_run_id != parent.run_id:
+                raise AgentError("parent_run_fenced")
+        # 链检查:parent 必须在 child 的严格祖先路径上。带 visited 防环,
+        # 走法与 _ancestor_principals / root_for 一致;祖先流缺失即"走不到"。
+        if child.agent_id == parent_agent_id:
+            raise AgentError("merge_parent_not_in_chain")
+        visited: set[UUID] = {child.agent_id}
+        ancestor_ids: set[UUID] = set()
+        next_id: UUID | None = child.parent_agent_id
+        while next_id is not None and next_id not in visited:
+            visited.add(next_id)
+            ancestor_ids.add(next_id)
+            ancestor = self.graph.load(next_id)
+            if ancestor is None:
+                break
+            next_id = ancestor.parent_agent_id
+        if parent_agent_id not in ancestor_ids:
+            raise AgentError("merge_parent_not_in_chain")
+
+    def record_merge_effect(self, request, *, parent_agent_id: UUID):
+        """把一次合并请求确定性入账 workspace-effect 账本。
+
+        账本语义(确定性 effect id、幂等、五字段持久载荷)全部归
+        ``workspace.merge.record_merge_effect``;本方法只把控制平面的事件存储
+        与时钟接到 ``WorkspaceEffectStore`` 上再委托。类型引用用方法内本地导入
+        破循环(与 :meth:`authorize_merge` 同一先例),模块顶部 import 区不动。
+        """
+        from ..workspace.effects import WorkspaceEffectStore
+        from ..workspace.merge import (
+            MergeRequest,
+            record_merge_effect as _record_merge_effect,
+        )
+
+        if not isinstance(request, MergeRequest):
+            raise AgentError("invalid_merge_request")
+        store = WorkspaceEffectStore(self.event_store, clock=self._clock)
+        return _record_merge_effect(
+            store, request=request, parent_agent_id=parent_agent_id
+        )
+
     def _validate_spawn_parent(
         self,
         parent: AgentRecord,
