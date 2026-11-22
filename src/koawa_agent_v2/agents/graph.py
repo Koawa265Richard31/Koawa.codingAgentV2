@@ -75,6 +75,7 @@ class AgentRecord:
     result_ref: str | None = None
     result_digest: str | None = None
     legacy_spawn: bool = False
+    change_scope: tuple[str, ...] = ()
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -122,6 +123,7 @@ class AgentRecord:
             "result_ref": self.result_ref,
             "result_digest": self.result_digest,
             "legacy_spawn": self.legacy_spawn,
+            "change_scope": list(self.change_scope),
         }
 
 
@@ -174,6 +176,25 @@ def _exact_keys(payload: Mapping[str, Any], keys: set[str]) -> None:
         raise AgentError("corrupt_agent_stream")
     if set(payload.keys()) != keys:
         raise AgentError("corrupt_agent_stream")
+
+
+_SPAWNED_V2_KEYS = frozenset(
+    {
+        "agent_id",
+        "parent_agent_id",
+        "root_agent_id",
+        "task_id",
+        "attempt",
+        "run_id",
+        "principal_id",
+        "scopes",
+        "context_mode",
+        "created_at",
+        "depth",
+        "capacity_reservation_id",
+        "budget_reservation_id",
+    }
+)
 
 
 def _optional_datetime(value: Any) -> datetime | None:
@@ -230,23 +251,15 @@ def rebuild_agent(
         if event.event_type == "agent.spawned.v2":
             if record is not None or event.stream_version != 0:
                 raise AgentError("corrupt_agent_stream")
+            # change_scope is the one optional v2 key: streams written before
+            # the delegation scope existed replay without it (record default
+            # ()), the same way spawned.v1 replay leaves the newer fields on
+            # their dataclass defaults.  Any other unknown or missing field
+            # still corrupts the stream.
             _exact_keys(
                 payload,
-                {
-                    "agent_id",
-                    "parent_agent_id",
-                    "root_agent_id",
-                    "task_id",
-                    "attempt",
-                    "run_id",
-                    "principal_id",
-                    "scopes",
-                    "context_mode",
-                    "created_at",
-                    "depth",
-                    "capacity_reservation_id",
-                    "budget_reservation_id",
-                },
+                _SPAWNED_V2_KEYS
+                | ({"change_scope"} if "change_scope" in payload else set()),
             )
             parent = _require_uuid(payload, "parent_agent_id")
             root = _require_uuid(payload, "root_agent_id")
@@ -281,6 +294,7 @@ def rebuild_agent(
                 depth=depth,
                 capacity_reservation_id=capacity_reservation,
                 budget_reservation_id=budget_reservation,
+                change_scope=tuple(sorted(payload.get("change_scope", ()))),
             )
             continue
         if record is None or event.stream_version != record.version + 1:

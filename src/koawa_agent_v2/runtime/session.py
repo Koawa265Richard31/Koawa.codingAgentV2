@@ -837,3 +837,7 @@ class SessionJournal:
             evidence_digest=expected_post,
         )
         return target
+<<<<<<< main
+=======
+
+>>>>>>> feat/merge-authorization

@@ -26,6 +26,9 @@ from ..context.index import RepositoryIndex
 from ..telemetry.trace import BestEffortTraceSink, TraceProbe, TraceStore
 from .truth import RuntimeTruthDocument, RuntimeTruthVerifier
 
+# Issue #18 F2: the session owner recorded on thread.created.v1.
+_OWNER_ID = "unified"
+
 
 @dataclass(frozen=True, slots=True)
 class UnifiedResult:
@@ -60,6 +63,10 @@ class UnifiedAgentRuntime:
             limits=AgentBudgetLimits(
                 max_depth=3, max_total_agents=8, max_concurrent_children=4
             ),
+            # Issue #18 F2: root agents are issued by a session this runtime
+            # created, never by a caller-supplied principal name.
+            owner_id=_OWNER_ID,
+            root_principal_id="root",
         )
         self.index = RepositoryIndex(self.repo)
         self.retriever = ContextRetriever(
@@ -89,12 +96,16 @@ class UnifiedAgentRuntime:
                 {"kind": "spawn", "attempt": 1},
             )
         )
+        # Issue #18 F2: the session is created first; the root agent is issued
+        # from that record rather than from a free-floating principal name.
+        thread = self.runtime.create_thread(str(self.repo))
         root = self.control.spawn_agent(
             parent_agent_id=None,
             task_id="root",
             principal_id="root",
             scopes=("read",),
             context_mode=ContextMode.FRESH,
+            thread_id=thread.thread_id,
         )
         child = self.control.spawn_agent(
             parent_agent_id=root.agent_id,

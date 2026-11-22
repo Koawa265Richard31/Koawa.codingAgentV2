@@ -61,6 +61,7 @@ class WorkspaceEffectKind(StrEnum):
     ARTIFACT_RETEST = "artifact_retest"
     ARTIFACT_DELIVER = "artifact_deliver"
     JOURNAL_EXPORT = "journal_export"
+    MERGE_APPLY = "merge_apply"
 
 
 class WorkspaceEffectState(StrEnum):

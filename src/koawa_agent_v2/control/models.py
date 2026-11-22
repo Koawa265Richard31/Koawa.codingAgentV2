@@ -165,6 +165,9 @@ class ThreadState:
     created_at: datetime
     # 最后一条已应用事件的 occurred_at。
     updated_at: datetime
+    # Issue #18 F2: who created this session.  Root authority is issued from
+    # this record, not from a principal name supplied by the caller.
+    owner_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,6 +416,15 @@ def _apply_thread_event(
             raise CorruptEventStream("thread creation must be the first event")
         _require_uuid(event.payload, "thread_id", thread_id)
         workspace_ref = _require_text(event.payload, "workspace_ref")
+        # Issue #18 F2: the session record carries WHO created it, so root
+        # authority is issued here instead of being a caller-chosen name.
+        # Legacy threads (created before this field) replay with None and are
+        # simply unable to prove an owner.
+        raw_owner = event.payload.get("owner_id")
+        if raw_owner is not None and (
+            not isinstance(raw_owner, str) or not raw_owner.strip()
+        ):
+            raise CorruptEventStream("owner_id must be non-empty text")
         return ThreadState(
             thread_id=thread_id,
             workspace_ref=workspace_ref,
@@ -421,6 +433,7 @@ def _apply_thread_event(
             version=event.stream_version,
             created_at=event.occurred_at,
             updated_at=event.occurred_at,
+            owner_id=raw_owner,
         )
 
     if state is None:

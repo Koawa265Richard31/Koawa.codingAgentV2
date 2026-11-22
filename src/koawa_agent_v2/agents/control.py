@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+from ..control.event_store import StreamId
 from ..telemetry.faults import FaultPoint, adapt_fault_callback
 
 from .events import (
@@ -186,6 +187,8 @@ class AgentControlPlane:
         clock: Callable[[], datetime] | None = None,
         faults: FaultInjector = NO_FAULTS,
         fault_port=None,
+        owner_id: str | None = None,
+        root_principal_id: str = "root",
     ) -> None:
         for method in ("append_batch", "read_stream", "read_all", "current_global_position"):
             if not callable(getattr(event_store, method, None)):
@@ -215,6 +218,20 @@ class AgentControlPlane:
             now=self.now,
             faults=self._faults,
         )
+<<<<<<< main
+=======
+        # Issue #18 F2: when an owner is configured, root agents must be
+        # issued by an existing session created by that owner.  None keeps the
+        # legacy construction path (tests / embedded use) available.
+        if owner_id is not None and (
+            not isinstance(owner_id, str) or not owner_id.strip()
+        ):
+            raise ValueError("owner_id must be non-empty text or None")
+        if not isinstance(root_principal_id, str) or not root_principal_id.strip():
+            raise ValueError("root_principal_id must be non-empty text")
+        self._owner_id = owner_id
+        self._root_principal_id = root_principal_id
+>>>>>>> feat/merge-authorization
         # Incremental, process-local index over the append-only global log.
         # It never asserts truth: each scan consumes the durable tail after the
         # last observed global position before returning the accumulated spawns.
@@ -252,14 +269,33 @@ class AgentControlPlane:
         scopes: tuple[str, ...],
         context_mode: ContextMode = ContextMode.FRESH,
         turn_id: UUID | None = None,
+        thread_id: UUID | None = None,
         parent_run_id: UUID | None = None,
         semantic_idempotency_key: str | None = None,
+        change_scope: tuple[str, ...] = (),
     ) -> AgentRecord:
         if not isinstance(task_id, str) or not task_id or len(task_id) > 256:
             raise AgentError("invalid_agent_task")
         if not isinstance(principal_id, str) or not principal_id or len(principal_id) > 128:
             raise AgentError("invalid_agent_principal")
         scopes = tuple(sorted(set(scopes)))
+        # 委派作用域:声明后,该子代理导出的补丁路径必须命中其中之一才能被父级
+        # 授权合并。形状规则与 PolicyConfig.protected_paths 相同(runtime/
+        # config.py):精确路径、"/" 结尾目录前缀或裸词文件名前缀;空元组即不
+        # 限制。
+        if not isinstance(change_scope, tuple):
+            raise AgentError("invalid_agent_change_scope")
+        change_scope = tuple(sorted(set(change_scope)))
+        for pattern in change_scope:
+            if (
+                not isinstance(pattern, str)
+                or not pattern
+                or pattern.startswith("/")
+                or "\\" in pattern
+                or ".." in pattern.split("/")
+                or len(pattern) > 256
+            ):
+                raise AgentError("invalid_agent_change_scope")
         if semantic_idempotency_key is not None:
             if (
                 not isinstance(semantic_idempotency_key, str)
@@ -280,6 +316,11 @@ class AgentControlPlane:
         child_id = uuid5(command_id, "child")
         reservation_id = uuid5(command_id, "resource-reservation")
         if parent_agent_id is None:
+            # Issue #18 F2: root authority is issued by the session record,
+            # not chosen by the caller.  A root spawn must name the session it
+            # belongs to, and that session must have been created by this
+            # runtime's owner.
+            self._validate_session_root(thread_id, principal_id)
             return self._spawn_root(
                 command_id,
                 child_id,
@@ -289,6 +330,7 @@ class AgentControlPlane:
                 context_mode=context_mode,
                 turn_id=turn_id,
                 parent_run_id=parent_run_id,
+                change_scope=change_scope,
             )
         return self._spawn_child(
             command_id,
@@ -301,6 +343,7 @@ class AgentControlPlane:
             scopes=scopes,
             context_mode=context_mode,
             turn_id=turn_id,
+            change_scope=change_scope,
         )
 
     def _spawn_root(
@@ -314,6 +357,7 @@ class AgentControlPlane:
         context_mode: ContextMode,
         turn_id: UUID | None,
         parent_run_id: UUID | None,
+        change_scope: tuple[str, ...],
     ) -> AgentRecord:
         """Root spawn: a single spawned.v2 write; no pseudo reserve/release."""
         fingerprint = _fingerprint({
@@ -322,6 +366,7 @@ class AgentControlPlane:
             "task_id": task_id,
             "principal_id": principal_id,
             "scopes": list(scopes),
+            "change_scope": list(change_scope),
             "context_mode": context_mode.value,
             "turn_id": None if turn_id is None else str(turn_id),
             "limits": _limits_document(self.limits),
@@ -348,6 +393,7 @@ class AgentControlPlane:
                 observed_at=observed_at,
                 capacity_reservation_id=None,
                 budget_reservation_id=None,
+                change_scope=change_scope,
             )
             try:
                 self.event_store.append_batch(
@@ -379,6 +425,7 @@ class AgentControlPlane:
         scopes: tuple[str, ...],
         context_mode: ContextMode,
         turn_id: UUID | None,
+        change_scope: tuple[str, ...],
     ) -> AgentRecord:
         """Atomic four-stream spawn (section 5.5, P0-03).
 
@@ -399,6 +446,7 @@ class AgentControlPlane:
             "task_id": task_id,
             "principal_id": principal_id,
             "scopes": list(scopes),
+            "change_scope": list(change_scope),
             "context_mode": context_mode.value,
             "turn_id": None if turn_id is None else str(turn_id),
             "limits": _limits_document(self.limits),
@@ -412,7 +460,7 @@ class AgentControlPlane:
             parent = self.graph.load(parent_agent_id)
             if parent is None:
                 raise AgentError("parent_agent_missing")
-            self._validate_spawn_parent(parent, parent_run_id, scopes)
+            self._validate_spawn_parent(parent, parent_run_id, scopes, principal_id)
             if self.graph.has_cycle(parent_agent_id, child_id):
                 raise AgentError("agent_spawn_cycle")
             depth = (
@@ -497,6 +545,7 @@ class AgentControlPlane:
                 observed_at=observed_at,
                 capacity_reservation_id=reservation_id,
                 budget_reservation_id=reservation_id,
+                change_scope=change_scope,
             )
             writes = (
                 StreamWrite(
@@ -2010,11 +2059,144 @@ class AgentControlPlane:
 
         return self._root_budget(root_agent_id).active_count
 
+    def _validate_session_root(
+        self, thread_id: UUID | None, principal_id: str
+    ) -> None:
+        """Issue root authority from the session record (issue #18 F2).
+
+        With no owner configured this is the legacy path.  With an owner
+        configured, a root agent may only be created for an existing session
+        created by that owner, and only under the issued root principal name.
+        Forgery then requires writing the thread stream - CAS-guarded and
+        audited - instead of passing a string.
+        """
+
+        if self._owner_id is None:
+            return
+        if thread_id is None:
+            raise AgentError("root_spawn_requires_session")
+        if not isinstance(thread_id, UUID):
+            raise AgentError("invalid_session_reference")
+        head = self.event_store.read_stream(
+            StreamId("thread", thread_id), limit=1
+        )
+        if not head or head[0].event_type != "thread.created.v1":
+            raise AgentError("session_root_unissued")
+        owner = head[0].payload.get("owner_id")
+        if owner != self._owner_id:
+            raise AgentError("session_owner_mismatch")
+        if principal_id != self._root_principal_id:
+            raise AgentError("root_principal_not_issued")
+
+    def authorize_merge(
+        self, request, *, parent_agent_id: UUID, parent_run_id: UUID | None
+    ) -> None:
+        """只复核合并授权的身份与围栏;补丁内容校验归 workspace.merge。
+
+        与 :meth:`_validate_spawn_parent` 同风格:逐条失败闭合为稳定错误码,
+        全部通过时返回 ``None``。patch digest/路径/限额校验由
+        ``workspace.merge.validate_merge_request`` 承担,这里不重复(唯一的
+        例外是子代理声明了 ``change_scope`` 时的作用域命中检查,它是授权围栏
+        而非内容校验)。类型引用用方法内本地导入破循环(与
+        :meth:`_narrow_delegated_identity` 的函数级导入同一先例),模块顶部
+        import 区不动。
+        """
+        from ..workspace.merge import MergeRequest, patch_paths, path_in_scope
+
+        if not isinstance(request, MergeRequest):
+            raise AgentError("invalid_merge_request")
+        child = self.graph.load(request.source_agent_id)
+        if child is None:
+            raise AgentError("merge_source_agent_missing")
+        parent = self.graph.load(parent_agent_id)
+        if parent is None:
+            raise AgentError("merge_parent_agent_missing")
+        # 父级围栏:复用 spawn 侧的既有错误码。RUNNING 时不区分缺 run 与
+        # 错 run,统一按围栏拒绝(与 _validate_spawn_parent 的两分法有意不同)。
+        if parent.state in (
+            AgentState.COMPLETED,
+            AgentState.FAILED,
+            AgentState.CANCELLED,
+        ):
+            raise AgentError("parent_agent_not_active")
+        if parent.state is AgentState.ORPHANED:
+            raise AgentError("parent_agent_orphaned")
+        if parent.state is AgentState.RUNNING:
+            if parent_run_id is None or parent_run_id != parent.run_id:
+                raise AgentError("parent_run_fenced")
+        # 来源终态闸(维护者决定 2026-11-15):已取消/已失败的子代理不再产出
+        # 可合并的变更;COMPLETED/RUNNING/CREATED 不在此闸内。
+        if child.state is AgentState.CANCELLED:
+            raise AgentError("merge_source_cancelled")
+        if child.state is AgentState.FAILED:
+            raise AgentError("merge_source_failed")
+        # run 一致性:请求必须绑定子代理当前 run。child 从未 start_attempt 时
+        # record.run_id 为 None,同样不匹配即拒绝。COMPLETED 例外:terminal
+        # 结算按 reducer 语义清空 record.run_id(agent.completed.v2 分支,
+        # graph.py),补丁的 run 绑定只由 request.run_id 携带(正常流:子代理
+        # 跑完 -> 导出补丁 -> 父级授权),故 COMPLETED 来源不做记录比对。
+        # MergeRequest 无 __post_init__:手拼请求可携带 run_id=None,与
+        # record.run_id 同为 None 时"!= "为假会放行——补丁必须绑定具体 run,
+        # 无条件先拒。
+        if request.run_id is None:
+            raise AgentError("merge_source_run_mismatch")
+        if (
+            child.state is not AgentState.COMPLETED
+            and request.run_id != child.run_id
+        ):
+            raise AgentError("merge_source_run_mismatch")
+        # 委派作用域:子代理声明了 change_scope 时,补丁里每个路径都必须命中
+        # 作用域之一(三段匹配语义与 protected_patterns 相同)。路径解析用
+        # workspace.merge.patch_paths;解析失败按 invalid_merge_patch 原样
+        # 传出——补丁内容问题归 validate_merge_request 的码,这里不重复。
+        if child.change_scope:
+            for path in patch_paths(request.patch_json):
+                if not path_in_scope(path, child.change_scope):
+                    raise AgentError("merge_path_outside_change_scope")
+        # 链检查:parent 必须在 child 的严格祖先路径上。带 visited 防环,
+        # 走法与 _ancestor_principals / root_for 一致;祖先流缺失即"走不到"。
+        if child.agent_id == parent_agent_id:
+            raise AgentError("merge_parent_not_in_chain")
+        visited: set[UUID] = {child.agent_id}
+        ancestor_ids: set[UUID] = set()
+        next_id: UUID | None = child.parent_agent_id
+        while next_id is not None and next_id not in visited:
+            visited.add(next_id)
+            ancestor_ids.add(next_id)
+            ancestor = self.graph.load(next_id)
+            if ancestor is None:
+                break
+            next_id = ancestor.parent_agent_id
+        if parent_agent_id not in ancestor_ids:
+            raise AgentError("merge_parent_not_in_chain")
+
+    def record_merge_effect(self, request, *, parent_agent_id: UUID):
+        """把一次合并请求确定性入账 workspace-effect 账本。
+
+        账本语义(确定性 effect id、幂等、五字段持久载荷)全部归
+        ``workspace.merge.record_merge_effect``;本方法只把控制平面的事件存储
+        与时钟接到 ``WorkspaceEffectStore`` 上再委托。类型引用用方法内本地导入
+        破循环(与 :meth:`authorize_merge` 同一先例),模块顶部 import 区不动。
+        """
+        from ..workspace.effects import WorkspaceEffectStore
+        from ..workspace.merge import (
+            MergeRequest,
+            record_merge_effect as _record_merge_effect,
+        )
+
+        if not isinstance(request, MergeRequest):
+            raise AgentError("invalid_merge_request")
+        store = WorkspaceEffectStore(self.event_store, clock=self._clock)
+        return _record_merge_effect(
+            store, request=request, parent_agent_id=parent_agent_id
+        )
+
     def _validate_spawn_parent(
         self,
         parent: AgentRecord,
         parent_run_id: UUID | None,
         scopes: tuple[str, ...],
+        principal_id: str,
     ) -> None:
         if parent.state in (
             AgentState.COMPLETED,
@@ -2031,6 +2213,51 @@ class AgentControlPlane:
                 raise AgentError("parent_run_fenced")
         if not set(scopes).issubset(set(parent.scopes)):
             raise AgentError("child_scope_escalation")
+        # Issue #15 F1: policy rules match on the principal NAME, so claiming
+        # an ancestor's name is claiming its authority.  A child may inherit
+        # the parent's own identity (same name), or use a name no ancestor
+        # holds; impersonating any OTHER ancestor is refused.
+        if principal_id != parent.principal_id and principal_id in (
+            self._ancestor_principals(parent)
+        ):
+            raise AgentError("child_principal_impersonation")
+        if principal_id != parent.principal_id:
+            # Wiring gap (issue #18): the policy layer already owns "what a
+            # delegated identity may become" via Principal.narrow.  Delegate
+            # to it instead of keeping a second copy of the rule here.
+            self._narrow_delegated_identity(parent, principal_id, scopes)
+
+    def _narrow_delegated_identity(
+        self, parent: AgentRecord, principal_id: str, scopes: tuple[str, ...]
+    ) -> None:
+        from ..policy import PolicyError, Principal, narrow_child_principal
+
+        try:
+            narrowed = narrow_child_principal(
+                Principal(parent.principal_id, parent.scopes),
+                child_principal_id=principal_id,
+                requested_scopes=scopes,
+            )
+        except PolicyError as error:
+            raise AgentError(error.code) from None
+        if set(narrowed.scopes) != set(scopes):
+            # The policy layer intersected the request; anything dropped means
+            # the request exceeded the parent's authority.
+            raise AgentError("child_scope_escalation")
+
+    def _ancestor_principals(self, parent: AgentRecord) -> set[str]:
+        """Principal names held by this agent and every ancestor above it."""
+
+        names: set[str] = set()
+        visited: set[UUID] = set()
+        current: AgentRecord | None = parent
+        while current is not None and current.agent_id not in visited:
+            visited.add(current.agent_id)
+            names.add(current.principal_id)
+            if current.parent_agent_id is None:
+                break
+            current = self.graph.load(current.parent_agent_id)
+        return names
 
     def _spawned_event(
         self,
@@ -2049,6 +2276,7 @@ class AgentControlPlane:
         observed_at: datetime,
         capacity_reservation_id: UUID | None,
         budget_reservation_id: UUID | None,
+        change_scope: tuple[str, ...],
     ) -> NewEvent:
         return self._event(
             command_id,
@@ -2065,6 +2293,7 @@ class AgentControlPlane:
                 "run_id": None,
                 "principal_id": principal_id,
                 "scopes": list(scopes),
+                "change_scope": list(change_scope),
                 "context_mode": context_mode.value,
                 "created_at": observed_at.isoformat(),
                 "depth": depth,
