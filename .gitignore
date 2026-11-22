@@ -21,3 +21,9 @@ docs/note/OpenShell笔记_2026.9.16.md
 
 # 设计文档只保留本地,不再入库(维护者指示 2026-11-22)
 docs/
+
+# 已闭合轨道的历史存档只保留本地,不再入库(2026-11-22)
+audits/
+redteam/
+evals/
+examples/
