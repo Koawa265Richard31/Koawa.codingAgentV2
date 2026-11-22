@@ -767,6 +767,10 @@ def _parse_policy(value: Any) -> PolicyConfig:
         "dependency_allow_install",
         "dependency_max_packages",
         "dependency_index_urls",
+        "verification_protected_paths",
+        "approved_candidate_ids",
+        "require_review",
+        "max_candidate_changes",
     }
     _reject_unknown(value, allowed, "invalid_policy_config")
     try:
@@ -797,6 +801,14 @@ def _parse_policy(value: Any) -> PolicyConfig:
             dependency_index_urls=tuple(
                 value.get("dependency_index_urls", ())
             ),
+            verification_protected_paths=tuple(
+                value.get("verification_protected_paths", ())
+            ),
+            approved_candidate_ids=tuple(
+                value.get("approved_candidate_ids", ())
+            ),
+            require_review=bool(value.get("require_review", True)),
+            max_candidate_changes=value.get("max_candidate_changes", 1),
         )
     except RuntimeConfigError:
         raise

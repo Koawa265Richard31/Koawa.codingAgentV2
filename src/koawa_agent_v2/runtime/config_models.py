@@ -689,6 +689,10 @@ class PolicyConfig:
     # exact paths, directory prefixes ending in "/", or basename prefixes
     # (e.g. "test_").  Removing the opportunity is stronger than auditing
     # a diff afterwards: the edit is refused at the tool boundary.
+    verification_protected_paths: tuple[str, ...] = ()
+    approved_candidate_ids: tuple[str, ...] = ()
+    require_review: bool = True
+    max_candidate_changes: int = 1
     protected_paths: tuple[str, ...] = ()
     # C1 依赖准备范围(assembly 读取;缺省关闭,不构造 DependencyScope)。
     dependency_allowed_packages: tuple[str, ...] = ()
@@ -732,6 +736,22 @@ class PolicyConfig:
             for item in self.dependency_index_urls
         ):
             raise RuntimeConfigError("invalid_dependency_index")
+        if not isinstance(self.verification_protected_paths, tuple) or any(
+            not isinstance(item, str) for item in self.verification_protected_paths
+        ):
+            raise RuntimeConfigError("invalid_verification_protected_paths")
+        if not isinstance(self.approved_candidate_ids, tuple) or any(
+            not isinstance(item, str) for item in self.approved_candidate_ids
+        ):
+            raise RuntimeConfigError("invalid_approved_candidate_ids")
+        if not isinstance(self.require_review, bool):
+            raise RuntimeConfigError("invalid_require_review")
+        if (
+            not isinstance(self.max_candidate_changes, int)
+            or isinstance(self.max_candidate_changes, bool)
+            or self.max_candidate_changes < 1
+        ):
+            raise RuntimeConfigError("invalid_max_candidate_changes")
         for pattern in self.protected_paths:
             if (
                 not isinstance(pattern, str)
