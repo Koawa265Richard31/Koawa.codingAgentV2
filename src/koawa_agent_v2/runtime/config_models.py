@@ -690,6 +690,11 @@ class PolicyConfig:
     # (e.g. "test_").  Removing the opportunity is stronger than auditing
     # a diff afterwards: the edit is refused at the tool boundary.
     protected_paths: tuple[str, ...] = ()
+    # C1 依赖准备范围(assembly 读取;缺省关闭,不构造 DependencyScope)。
+    dependency_allowed_packages: tuple[str, ...] = ()
+    dependency_allow_install: bool = False
+    dependency_max_packages: int = 8
+    dependency_index_urls: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -710,6 +715,23 @@ class PolicyConfig:
         )
         if not isinstance(self.protected_paths, tuple):
             raise RuntimeConfigError("invalid_protected_paths")
+        if not isinstance(self.dependency_allowed_packages, tuple) or any(
+            not isinstance(item, str) or not item for item in self.dependency_allowed_packages
+        ):
+            raise RuntimeConfigError("invalid_dependency_scope")
+        if not isinstance(self.dependency_allow_install, bool):
+            raise RuntimeConfigError("invalid_dependency_scope")
+        if (
+            not isinstance(self.dependency_max_packages, int)
+            or isinstance(self.dependency_max_packages, bool)
+            or not 1 <= self.dependency_max_packages <= 64
+        ):
+            raise RuntimeConfigError("invalid_dependency_scope")
+        if not isinstance(self.dependency_index_urls, tuple) or any(
+            not isinstance(item, str) or not item.startswith("https://")
+            for item in self.dependency_index_urls
+        ):
+            raise RuntimeConfigError("invalid_dependency_index")
         for pattern in self.protected_paths:
             if (
                 not isinstance(pattern, str)
