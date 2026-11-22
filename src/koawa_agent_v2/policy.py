@@ -101,8 +101,15 @@ class Principal:
         child_principal_id: str,
         requested_scopes: Sequence[str],
     ) -> "Principal":
-        """Create a child whose authority is the parent/request intersection."""
+        """Create a child whose authority is the parent/request intersection.
 
+        The child may keep the parent's own name (inheritance) or take a new
+        one, but may never adopt the name of the principal it was delegated
+        BY - that is identity impersonation, not narrowing (issue #15 F1).
+        """
+
+        if child_principal_id in (self.principal_id, self.parent_principal_id):
+            raise PolicyError("child_principal_impersonation")
         requested = _canonical_identifiers(
             requested_scopes, pattern=_SCOPE, code="invalid_principal_scope"
         )
