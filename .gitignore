@@ -18,3 +18,6 @@ audits/2026-09-11-platform-audit/t1-run/
 
 # 本地笔记：只保留在工作区，不进入仓库
 docs/note/OpenShell笔记_2026.9.16.md
+
+# 设计文档只保留本地,不再入库(维护者指示 2026-11-22)
+docs/
